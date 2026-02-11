@@ -1,0 +1,453 @@
+# DocIntel - Enterprise Document Intelligence
+# ============================================
+# All images pinned to specific stable versions - never use :latest
+#
+# Prerequisites:
+#   - Native Ollama installed and running (ollama.ai)
+#   - Run ./scripts/setup.sh for first-time setup
+#
+# Usage:
+#   Infrastructure only: docker compose up -d
+#   With app services:   docker compose --profile app up -d
+
+services:
+  # ============================================================================
+  # Application Services
+  # ============================================================================
+  
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - REDIS_URL=redis://redis:6379
+      - DOCUMENT_SERVICE_URL=http://document-service:8081
+      - RAG_SERVICE_URL=http://rag-service:8000
+      - ADMIN_SERVICE_URL=http://admin-service:8082
+    depends_on:
+      - redis
+      - document-service
+      - rag-service
+    networks:
+      - docintel-network
+    profiles: ["app"]
+
+  document-service:
+    build: ./services/document-service
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel
+      - SPRING_DATASOURCE_USERNAME=docintel
+      - SPRING_DATASOURCE_PASSWORD=docintel_secret
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - RAG_SERVICE_URL=http://rag-service:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks:
+      - docintel-network
+    profiles: ["app"]
+
+  rag-service:
+    build: ./services/rag-service
+    ports:
+      - "8000:8000"
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      # Ollama runs natively on host for best performance (Metal on M1, CUDA on Linux)
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # LLM: Qwen3-4B (Apache 2.0 license)
+      - LITELLM_MODEL=ollama/qwen3:4b
+      - LITELLM_FALLBACKS=ollama/phi3:mini,ollama/qwen3:1.7b
+      # Embedding: nomic-embed-text (Apache 2.0, MTEB 62.39)
+      - EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
+      - RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+      # RAG Pipeline Configuration
+      - RAG_RETRIEVER_TOP_K=50
+      - RAG_RERANKER_TOP_K=10
+      - RAG_DEFAULT_TOP_K=5
+      # Document Service (for sample dataset record creation)
+      - DOCUMENT_SERVICE_URL=http://document-service:8081
+      # Observability (matches Langfuse auto-provisioned keys)
+      - LANGFUSE_HOST=http://langfuse-web:3000
+      - LANGFUSE_PUBLIC_KEY=lf_pk_1234567890
+      - LANGFUSE_SECRET_KEY=lf_sk_1234567890
+      # Database
+      - POSTGRES_URL=postgresql://docintel:docintel_secret@postgres:5432/docintel
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+    networks:
+      - docintel-network
+    # Allow container to reach host's Ollama (works on macOS by default, needed for Linux)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles: ["app"]
+    deploy:
+      resources:
+        reservations:
+          memory: 4G
+
+  admin-service:
+    build: ./services/admin-service
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - qdrant
+      - redis
+    networks:
+      - docintel-network
+    profiles: ["app"]
+
+  # Web UI - SvelteKit chat interface
+  web-ui:
+    build: ./services/web-ui
+    ports:
+      - "3001:3001"
+    environment:
+      - PUBLIC_API_URL=http://localhost:8080
+      - PUBLIC_APP_NAME=DocIntel
+      - NODE_ENV=production
+      - PORT=3001
+      # Auth configuration (set PUBLIC_AUTH_ENABLED=true to require login)
+      - PUBLIC_AUTH_ENABLED=${PUBLIC_AUTH_ENABLED:-false}
+      - PUBLIC_AUTHENTIK_ISSUER=http://localhost:9090/application/o/docintel
+      - PUBLIC_AUTHENTIK_CLIENT_ID=docintel
+    depends_on:
+      - api-gateway
+    networks:
+      - docintel-network
+    profiles: ["app"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ============================================================================
+  # Data Layer (pinned versions - never use :latest)
+  # ============================================================================
+
+  qdrant:
+    image: qdrant/qdrant:v1.16.3
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+      - ./config/qdrant:/qdrant/config:ro
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  postgres:
+    image: postgres:18.1-trixie
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=docintel
+      - POSTGRES_USER=docintel
+      - POSTGRES_PASSWORD=docintel_secret
+    volumes:
+      # PostgreSQL 18+ uses version-specific subdirectories under /var/lib/postgresql
+      - postgres-data:/var/lib/postgresql
+      - ./config/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docintel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    image: redis:7.4.0-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: >
+      --requirepass redissecret
+      --appendonly yes
+      --maxmemory 200mb
+      --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redissecret", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    command: server /data --address ":9000" --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ============================================================================
+  # AI Infrastructure
+  # ============================================================================
+  # NOTE: Ollama runs NATIVELY on the host (not in Docker) for best performance
+  # - M1/M2/M3 Macs: Uses Metal GPU acceleration via native Ollama
+  # - NVIDIA GPUs:   Uses CUDA via native Ollama
+  #
+  # Install Ollama: https://ollama.ai/download
+  # Setup script handles model downloads: ./scripts/setup.sh
+  # ============================================================================
+
+  # ============================================================================
+  # Observability (Langfuse v3 with ClickHouse)
+  # ============================================================================
+  # Based on official Langfuse docker-compose:
+  # https://github.com/langfuse/langfuse/blob/main/docker-compose.yml
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.1.3.23
+    restart: always
+    user: "101:101"
+    ports:
+      - "8123:8123"
+      - "9009:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user clickhouse --password clickhouse --query 'SELECT 1' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # Langfuse Worker - processes background jobs
+  # Using :3 tag as recommended by Langfuse (rolling v3.x updates)
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    environment: &langfuse-env
+      # Database
+      DATABASE_URL: postgresql://docintel:docintel_secret@postgres:5432/langfuse
+      # ClickHouse (single-node mode)
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: redissecret
+      # S3/MinIO for blob storage
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      # Auth & Security
+      SALT: docintel-salt-change-in-prod
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      NEXTAUTH_URL: http://localhost:3000
+      TELEMETRY_ENABLED: "false"
+    networks:
+      - docintel-network
+
+  # Langfuse Web - UI and API
+  # Using :3 tag as recommended by Langfuse (rolling v3.x updates)
+  langfuse-web:
+    image: langfuse/langfuse:3
+    restart: always
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: docintel-langfuse-secret-change-in-prod
+      # Auto-provisioned user for local development
+      # See: https://langfuse.com/self-hosting/administration/headless-initialization
+      LANGFUSE_INIT_ORG_ID: docintel-org
+      LANGFUSE_INIT_ORG_NAME: DocIntel
+      LANGFUSE_INIT_PROJECT_ID: docintel-project
+      LANGFUSE_INIT_PROJECT_NAME: DocIntel RAG
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: lf_pk_1234567890
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: lf_sk_1234567890
+      LANGFUSE_INIT_USER_EMAIL: admin@docintel.local
+      LANGFUSE_INIT_USER_NAME: Admin
+      LANGFUSE_INIT_USER_PASSWORD: admin123
+    networks:
+      - docintel-network
+
+  # ============================================================================
+  # Identity Provider (Authentik - MIT License)
+  # ============================================================================
+  # Admin UI: http://localhost:9090/if/admin/
+  # Uses shared postgres (authentik database) and redis
+  # First-time setup: ./scripts/setup-authentik.sh
+  
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2025.12.1
+    command: server
+    environment: &authentik-env
+      # Uses shared postgres with separate 'authentik' database
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__USER: docintel
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: docintel_secret
+      # Uses shared redis (separate DB index)
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_REDIS__PORT: 6379
+      AUTHENTIK_REDIS__PASSWORD: redissecret
+      AUTHENTIK_REDIS__DB: 1
+      # Security
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-docintel-authentik-secret-change-in-prod}
+      # Bootstrap admin credentials (created on first run)
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_ADMIN_EMAIL:-admin@docintel.local}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-docintel-api-token-change-in-prod}
+      # Disable outbound requests for privacy
+      AUTHENTIK_DISABLE_UPDATE_CHECK: "true"
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+      AUTHENTIK_AVATARS: "none"
+    volumes:
+      - ./config/authentik/blueprints:/blueprints/custom:ro
+      - ./config/authentik/media:/web/dist/custom:ro
+    ports:
+      - "9090:9000"   # Authentik HTTP (9000 used by MinIO)
+      - "9443:9443"   # Authentik HTTPS
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - docintel-network
+    profiles: ["auth"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2025.12.1
+    command: worker
+    environment:
+      <<: *authentik-env
+    volumes:
+      - ./config/authentik/blueprints:/blueprints/custom:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - docintel-network
+    profiles: ["auth"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+networks:
+  docintel-network:
+    driver: bridge
+
+volumes:
+  qdrant-data:
+  postgres-data:
+  redis-data:
+  minio-data:
+  clickhouse-data:
+  clickhouse-logs:
+  huggingface-cache:

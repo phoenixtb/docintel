@@ -1,0 +1,25 @@
+spring:
+  datasource:
+    url: jdbc:tc:postgresql:15:///testdb
+    driver-class-name: org.testcontainers.jdbc.ContainerDatabaseDriver
+  
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+
+  # Disable Redis for tests (will be mocked)
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+# Disable Redis health check
+management:
+  health:
+    redis:
+      enabled: false
+
+logging:
+  level:
+    com.docintel: DEBUG

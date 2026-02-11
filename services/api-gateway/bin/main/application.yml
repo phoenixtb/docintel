@@ -1,0 +1,103 @@
+spring:
+  application:
+    name: api-gateway
+
+  cloud:
+    gateway:
+      # Default route configuration
+      routes:
+        - id: document-service
+          uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/documents, /api/v1/documents/**
+          filters:
+            - RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents${segment}
+
+        - id: rag-service-query
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/query
+          filters:
+            - RewritePath=/api/v1/query, /query
+
+        - id: rag-service-query-stream
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/query/stream
+          filters:
+            - RewritePath=/api/v1/query/stream, /query/stream
+
+        - id: rag-service-classify
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/classify-domain
+          filters:
+            - RewritePath=/api/v1/classify-domain, /classify-domain
+
+        - id: rag-service-sample-datasets
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/sample-datasets/**
+          filters:
+            - RewritePath=/api/v1/sample-datasets(?<segment>.*), /sample-datasets${segment}
+
+        - id: rag-service-vector-stats
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/vector-stats
+          filters:
+            - RewritePath=/api/v1/vector-stats, /vector-stats
+
+        - id: admin-service
+          uri: ${ADMIN_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/admin/**
+          filters:
+            - RewritePath=/api/v1/admin/(?<segment>.*), /internal/${segment}
+
+        - id: admin-tenants
+          uri: ${ADMIN_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/tenants/**
+          filters:
+            - RewritePath=/api/v1/tenants/(?<segment>.*), /internal/tenants/${segment}
+
+      # Global CORS configuration
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowed-origins: "*"
+            allowed-methods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - OPTIONS
+            allowed-headers: "*"
+            exposed-headers:
+              - X-RateLimit-Limit
+              - X-RateLimit-Remaining
+              - Retry-After
+
+server:
+  port: 8080
+
+# Actuator Configuration
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  health:
+    redis:
+      enabled: false
+
+# Logging
+logging:
+  level:
+    com.docintel: DEBUG
+    org.springframework.cloud.gateway: DEBUG
+    reactor.netty: INFO

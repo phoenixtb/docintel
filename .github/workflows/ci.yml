@@ -1,0 +1,103 @@
+# DocIntel CI Pipeline
+# ====================
+# Runs on push to main and all PRs
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ===========================================================================
+  # RAG Service (Python)
+  # ===========================================================================
+  rag-service:
+    name: RAG Service
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/rag-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Lint with Ruff
+        run: |
+          ruff check src/
+          ruff format --check src/
+
+      - name: Type check with MyPy
+        run: |
+          mypy src/ --ignore-missing-imports
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v
+
+  # ===========================================================================
+  # Kotlin Services
+  # ===========================================================================
+  kotlin-services:
+    name: Kotlin Services
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api-gateway, document-service, admin-service]
+
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: "temurin"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build
+        run: ./gradlew build -x test
+
+      - name: Run tests
+        run: ./gradlew test
+
+  # ===========================================================================
+  # Docker Build Test
+  # ===========================================================================
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [rag-service, kotlin-services]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build RAG Service
+        uses: docker/build-push-action@v5
+        with:
+          context: services/rag-service
+          push: false
+          tags: docintel/rag-service:test
+
+      # Note: Kotlin services need source code to build
+      # In a real setup, you'd build these too

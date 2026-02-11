@@ -1,0 +1,46 @@
+# Document Service CI - Path Filtered
+# =====================================
+# Only runs when document-service files change
+
+name: Document Service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/document-service/**'
+      - 'docker-compose.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/document-service/**'
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/document-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: "temurin"
+          cache: 'gradle'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build
+        run: ./gradlew build
+
+      - name: Run tests
+        run: ./gradlew test
+
+      - name: Build Docker image
+        run: docker build -t docintel/document-service:${{ github.sha }} .

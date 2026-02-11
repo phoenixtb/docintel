@@ -1,0 +1,40 @@
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: test-document-service
+          uri: http://localhost:${wiremock.server.port:8089}
+          predicates:
+            - Path=/api/v1/documents, /api/v1/documents/**
+          filters:
+            - RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents${segment}
+        
+        - id: test-rag-service
+          uri: http://localhost:${wiremock.server.port:8089}
+          predicates:
+            - Path=/api/v1/query/**
+          filters:
+            - RewritePath=/api/v1/query(?<segment>/?.*), /query${segment}
+
+  # Disable security for tests
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:9999
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+# Disable Redis for tests
+management:
+  health:
+    redis:
+      enabled: false
+
+logging:
+  level:
+    com.docintel: DEBUG
+    org.springframework.cloud.gateway: DEBUG

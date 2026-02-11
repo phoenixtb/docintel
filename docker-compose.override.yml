@@ -1,0 +1,23 @@
+# Docker Compose Override for Local Development
+# ==============================================
+# This file is automatically loaded with docker-compose.yml
+# Use for local development tweaks without modifying the main file
+
+services:
+  # Example: Mount local source for hot-reload during development
+  # Uncomment as needed
+  
+  # rag-service:
+  #   volumes:
+  #     - ./services/rag-service/src:/app/src:ro
+  #   environment:
+  #     - DEBUG=true
+
+  # Expose additional ports for debugging
+  postgres:
+    ports:
+      - "5432:5432"
+  
+  redis:
+    ports:
+      - "6379:6379"

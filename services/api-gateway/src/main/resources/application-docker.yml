@@ -1,0 +1,95 @@
+# Docker profile configuration
+spring:
+  data:
+    redis:
+      host: redis
+      port: 6379
+
+  # OAuth2 Resource Server configuration (enabled in prod profile)
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Authentik OIDC issuer URI (internal docker network uses port 9000)
+          issuer-uri: ${AUTHENTIK_ISSUER_URI:http://authentik-server:9000/application/o/docintel/}
+
+  cloud:
+    gateway:
+      routes:
+        - id: document-service
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents, /api/v1/documents/**
+          filters:
+            - RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents${segment}
+
+        - id: document-service-bulk-create
+          uri: http://document-service:8081
+          predicates:
+            - Path=/internal/documents/bulk-create
+          filters:
+            - name: RequestSize
+              args:
+                maxSize: 50MB
+
+        - id: rag-service-query
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/query
+          filters:
+            - RewritePath=/api/v1/query, /query
+
+        - id: rag-service-query-stream
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/query/stream
+          filters:
+            - RewritePath=/api/v1/query/stream, /query/stream
+
+        - id: rag-service-classify
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/classify-domain
+          filters:
+            - RewritePath=/api/v1/classify-domain, /classify-domain
+
+        - id: rag-service-sample-datasets
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/sample-datasets/**
+          filters:
+            - RewritePath=/api/v1/sample-datasets(?<segment>.*), /sample-datasets${segment}
+
+        - id: rag-service-vector-stats
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/vector-stats
+          filters:
+            - RewritePath=/api/v1/vector-stats, /vector-stats
+
+        - id: rag-service-debug
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/debug/**
+          filters:
+            - RewritePath=/api/v1/debug/(?<segment>.*), /debug/${segment}
+
+        - id: admin-service
+          uri: http://admin-service:8082
+          predicates:
+            - Path=/api/v1/admin/**
+          filters:
+            - RewritePath=/api/v1/admin/(?<segment>.*), /internal/${segment}
+
+        - id: admin-tenants
+          uri: http://admin-service:8082
+          predicates:
+            - Path=/api/v1/tenants/**
+          filters:
+            - RewritePath=/api/v1/tenants/(?<segment>.*), /internal/tenants/${segment}
+
+logging:
+  level:
+    com.docintel: DEBUG
+    org.springframework.cloud.gateway: DEBUG
+    reactor.netty.http.client: DEBUG

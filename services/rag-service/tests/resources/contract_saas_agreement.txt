@@ -1,0 +1,119 @@
+SOFTWARE AS A SERVICE AGREEMENT
+
+This Software as a Service Agreement ("Agreement") is entered into as of the Effective Date by and between:
+
+SERVICE PROVIDER: CloudTech Solutions Inc., a Delaware corporation with offices at 500 Tech Boulevard, San Francisco, CA 94105 ("Provider")
+
+CUSTOMER: _____________________ ("Customer")
+
+EFFECTIVE DATE: _____________________
+
+RECITALS
+
+WHEREAS, Provider has developed and operates a cloud-based software platform for enterprise document management; and
+
+WHEREAS, Customer desires to subscribe to and use the Platform subject to the terms and conditions set forth herein.
+
+NOW, THEREFORE, in consideration of the mutual covenants contained herein, the parties agree as follows:
+
+ARTICLE 1: DEFINITIONS
+
+1.1 "Platform" means the Provider's cloud-based document management software, including all updates and enhancements.
+
+1.2 "Subscription Term" means the period during which Customer has access to the Platform as specified in the Order Form.
+
+1.3 "User" means an individual authorized by Customer to access and use the Platform.
+
+1.4 "Confidential Information" means any non-public information disclosed by either party that is designated as confidential.
+
+ARTICLE 2: SUBSCRIPTION AND ACCESS
+
+2.1 Grant of Rights. Subject to the terms of this Agreement, Provider grants Customer a non-exclusive, non-transferable right to access and use the Platform during the Subscription Term.
+
+2.2 User Accounts. Customer may create User accounts up to the number specified in the Order Form. Customer is responsible for maintaining the confidentiality of User credentials.
+
+2.3 Acceptable Use. Customer shall not: (a) sublicense or resell the Platform; (b) reverse engineer the Platform; (c) use the Platform for illegal purposes; (d) interfere with Platform operations.
+
+ARTICLE 3: FEES AND PAYMENT
+
+3.1 Subscription Fees. Customer shall pay the fees specified in the Order Form. Fees are due within 30 days of invoice date.
+
+3.2 Late Payment. Overdue amounts accrue interest at 1.5% per month or the maximum rate permitted by law.
+
+3.3 Taxes. Fees exclude taxes. Customer is responsible for all applicable taxes except Provider's income tax.
+
+ARTICLE 4: DATA AND SECURITY
+
+4.1 Data Ownership. Customer retains all rights to Customer Data uploaded to the Platform.
+
+4.2 Data Processing. Provider will process Customer Data only as necessary to provide the Platform services.
+
+4.3 Security. Provider maintains industry-standard security measures including:
+    (a) Encryption of data in transit and at rest (AES-256)
+    (b) Multi-factor authentication
+    (c) Regular security audits
+    (d) SOC 2 Type II certification
+
+4.4 Data Retention. Upon termination, Provider will retain Customer Data for 30 days, after which it will be permanently deleted unless otherwise required by law.
+
+ARTICLE 5: WARRANTIES AND DISCLAIMERS
+
+5.1 Provider Warranties. Provider warrants that:
+    (a) The Platform will perform materially as described in documentation
+    (b) Provider has the right to grant the licenses contained herein
+    (c) Provider will comply with applicable laws
+
+5.2 Customer Warranties. Customer warrants that:
+    (a) Customer has the right to upload Customer Data
+    (b) Customer Data does not infringe third-party rights
+    (c) Customer will comply with applicable laws
+
+5.3 DISCLAIMER. EXCEPT AS EXPRESSLY PROVIDED, THE PLATFORM IS PROVIDED "AS IS" WITHOUT WARRANTIES OF ANY KIND.
+
+ARTICLE 6: LIMITATION OF LIABILITY
+
+6.1 Cap on Liability. EXCEPT FOR BREACHES OF CONFIDENTIALITY OR INDEMNIFICATION OBLIGATIONS, NEITHER PARTY'S LIABILITY SHALL EXCEED THE FEES PAID IN THE 12 MONTHS PRECEDING THE CLAIM.
+
+6.2 Exclusion. NEITHER PARTY SHALL BE LIABLE FOR INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES.
+
+ARTICLE 7: TERM AND TERMINATION
+
+7.1 Term. This Agreement commences on the Effective Date and continues for the initial Subscription Term, automatically renewing for successive one-year periods unless either party provides 60 days written notice of non-renewal.
+
+7.2 Termination for Cause. Either party may terminate for material breach if the breach is not cured within 30 days of written notice.
+
+7.3 Effect of Termination. Upon termination: (a) Customer's access to the Platform will cease; (b) Customer will pay all outstanding fees; (c) each party will return Confidential Information.
+
+ARTICLE 8: INDEMNIFICATION
+
+8.1 By Provider. Provider will defend Customer against claims that the Platform infringes intellectual property rights.
+
+8.2 By Customer. Customer will defend Provider against claims arising from Customer Data or Customer's misuse of the Platform.
+
+ARTICLE 9: GENERAL PROVISIONS
+
+9.1 Governing Law. This Agreement is governed by the laws of the State of Delaware.
+
+9.2 Dispute Resolution. Disputes shall be resolved by binding arbitration in San Francisco, CA.
+
+9.3 Entire Agreement. This Agreement, including all Order Forms, constitutes the entire agreement between the parties.
+
+9.4 Amendment. This Agreement may only be modified in writing signed by both parties.
+
+9.5 Assignment. Neither party may assign this Agreement without written consent, except in connection with a merger or acquisition.
+
+IN WITNESS WHEREOF, the parties have executed this Agreement as of the Effective Date.
+
+PROVIDER:
+CloudTech Solutions Inc.
+By: _____________________
+Name: _____________________
+Title: _____________________
+Date: _____________________
+
+CUSTOMER:
+_____________________
+By: _____________________
+Name: _____________________
+Title: _____________________
+Date: _____________________

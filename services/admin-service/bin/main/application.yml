@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: admin-service
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/docint}
+    username: ${SPRING_DATASOURCE_USERNAME:docint}
+    password: ${SPRING_DATASOURCE_PASSWORD:docint_secret}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+    open-in-view: false
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+server:
+  port: 8082
+
+# Qdrant Configuration
+qdrant:
+  url: ${QDRANT_URL:http://localhost:6333}
+
+# Redis Configuration
+redis:
+  host: ${REDIS_HOST:localhost}
+  port: ${REDIS_PORT:6379}
+
+# Actuator Configuration
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  health:
+    redis:
+      enabled: false
+
+# Logging
+logging:
+  level:
+    com.docintel: DEBUG

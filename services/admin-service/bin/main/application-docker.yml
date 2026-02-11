@@ -1,0 +1,22 @@
+# Docker profile configuration
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/docint
+    username: docint
+    password: docint_secret
+
+  data:
+    redis:
+      host: redis
+      port: 6379
+
+qdrant:
+  url: http://qdrant:6333
+
+redis:
+  host: redis
+  port: 6379
+
+logging:
+  level:
+    com.docintel: INFO

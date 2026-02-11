@@ -1,0 +1,155 @@
+DocIntel API Reference Guide
+Version: 1.0.0
+Last Updated: January 2025
+
+OVERVIEW
+
+The DocIntel API provides programmatic access to document management, indexing, and question-answering capabilities. All endpoints are RESTful and return JSON responses.
+
+BASE URL
+
+Production: https://api.docintel.io/v1
+Staging: https://staging-api.docintel.io/v1
+
+AUTHENTICATION
+
+All API requests require a Bearer token in the Authorization header:
+
+Authorization: Bearer <your-api-key>
+
+API keys can be generated from the Admin Dashboard under Settings > API Keys.
+
+RATE LIMITING
+
+Rate limits are applied per API key:
+- Free tier: 100 requests/minute
+- Pro tier: 1000 requests/minute
+- Enterprise: Custom limits
+
+Rate limit headers are included in all responses:
+- X-RateLimit-Limit: Maximum requests per minute
+- X-RateLimit-Remaining: Remaining requests in current window
+- X-RateLimit-Reset: Unix timestamp when the limit resets
+
+ENDPOINTS
+
+1. DOCUMENT UPLOAD
+
+POST /documents
+
+Upload a new document for processing and indexing.
+
+Request:
+- Content-Type: multipart/form-data
+- file: (required) The document file (PDF, DOCX, TXT, MD)
+- tenant_id: (optional) Tenant identifier, defaults to "default"
+- metadata: (optional) JSON object with custom metadata
+
+Response:
+{
+  "id": "doc_abc123",
+  "filename": "report.pdf",
+  "status": "processing",
+  "created_at": "2025-01-15T10:30:00Z"
+}
+
+Status Codes:
+- 201: Document created and queued for processing
+- 400: Invalid file format or request
+- 401: Unauthorized
+- 413: File too large (max 50MB)
+
+2. GET DOCUMENT
+
+GET /documents/{document_id}
+
+Retrieve document details and processing status.
+
+Response:
+{
+  "id": "doc_abc123",
+  "filename": "report.pdf",
+  "status": "indexed",
+  "page_count": 15,
+  "chunk_count": 42,
+  "created_at": "2025-01-15T10:30:00Z",
+  "indexed_at": "2025-01-15T10:32:15Z"
+}
+
+Status Codes:
+- 200: Success
+- 404: Document not found
+
+3. QUERY DOCUMENTS
+
+POST /query
+
+Ask a question and get an AI-generated answer with source citations.
+
+Request:
+{
+  "question": "What is the return policy?",
+  "tenant_id": "default",
+  "top_k": 5,
+  "document_type": "contracts"
+}
+
+Response:
+{
+  "answer": "The return policy allows returns within 30 days...",
+  "sources": [
+    {
+      "document_id": "doc_abc123",
+      "filename": "terms.pdf",
+      "chunk_index": 7,
+      "score": 0.89,
+      "content": "Returns are accepted within 30 days..."
+    }
+  ],
+  "latency_ms": 450,
+  "cache_hit": false
+}
+
+4. STREAMING QUERY
+
+POST /query/stream
+
+Same as /query but returns Server-Sent Events for real-time streaming.
+
+Response (SSE):
+data: {"metadata": {"query_id": "q_123"}}
+data: {"token": "The"}
+data: {"token": " return"}
+data: {"token": " policy"}
+data: {"sources": [...], "done": true}
+
+ERROR HANDLING
+
+All errors follow a consistent format:
+
+{
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "File format not supported",
+    "details": {"supported_formats": ["pdf", "docx", "txt"]}
+  }
+}
+
+Common Error Codes:
+- INVALID_REQUEST: Malformed request or invalid parameters
+- UNAUTHORIZED: Invalid or missing API key
+- NOT_FOUND: Resource not found
+- RATE_LIMITED: Too many requests
+- INTERNAL_ERROR: Server error, retry with exponential backoff
+
+WEBHOOKS
+
+Configure webhooks to receive notifications when document processing completes.
+
+POST /webhooks
+{
+  "url": "https://your-server.com/callback",
+  "events": ["document.indexed", "document.failed"]
+}
+
+For support, contact api-support@docintel.io

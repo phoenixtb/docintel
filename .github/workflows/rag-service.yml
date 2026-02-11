@@ -1,0 +1,50 @@
+# RAG Service CI - Path Filtered
+# ================================
+# Only runs when rag-service files change
+
+name: RAG Service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/rag-service/**'
+      - 'docker-compose.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/rag-service/**'
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/rag-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          ruff check src/
+          ruff format --check src/
+
+      - name: Type check
+        run: mypy src/ --ignore-missing-imports
+
+      - name: Run tests
+        run: pytest tests/ -v --cov=src --cov-report=xml
+
+      - name: Build Docker image
+        run: docker build -t docintel/rag-service:${{ github.sha }} .
