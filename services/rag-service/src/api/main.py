@@ -27,7 +27,7 @@ from ..pipelines import (
     delete_tenant_vectors,
 )
 from ..chunking import ChunkingService, ChunkingConfig, ChunkingMethod
-from ..components import LiteLLMStreamingGenerator, SemanticCacheWriter
+from ..components import SemanticCacheWriter
 from ..tracing import init_langfuse
 from ..datasets import (
     get_domain_classifier,
@@ -121,6 +121,7 @@ class QueryRequest(BaseModel):
     user_roles: list[str] = Field(default_factory=list)
     user_id: Optional[str] = None
     document_type: Optional[str] = None  # Optional domain filter
+    conversation_id: Optional[str] = None  # Link query to a conversation
     # top_k is now configured internally via RAG_DEFAULT_TOP_K env var
     # Kept as optional for admin/testing use only
     top_k: Optional[int] = Field(default=None, ge=1, le=20)
@@ -197,7 +198,7 @@ class LoadSampleDatasetsRequest(BaseModel):
     samples_per_dataset: int = Field(
         default=100, 
         ge=1, 
-        le=2000,
+        le=100000,
         description="Number of samples to load per dataset. Higher values take longer (embedding time)."
     )
     tenant_id: str = Field(default="default")
@@ -469,7 +470,8 @@ async def query_documents_stream(request: QueryRequest):
                 user_id=request.user_id,
                 domain_filter=domain_filter,
             )
-            documents = retrieval_result["documents"][:request.top_k]
+            top_k = request.top_k or 5
+            documents = retrieval_result["documents"][:top_k]
             
             print(f"[DEBUG] Retrieved {len(documents)} documents")
             if documents:
@@ -504,25 +506,71 @@ async def query_documents_stream(request: QueryRequest):
             prompt_result = prompt_builder.run(documents=documents, query=request.question)
             prompt = prompt_result["prompt"]
 
-            # Stream LLM response
-            llm = LiteLLMStreamingGenerator(
-                model=os.getenv("LITELLM_MODEL", "ollama/qwen3:4b"),
+            # Stream LLM response (OllamaChatGenerator with buffered streaming + JSON parse)
+            import asyncio
+            from haystack.dataclasses import ChatMessage
+            from haystack_integrations.components.generators.ollama import OllamaChatGenerator
+            from ..pipelines.query import _ollama_model_name, _build_section_label
+
+            queue: asyncio.Queue = asyncio.Queue()
+
+            async def streaming_callback(chunk):
+                try:
+                    content = getattr(chunk, "content", None)
+                    if isinstance(content, str) and content:
+                        queue.put_nowait(content)
+                except Exception:
+                    pass
+
+            llm = OllamaChatGenerator(
+                model=_ollama_model_name(os.getenv("LITELLM_MODEL", "ollama/qwen3:4b")),
+                url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+                generation_kwargs={"temperature": 0.1, "num_predict": 1024},
+                streaming_callback=streaming_callback,
             )
 
-            full_response = ""
-            async for token in llm.stream(prompt):
-                full_response += token
-                yield f"data: {json.dumps({'token': token})}\n\n"
+            async def run_llm():
+                try:
+                    await llm.run_async(messages=[ChatMessage.from_user(prompt)])
+                except Exception as e:
+                    print(f"[ERROR] LLM run_async failed: {e}")
+                finally:
+                    queue.put_nowait(None)
 
-            # Build sources
+            task = asyncio.create_task(run_llm())
+            full_response = ""
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                full_response += item
+                yield f"data: {json.dumps({'token': item})}\n\n"
+            await task
+
+            answer = full_response.strip()
+
+            # Build sources with ref_id and section for [1], [2] mapping
             sources = []
-            for doc in documents:
+            for i, doc in enumerate(documents):
+                chunk_idx = doc.meta.get("chunk_index", i)
+                section = _build_section_label(doc.meta, chunk_idx)
                 sources.append({
+                    "ref_id": i + 1,
                     "document_id": doc.meta.get("document_id", ""),
                     "filename": doc.meta.get("filename", "Unknown"),
-                    "chunk_index": doc.meta.get("chunk_index", 0),
+                    "section": section,
+                    "chunk_index": chunk_idx,
                     "score": doc.score or 0.0,
                 })
+
+            # Persist messages to conversation if conversation_id provided
+            if request.conversation_id:
+                try:
+                    from ..db import add_message
+                    add_message(request.conversation_id, "user", request.question)
+                    add_message(request.conversation_id, "assistant", answer, sources=sources)
+                except Exception as persist_err:
+                    print(f"Warning: Failed to persist messages: {persist_err}")
 
             yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
 
@@ -862,6 +910,82 @@ async def load_sample_datasets(
         total_indexed=total_indexed,
     )
 
+
+# =============================================================================
+# Conversation Endpoints (Chat History)
+# =============================================================================
+
+class CreateConversationRequest(BaseModel):
+    tenant_id: str = Field(default="default")
+    user_id: Optional[str] = None
+    title: str = Field(default="New Conversation")
+
+
+class UpdateConversationRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=500)
+
+
+@app.post("/conversations")
+async def create_conversation(request: CreateConversationRequest):
+    """Create a new conversation."""
+    from ..db import create_conversation
+    conv = create_conversation(
+        tenant_id=request.tenant_id,
+        user_id=request.user_id,
+        title=request.title,
+    )
+    return conv
+
+
+@app.get("/conversations")
+async def list_conversations(
+    tenant_id: str = "default",
+    user_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List conversations for a tenant/user, most recent first."""
+    from ..db import list_conversations
+    return list_conversations(tenant_id=tenant_id, user_id=user_id, limit=limit, offset=offset)
+
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str, tenant_id: str = "default"):
+    """Get a conversation with all its messages."""
+    from ..db import get_conversation
+    conv = get_conversation(conversation_id, tenant_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv
+
+
+@app.patch("/conversations/{conversation_id}")
+async def update_conversation(
+    conversation_id: str,
+    request: UpdateConversationRequest,
+    tenant_id: str = "default",
+):
+    """Update a conversation's title."""
+    from ..db import update_conversation_title
+    conv = update_conversation_title(conversation_id, tenant_id, request.title)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation_endpoint(conversation_id: str, tenant_id: str = "default"):
+    """Delete a conversation and all its messages."""
+    from ..db import delete_conversation
+    deleted = delete_conversation(conversation_id, tenant_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"status": "deleted"}
+
+
+# =============================================================================
+# Sample Dataset Helpers
+# =============================================================================
 
 async def _create_document_records(tenant_id: str, documents: list[dict]):
     """

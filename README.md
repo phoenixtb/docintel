@@ -66,31 +66,117 @@ This will:
 ### 2. Start the Application
 
 ```bash
-./scripts/start-app.sh
+./scripts/start.sh           # With authentication (Authentik)
+./scripts/start.sh --no-auth # Without authentication (dev mode)
 ```
 
-This will:
-1. Verify Ollama and Docker are running
-2. Start infrastructure and app services
-3. Open the Web UI in your browser
+Starts infrastructure, Authentik (if enabled), and all application services.
 
-**Langfuse Credentials:**
-- Email: `admin@docintel.local`
-- Password: `admin123`
-
-### Cleanup
-
-chmod +x /Users/titasbiswas/projects/ai_focused/docintel/scripts/cleanup.sh
+### 3. Stop / Cleanup
 
 ```bash
-# Stop containers (preserve data)
-./scripts/cleanup.sh
+./scripts/stop.sh             # Stop containers (preserves state, fast restart)
+./scripts/cleanup.sh          # Stop and remove containers
+./scripts/cleanup.sh --volumes # Also delete all data (DB, vectors, etc.)
+./scripts/cleanup.sh --all    # Delete everything including Ollama models
+```
 
-# Stop and remove volumes (delete all data)
-./scripts/cleanup.sh --volumes
+### Credentials
 
-# Remove everything including Ollama models
-./scripts/cleanup.sh --all
+| Service | URL | User | Password |
+|---------|-----|------|----------|
+| Web UI | http://localhost:3001 | demo-admin | DocIntel@123 |
+| Authentik Admin | http://localhost:9090/if/admin/ | akadmin | DocIntel@123 |
+| Langfuse | http://localhost:3000 | admin@docintel.local | admin123 |
+| MinIO Console | http://localhost:9001 | minioadmin | minioadmin |
+
+**Demo users** (password: `DocIntel@123`):
+- `demo-admin` / `demo-user` — tenant: default
+- `tenant-user` — tenant: demo
+
+## Developer Guide
+
+### After Code Changes
+
+Services with `build:` directives (web-ui, api-gateway, document-service, rag-service, admin-service) need a rebuild to pick up changes:
+
+```bash
+# Rebuild all services and restart
+./scripts/start.sh --build
+
+# Rebuild a single service (faster)
+docker compose --profile app build web-ui
+docker compose --profile app up -d web-ui
+```
+
+`stop.sh` / `start.sh` without `--build` reuses existing images — fast restarts, but won't reflect code changes.
+
+### Viewing Logs (Debug Mode)
+
+When queries get stuck or you need to debug:
+
+```bash
+# Interactive: pick service or "Debug" (rag + api-gateway)
+./scripts/docintel.sh   # → Logs
+
+# Or directly:
+./scripts/logs.sh debug           # Query path: rag-service + api-gateway
+./scripts/logs.sh rag-service     # RAG pipeline only
+docker compose logs -f rag-service
+```
+
+### Service Development Shortcuts
+
+```bash
+# View logs for a specific service
+docker compose logs -f web-ui
+docker compose logs -f rag-service
+
+# Rebuild and restart one service
+docker compose --profile app build <service> && docker compose --profile app up -d <service>
+
+# Shell into a running container
+docker exec -it docintel-rag-service-1 bash
+```
+
+### Authentik (Identity Provider)
+
+OAuth2/OIDC configuration is fully automated via blueprint at `config/authentik/blueprints/docintel-setup.yaml`. On `start.sh`, the blueprint auto-provisions:
+- OAuth2 provider (public client, PKCE)
+- DocIntel application
+- Tenant groups and demo users
+- Branding (logo, favicon, custom login page)
+
+To re-apply the blueprint manually:
+```bash
+docker exec docintel-authentik-worker-1 ak apply_blueprint /blueprints/custom/docintel-setup.yaml
+```
+
+### GPU Usage (Mac M3 / Apple Silicon)
+
+- **LLM (Ollama)**: Runs natively on host and uses Metal by default. During a query, check Activity Monitor → Ollama; GPU should spike.
+- **Embeddings**: Run in the rag-service container (CPU). They don't use GPU.
+- If Ollama shows no GPU: ensure `ollama serve` is running natively (not in Docker). Run a query, then `ollama ps` to confirm the model is loaded.
+
+### Key Directories
+
+```
+config/
+├── authentik/
+│   ├── blueprints/    # Authentik provisioning YAML
+│   └── media/         # Login page logo + favicon
+├── postgres/          # DB init scripts
+└── qdrant/            # Collection init scripts
+
+scripts/
+├── setup.sh           # One-time: pull images + models
+├── start.sh           # Start all services (--build, --no-auth)
+├── stop.sh            # Stop containers (preserves state)
+├── cleanup.sh         # Remove containers (--volumes, --all)
+├── logs.sh            # View logs (debug mode: rag + api-gateway)
+├── build.sh           # Interactive build selector
+├── docintel.sh        # Interactive CLI (setup, start, stop, logs, etc.)
+└── setup-authentik.sh # Verify blueprint applied (called by start.sh)
 ```
 
 ## Project Structure
@@ -115,14 +201,17 @@ docintel/
 
 | Component | Technology | License |
 |-----------|------------|---------|
-| Web UI | SvelteKit + @ai-sdk/svelte | MIT |
+| Web UI | SvelteKit + oidc-client-ts | MIT / Apache 2.0 |
+| API Gateway | Kotlin / Spring Cloud Gateway | Apache 2.0 |
+| Identity Provider | Authentik | MIT |
 | LLM | Qwen3-4B via Ollama | Apache 2.0 |
 | Embeddings | nomic-embed-text | Apache 2.0 |
 | RAG Framework | Haystack 2.x | Apache 2.0 |
 | Vector DB | Qdrant | Apache 2.0 |
-| Chunking | Chonkie | MIT |
-| LLM Abstraction | LiteLLM | MIT |
-| Observability | Langfuse | MIT |
+| Database | PostgreSQL 18 | PostgreSQL License |
+| Cache | Redis | BSD |
+| Object Storage | MinIO | AGPL / Commercial |
+| Observability | Langfuse + ClickHouse | MIT |
 
 ## Service URLs
 
@@ -130,9 +219,12 @@ docintel/
 |---------|-----|-------------|
 | Web UI | http://localhost:3001 | Chat interface |
 | API Gateway | http://localhost:8080 | REST + SSE API |
+| Authentik | http://localhost:9090 | Identity provider |
 | Langfuse | http://localhost:3000 | Observability UI |
 | Qdrant | http://localhost:6333 | Vector DB dashboard |
-| MinIO | http://localhost:9001 | Object storage UI |
+| MinIO Console | http://localhost:9001 | Object storage UI |
+| PostgreSQL | localhost:5432 | Database |
+| Redis | localhost:6379 | Cache |
 
 ## Hardware Requirements
 

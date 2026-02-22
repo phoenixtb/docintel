@@ -158,4 +158,16 @@ class DocumentController(
             .status(HttpStatus.CREATED)
             .body(response)
     }
+
+    /**
+     * Delete all documents for a tenant.
+     * Removes documents, chunks, vectors, and files.
+     */
+    @DeleteMapping("/all")
+    suspend fun deleteAllDocuments(
+        @RequestParam("tenant_id", defaultValue = "default") tenantId: String
+    ): ResponseEntity<Map<String, Any>> {
+        val count = documentService.deleteAllDocuments(tenantId)
+        return ResponseEntity.ok(mapOf("deleted" to count, "tenant_id" to tenantId))
+    }
 }

@@ -31,6 +31,12 @@
     tenant_stats: Record<string, number>;
   }
 
+  // Pagination
+  let currentPage = $state(0);
+  let pageSize = $state(20);
+  let totalPages = $state(0);
+  let totalElements = $state(0);
+
   // State
   let documents: Document[] = $state([]);
   let vectorStats: VectorStats | null = $state(null);
@@ -65,13 +71,32 @@
     done: '✅ Complete!'
   };
 
-  async function loadDocuments() {
+  async function loadDocuments(page: number = 0) {
     isLoading = true;
     try {
-      const response = await fetch(`${API_BASE}/api/v1/documents`);
+      const params = new URLSearchParams({
+        tenant_id: getTenantId(),
+        page: String(page),
+        size: String(pageSize),
+        sort: 'createdAt,desc',
+      });
+      const response = await fetch(`${API_BASE}/api/v1/documents?${params}`, {
+        headers: { ...getAuthHeaders() },
+      });
       if (response.ok) {
         const data = await response.json();
-        documents = data.content || data || [];
+        // Spring Page response
+        if (data.content) {
+          documents = data.content;
+          totalPages = data.totalPages ?? 1;
+          totalElements = data.totalElements ?? data.content.length;
+          currentPage = data.number ?? page;
+        } else {
+          // Fallback: plain array
+          documents = Array.isArray(data) ? data : [];
+          totalPages = 1;
+          totalElements = documents.length;
+        }
       } else {
         documents = [];
       }
@@ -79,6 +104,12 @@
       documents = [];
     } finally {
       isLoading = false;
+    }
+  }
+
+  function goToPage(page: number) {
+    if (page >= 0 && page < totalPages) {
+      loadDocuments(page);
     }
   }
 
@@ -155,6 +186,14 @@
     }
   }
 
+  function selectAllDatasets() {
+    if (selectedDatasets.length === availableDatasets.length) {
+      selectedDatasets = [];
+    } else {
+      selectedDatasets = availableDatasets.map(d => d.key);
+    }
+  }
+
   async function loadSampleDatasets() {
     if (selectedDatasets.length === 0 || isLoadingDatasets) return;
 
@@ -170,11 +209,11 @@
     try {
       const response = await fetch(`${API_BASE}/api/v1/sample-datasets/load`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({
           datasets: selectedDatasets,
-          samples_per_dataset: samplesPerDataset,
-          tenant_id: 'default',
+          samples_per_dataset: samplesPerDataset === -1 ? 100000 : samplesPerDataset,
+          tenant_id: getTenantId(),
         }),
       });
 
@@ -404,6 +443,21 @@
         </div>
       {/if}
 
+      <!-- Limitation notice -->
+      <div class="mb-4 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 text-sm text-amber-700 dark:text-amber-400">
+        Sample datasets are sourced from HuggingFace for demo purposes. They may not cover all topics — answers depend on the content available in the loaded samples.
+      </div>
+
+      <div class="flex items-center justify-between mb-3">
+        <button
+          onclick={selectAllDatasets}
+          disabled={isLoadingDatasets}
+          class="text-sm text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
+        >
+          {selectedDatasets.length === availableDatasets.length ? 'Deselect All' : 'Select All'}
+        </button>
+      </div>
+
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
         {#each availableDatasets as dataset}
           <label
@@ -446,6 +500,7 @@
             <option value={250}>250</option>
             <option value={500}>500</option>
             <option value={1000}>1000</option>
+            <option value={-1}>All available</option>
           </select>
         </div>
         <button
@@ -582,6 +637,59 @@
             </tbody>
           </table>
         </div>
+        
+        <!-- Pagination -->
+        {#if totalPages > 1}
+          <div class="flex items-center justify-between mt-4 px-4 py-3 border-t border-gray-200 dark:border-gray-700">
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+              Showing {currentPage * pageSize + 1}-{Math.min((currentPage + 1) * pageSize, totalElements)} of {totalElements}
+            </p>
+            <div class="flex items-center gap-1">
+              <button
+                onclick={() => goToPage(0)}
+                disabled={currentPage === 0}
+                class="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600
+                  disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >First</button>
+              <button
+                onclick={() => goToPage(currentPage - 1)}
+                disabled={currentPage === 0}
+                class="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600
+                  disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >Prev</button>
+              
+              {#each Array.from({length: Math.min(5, totalPages)}, (_, i) => {
+                const start = Math.max(0, Math.min(currentPage - 2, totalPages - 5));
+                return start + i;
+              }).filter(p => p < totalPages) as page}
+                <button
+                  onclick={() => goToPage(page)}
+                  class="px-3 py-1 text-sm rounded border transition-colors
+                    {page === currentPage 
+                      ? 'bg-blue-600 text-white border-blue-600' 
+                      : 'border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700'}"
+                >{page + 1}</button>
+              {/each}
+              
+              <button
+                onclick={() => goToPage(currentPage + 1)}
+                disabled={currentPage >= totalPages - 1}
+                class="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600
+                  disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >Next</button>
+              <button
+                onclick={() => goToPage(totalPages - 1)}
+                disabled={currentPage >= totalPages - 1}
+                class="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600
+                  disabled:opacity-40 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >Last</button>
+            </div>
+          </div>
+        {:else if totalElements > 0}
+          <div class="px-4 py-2 text-sm text-gray-400 dark:text-gray-500 border-t border-gray-200 dark:border-gray-700">
+            {totalElements} document{totalElements !== 1 ? 's' : ''}
+          </div>
+        {/if}
       {/if}
     </div>
   </div>

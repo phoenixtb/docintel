@@ -13,6 +13,8 @@ interface DocumentRepository : JpaRepository<Document, UUID> {
     
     fun findByTenantId(tenantId: String, pageable: Pageable): Page<Document>
     
+    fun findByTenantId(tenantId: String): List<Document>
+    
     fun findByTenantIdAndStatus(
         tenantId: String, 
         status: ProcessingStatus, 

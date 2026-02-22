@@ -105,10 +105,13 @@ class DocumentService(
                 domainHint
             }
 
-            // Build metadata with domain
+            // Build metadata with domain + Tika extraction metadata (page count, etc.)
             val metadataWithDomain = document.metadata.toMutableMap()
             metadataWithDomain["domain"] = domain
             metadataWithDomain["document_type"] = domain
+            extraction.metadata.forEach { (k, v) ->
+                metadataWithDomain[k] = v
+            }
 
             // Send to RAG service for chunking
             val chunkResponse = ragServiceClient.chunkText(
@@ -302,6 +305,43 @@ class DocumentService(
             created = documentIds.size,
             documentIds = documentIds
         )
+    }
+
+    /**
+     * Delete all documents for a tenant.
+     * Removes vectors, chunks, files, and document records.
+     */
+    @Transactional
+    suspend fun deleteAllDocuments(tenantId: String): Int {
+        val documents = documentRepository.findByTenantId(tenantId)
+        if (documents.isEmpty()) return 0
+
+        // Delete all vectors for the tenant in one call
+        try {
+            ragServiceClient.deleteTenantVectors(tenantId)
+        } catch (e: Exception) {
+            logger.warn("Failed to delete vectors for tenant $tenantId: ${e.message}")
+        }
+
+        // Delete all chunks for the tenant
+        for (doc in documents) {
+            chunkRepository.deleteByDocumentId(doc.id)
+        }
+
+        // Delete all files for the tenant
+        for (doc in documents) {
+            try {
+                storageService.deleteDocumentFiles(tenantId, doc.id)
+            } catch (e: Exception) {
+                // Non-fatal: sample datasets have no files
+            }
+        }
+
+        // Delete all document records
+        documentRepository.deleteAll(documents)
+
+        logger.info("Deleted ${documents.size} documents for tenant $tenantId")
+        return documents.size
     }
 
     // Extension functions for mapping

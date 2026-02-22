@@ -32,6 +32,14 @@ spring:
               args:
                 maxSize: 50MB
 
+        - id: document-service-delete-all
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents/all
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/documents/all, /internal/documents/all
+
         - id: rag-service-query
           uri: http://rag-service:8000
           predicates:
@@ -59,6 +67,13 @@ spring:
             - Path=/api/v1/sample-datasets/**
           filters:
             - RewritePath=/api/v1/sample-datasets(?<segment>.*), /sample-datasets${segment}
+
+        - id: rag-service-conversations
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/conversations, /api/v1/conversations/**
+          filters:
+            - RewritePath=/api/v1/conversations(?<segment>/?.*), /conversations${segment}
 
         - id: rag-service-vector-stats
           uri: http://rag-service:8000

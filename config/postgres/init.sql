@@ -99,6 +99,38 @@ CREATE TABLE users (
 CREATE INDEX idx_users_tenant ON users(tenant_id);
 
 -- =============================================================================
+-- Conversations Table (chat history)
+-- =============================================================================
+CREATE TABLE conversations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id),
+    user_id VARCHAR(64),
+    title VARCHAR(500) NOT NULL DEFAULT 'New Conversation',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_conversations_tenant ON conversations(tenant_id);
+CREATE INDEX idx_conversations_user ON conversations(tenant_id, user_id);
+CREATE INDEX idx_conversations_updated ON conversations(updated_at DESC);
+
+-- =============================================================================
+-- Messages Table (conversation messages)
+-- =============================================================================
+CREATE TABLE messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+    content TEXT NOT NULL,
+    sources JSONB,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_messages_conversation ON messages(conversation_id);
+CREATE INDEX idx_messages_created ON messages(conversation_id, created_at);
+
+-- =============================================================================
 -- Update Triggers
 -- =============================================================================
 CREATE OR REPLACE FUNCTION update_updated_at()
@@ -115,6 +147,10 @@ CREATE TRIGGER documents_updated_at
 
 CREATE TRIGGER tenants_updated_at
     BEFORE UPDATE ON tenants
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER conversations_updated_at
+    BEFORE UPDATE ON conversations
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- =============================================================================

@@ -17,8 +17,10 @@ import os
 from typing import Optional
 import time
 
+from haystack.dataclasses import ChatMessage
+from haystack_integrations.components.generators.ollama import OllamaChatGenerator
+
 from ..components import (
-    LiteLLMGenerator,
     SemanticCacheChecker,
     SecureRetriever,
     PromptBuilder,
@@ -31,12 +33,29 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-ai/nomic-embed-text-v1.5")
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 LLM_MODEL = os.getenv("LITELLM_MODEL", "ollama/qwen3:4b")
 LLM_FALLBACKS = os.getenv("LITELLM_FALLBACKS", "ollama/phi3:mini").split(",")
+OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+
+def _ollama_model_name(model: str) -> str:
+    """Strip ollama/ prefix for OllamaChatGenerator."""
+    return model.replace("ollama/", "") if model.startswith("ollama/") else model
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 
 # RAG Pipeline Configuration (internal, not exposed to UI)
 RETRIEVER_TOP_K = int(os.getenv("RAG_RETRIEVER_TOP_K", "50"))
 RERANKER_TOP_K = int(os.getenv("RAG_RERANKER_TOP_K", "10"))
 DEFAULT_TOP_K = int(os.getenv("RAG_DEFAULT_TOP_K", "5"))
+
+
+def _build_section_label(meta: dict, chunk_index: int) -> str:
+    """Build citation label from metadata: p. N, sample X doc Y, or chunk N."""
+    if meta.get("page") is not None:
+        return f"p. {meta['page']}"
+    item_idx = meta.get("item_index")
+    doc_idx = meta.get("doc_index")
+    if item_idx is not None and doc_idx is not None:
+        return f"sample {item_idx}, doc {doc_idx}"
+    return f"chunk {chunk_index}"
 
 
 class RAGQueryPipeline:
@@ -70,7 +89,7 @@ class RAGQueryPipeline:
         self._cache_checker: Optional[SemanticCacheChecker] = None
         self._retriever: Optional[SecureRetriever] = None
         self._reranker: Optional[TransformersSimilarityRanker] = None
-        self._llm: Optional[LiteLLMGenerator] = None
+        self._llm: Optional[OllamaChatGenerator] = None
 
     def _initialize(self):
         """Lazy initialization of pipeline components."""
@@ -104,10 +123,12 @@ class RAGQueryPipeline:
             )
             self._reranker.warm_up()
 
-        # Initialize LLM
-        self._llm = LiteLLMGenerator(
-            model=self.llm_model,
-            fallbacks=LLM_FALLBACKS,
+        # Initialize LLM (OllamaChatGenerator with structured output)
+        self._llm = OllamaChatGenerator(
+            model=_ollama_model_name(self.llm_model),
+            url=OLLAMA_URL,
+            response_format="json",
+            generation_kwargs={"temperature": 0.1, "num_predict": 1024},
         )
 
         # Initialize query expander
@@ -160,9 +181,17 @@ class RAGQueryPipeline:
             )
             if cache_result["cache_hit"]:
                 latency_ms = int((time.time() - start_time) * 1000)
+                raw_sources = cache_result["cached_sources"] or []
+                # Ensure ref_id for cached sources (legacy entries may not have it)
+                sources = []
+                for i, s in enumerate(raw_sources):
+                    d = dict(s) if isinstance(s, dict) else {}
+                    if "ref_id" not in d:
+                        d["ref_id"] = i + 1
+                    sources.append(d)
                 return {
                     "answer": cache_result["cached_response"],
-                    "sources": cache_result["cached_sources"] or [],
+                    "sources": sources,
                     "cache_hit": True,
                     "latency_ms": latency_ms,
                     "model_used": "cache",
@@ -207,18 +236,41 @@ class RAGQueryPipeline:
         prompt_result = self._prompt_builder.run(documents=documents, query=question)
         prompt = prompt_result["prompt"]
 
-        # Step 7: Generate answer
-        llm_result = self._llm.run(prompt=prompt)
-        answer = llm_result["replies"][0]
-        model_used = llm_result["meta"].get("model", self.llm_model)
+        # Step 7: Generate answer (structured JSON with answer field)
+        messages = [ChatMessage.from_user(prompt)]
+        llm_result = self._llm.run(messages=messages)
+        reply = llm_result["replies"][0]
+        raw_text = getattr(reply, "text", None) or (
+            reply.content[0].text if reply.content else ""
+        )
+        model_used = getattr(reply, "meta", {}) or {}
+        if isinstance(model_used, dict):
+            model_used = model_used.get("model", self.llm_model)
+        else:
+            model_used = self.llm_model
 
-        # Build sources list
+        # Parse JSON response; fallback to raw text
+        answer = raw_text
+        try:
+            import json
+
+            parsed = json.loads(raw_text.strip())
+            if isinstance(parsed, dict) and "answer" in parsed:
+                answer = parsed["answer"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Build sources list with ref_id for [1], [2] mapping
         sources = []
-        for doc in documents:
+        for i, doc in enumerate(documents):
+            chunk_idx = doc.meta.get("chunk_index", i)
+            section = _build_section_label(doc.meta, chunk_idx)
             sources.append({
+                "ref_id": i + 1,
                 "chunk_id": doc.id,
                 "document_id": doc.meta.get("document_id", ""),
                 "filename": doc.meta.get("filename", "Unknown"),
+                "section": section,
                 "content": doc.content[:200] + "..." if len(doc.content) > 200 else doc.content,
                 "score": doc.score or 0.0,
                 "metadata": {k: v for k, v in doc.meta.items() if k not in ["content"]},

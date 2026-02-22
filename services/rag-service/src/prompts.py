@@ -58,7 +58,8 @@ Documents:
 
 Question: {{ query }}
 
-Provide a clear answer with citations like [1], [2], etc."""
+Provide a clear, concise answer with citations like [1], [2], etc.
+Do not repeat information. Do not use bullet lists unless the question asks for a list."""
 
 # =============================================================================
 # No Documents Response

@@ -9,7 +9,7 @@ from haystack import component, Document
 from jinja2 import Template
 
 # Import from centralized prompts
-from src.prompts import RAG_PROMPT_TEMPLATE, SYSTEM_PROMPT
+from src.prompts import RAG_PROMPT_TEMPLATE, RAG_PROMPT_WITH_SOURCES, SYSTEM_PROMPT
 
 
 @component
@@ -17,10 +17,11 @@ class PromptBuilder:
     """
     Builds prompts for RAG generation from documents and query.
     Uses Jinja2 templating for flexibility.
+    Uses RAG_PROMPT_WITH_SOURCES by default for citation-style answers.
     """
 
     def __init__(self, template: str | None = None):
-        self.template_str = template or RAG_PROMPT_TEMPLATE
+        self.template_str = template or RAG_PROMPT_WITH_SOURCES
         self.template = Template(self.template_str)
 
     @component.output_types(prompt=str)

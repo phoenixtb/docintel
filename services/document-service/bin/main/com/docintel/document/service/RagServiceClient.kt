@@ -136,6 +136,21 @@ class RagServiceClient(
     }
 
     /**
+     * Delete all vectors for a tenant.
+     */
+    suspend fun deleteTenantVectors(tenantId: String): Boolean {
+        return try {
+            webClient.delete()
+                .uri("/index/$tenantId")
+                .retrieve()
+                .awaitBody<Map<String, Any>>()
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
      * Classify text into a domain using zero-shot classification.
      */
     suspend fun classifyDomain(content: String): ClassifyDomainResponse {

@@ -4,8 +4,10 @@
 # Starts all DocIntel services
 #
 # Usage:
-#   ./scripts/start.sh           # Start with authentication (Authentik)
-#   ./scripts/start.sh --no-auth # Start without authentication (dev mode)
+#   ./scripts/start.sh                  # Start with authentication
+#   ./scripts/start.sh --no-auth        # Start without authentication (dev mode)
+#   ./scripts/start.sh --build          # Rebuild images before starting (after code changes)
+#   ./scripts/start.sh --build --no-auth
 
 set -e
 
@@ -17,10 +19,15 @@ DEFAULT_PASSWORD="${DOCINTEL_DEMO_PASSWORD:-DocIntel@123}"
 
 # Parse arguments
 NO_AUTH=false
+DO_BUILD=false
 for arg in "$@"; do
     case $arg in
         --no-auth)
             NO_AUTH=true
+            shift
+            ;;
+        --build)
+            DO_BUILD=true
             shift
             ;;
     esac
@@ -112,6 +119,11 @@ fi
 # =============================================================================
 
 echo ""
+if [ "$DO_BUILD" = true ]; then
+    echo "Building application services..."
+    docker compose --profile app build
+fi
+
 echo "Starting application services..."
 
 if [ "$NO_AUTH" = false ] && [ "$AUTH_SETUP_OK" = true ]; then
@@ -142,46 +154,35 @@ fi
 
 echo ""
 echo "================================================"
-echo "DocIntel Started"
+echo "  DocIntel Started"
 echo "================================================"
 echo ""
-echo "Application:"
-echo "  - Web UI:      http://localhost:3001"
-echo "  - API Gateway: http://localhost:8080"
-echo ""
-echo "Observability:"
-echo "  - Langfuse:    http://localhost:3000"
-echo "    User:        admin@docintel.local"
-echo "    Password:    admin123"
+echo "  Service              URL                              Credentials"
+echo "  -------------------  -------------------------------  -------------------------"
+echo "  Web UI               http://localhost:3001"
+echo "  API Gateway          http://localhost:8080"
+echo "  Langfuse             http://localhost:3000             admin@docintel.local / admin123"
+echo "  MinIO Console        http://localhost:9001             minioadmin / minioadmin"
+echo "  Qdrant               http://localhost:6333"
 echo ""
 
 if [ "$NO_AUTH" = false ] && [ "$AUTH_SETUP_OK" = true ]; then
-    echo "Authentication: ENABLED"
+    echo "  Authentication: ENABLED"
     echo ""
-    echo "Authentik Admin:"
-    echo "  - URL:         http://localhost:9090/if/admin/"
-    echo "    User:        akadmin"
-    echo "    Password:    ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}"
+    echo "  Authentik Admin      http://localhost:9090/if/admin/  akadmin / ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}"
     echo ""
-    echo "Demo Users (password: ${DEFAULT_PASSWORD}):"
-    echo "  - demo-admin   (tenant: default)"
-    echo "  - demo-user    (tenant: default)"
-    echo "  - tenant-user  (tenant: demo)"
-    echo ""
+    echo "  Demo Users (password: ${DEFAULT_PASSWORD}):"
+    echo "    demo-admin   (tenant: default)"
+    echo "    demo-user    (tenant: default)"
+    echo "    tenant-user  (tenant: demo)"
 else
-    echo "Authentication: DISABLED (dev mode)"
-    echo "  - No login required"
-    echo ""
+    echo "  Authentication: DISABLED (dev mode)"
 fi
 
-echo "Infrastructure:"
-echo "  - PostgreSQL:  localhost:5432 (docintel / docintel_secret)"
-echo "  - Redis:       localhost:6379 (password: redissecret)"
-echo "  - Qdrant:      http://localhost:6333"
-echo "  - MinIO:       http://localhost:9001 (minioadmin / minioadmin)"
 echo ""
-echo "Commands:"
-echo "  ./scripts/stop.sh           # Stop services (preserves containers)"
-echo "  ./scripts/cleanup.sh        # Stop and remove containers"
-echo "  docker compose logs -f      # View logs"
+echo "  Commands:"
+echo "    ./scripts/stop.sh              Stop (preserves containers)"
+echo "    ./scripts/logs.sh debug         View logs (query path - for stuck queries)"
+echo "    ./scripts/start.sh --build     Rebuild after code changes"
+echo "    ./scripts/cleanup.sh --all     Remove everything"
 echo ""

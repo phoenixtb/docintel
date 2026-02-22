@@ -2506,6 +2506,76 @@ Targets:
 
 ---
 
+## Phase: Multi-Tenancy RBAC & Platform Administration
+
+**Status:** Planned (not yet implemented)
+
+**Objective:** Proper role-based access control separating platform administrators from tenant users, with a dedicated management UI for platform operations.
+
+### Roles
+
+| Role | Scope | Examples |
+|------|-------|---------|
+| `platform_admin` | Full system access, all tenants | akadmin, ops team |
+| `tenant_admin` | Full access within own tenant | demo-admin |
+| `tenant_user` | Read/query within own tenant | demo-user |
+
+### Implementation Plan
+
+**1. Authentik Configuration**
+- Add `platform-admin` group with custom claim `role: platform_admin`
+- Add `tenant-admin` role as a group attribute
+- Update scope mapping to include `role` claim in JWT
+- `akadmin` and designated ops users → `platform-admin` group
+- Tenant admins → respective tenant groups with `tenant_admin` attribute
+
+**2. API Gateway — Role Extraction & Enforcement**
+- Extend `TenantFilter` to extract `role` claim from JWT → `X-User-Role` header
+- Add route-level authorization:
+  - `/api/v1/admin/**` → requires `platform_admin` role
+  - `/api/v1/tenants/**` → requires `platform_admin` role
+  - `/api/v1/documents/all` (DELETE) → requires `platform_admin` or `tenant_admin` (own tenant only)
+  - All other `/api/v1/**` → auto-scoped to user's `tenant_id` from JWT
+
+**3. Backend Services — Tenant Scoping**
+- Document Service: All queries auto-filtered by `tenant_id` from header; bulk delete validates role
+- RAG Service: Conversations scoped by `tenant_id` + `user_id` from headers
+- Admin Service: Stats endpoints return all-tenant data only for `platform_admin`; tenant-scoped data for others
+
+**4. Web UI — Role-Aware Routing**
+- Auth module: Expose `getRole()`, `isPlatformAdmin()`, `isTenantAdmin()` from JWT claims
+- `/admin` route: Only rendered in nav and accessible for `platform_admin`
+- Tenant admin panel: New `/settings` route for `tenant_admin` — manage own tenant's documents, users
+- Documents page: Auto-scoped to user's tenant (no manual tenant_id selection)
+- All API calls: Use `tenant_id` from JWT, not from UI state
+
+**5. Platform Admin UI (new `/admin` route enhancements)**
+- Cross-tenant document browser with tenant selector
+- Tenant provisioning: Create/edit/delete tenants
+- User management: View users per tenant, assign roles
+- Audit log: Query history across tenants
+- System config: Cache policies, rate limits per tenant
+
+**6. Authentik Blueprint Updates**
+- Add `platform-admin` group to `docintel-setup.yaml`
+- Add role claim to scope mapping expression
+- Configure `akadmin` as platform admin
+- Add role-based authorization flow (optional: separate admin app in Authentik)
+
+### Key Design Principles
+- **JWT is the source of truth** — tenant_id and role come from the token, never from client input
+- **Defense in depth** — Gateway enforces route-level auth, services enforce data-level scoping
+- **Fail-closed** — Missing role/tenant → deny access
+- **Audit everything** — All admin operations logged with actor identity
+
+### Dependencies
+- Authentik OAuth2 setup (done)
+- oidc-client-ts integration (done)  
+- Admin service endpoints (done)
+- Admin UI page (done)
+
+---
+
 ## Notes for AI-Assisted Coding
 
 When using Cursor or Claude Code to implement these components:
