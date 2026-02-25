@@ -2,156 +2,173 @@
 Langfuse Tracing Integration
 ============================
 
-Observability for RAG pipeline execution.
+Provides observability for the RAG service using the Langfuse Python SDK.
+
+Haystack 2.x native tracing (OpenTelemetry / LangfuseConnector) requires
+haystack-experimental and Langfuse SDK v3+. Until we upgrade, this module
+provides a lightweight wrapper that:
+
+  - Creates a top-level Langfuse trace per query
+  - Attaches spans for service-layer steps (embedding, cache, domain routing)
+  - The Haystack Pipeline's internal component runs are instrumented
+    automatically when HAYSTACK_CONTENT_TRACING_ENABLED=true is set and
+    a compatible tracer is registered
+
+Usage:
+    tracer = LangfuseTracer(settings)
+    with tracer.trace("rag_query", inputs={...}, user_id=...) as t:
+        ...
+        with t.span("cache_check"):
+            ...
 """
 
-from langfuse import Langfuse
-from functools import wraps
-import os
-from typing import Optional, Callable
+import logging
 from contextlib import contextmanager
+from typing import Any, Generator, Optional
+
+from .config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
 
 
-# Initialize Langfuse client
-def get_langfuse() -> Optional[Langfuse]:
-    """Get Langfuse client if configured."""
-    public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-    secret_key = os.getenv("LANGFUSE_SECRET_KEY")
-    host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+class _Span:
+    """Thin wrapper around a Langfuse span. No-ops when Langfuse is off."""
 
-    if not public_key or not secret_key:
-        return None
+    def __init__(self, span: Any | None) -> None:
+        self._span = span
 
-    return Langfuse(
-        public_key=public_key,
-        secret_key=secret_key,
-        host=host,
-    )
+    def end(self, output: dict | None = None) -> None:
+        if self._span is None:
+            return
+        if output:
+            self._span.update(output=output)
+        self._span.end()
 
-
-# Global Langfuse instance
-_langfuse: Optional[Langfuse] = None
+    def error(self, message: str) -> None:
+        if self._span:
+            self._span.update(level="ERROR", status_message=message)
 
 
-def init_langfuse():
-    """Initialize global Langfuse instance."""
-    global _langfuse
-    _langfuse = get_langfuse()
-    if _langfuse:
-        print("Langfuse tracing enabled")
-    else:
-        print("Langfuse tracing disabled (no credentials)")
+class _Trace:
+    """Thin wrapper around a Langfuse trace context."""
+
+    def __init__(self, trace: Any | None, client: Any | None) -> None:
+        self._trace = trace
+        self._client = client
+
+    @contextmanager
+    def span(self, name: str, input: dict | None = None) -> Generator[_Span, None, None]:
+        if self._trace is None:
+            yield _Span(None)
+            return
+
+        lf_span = self._trace.span(name=name, input=input or {})
+        wrapper = _Span(lf_span)
+        try:
+            yield wrapper
+        except Exception as exc:
+            wrapper.error(str(exc))
+            raise
+        finally:
+            wrapper.end()
+
+    def generation(
+        self,
+        name: str,
+        model: str,
+        input: str,
+        output: str,
+        latency_ms: int | None = None,
+    ) -> None:
+        if self._trace is None:
+            return
+        self._trace.generation(
+            name=name,
+            model=model,
+            input=input,
+            output=output,
+            metadata={"latency_ms": latency_ms} if latency_ms else None,
+        )
+
+    def update(self, output: dict | None = None, **kwargs: Any) -> None:
+        if self._trace:
+            self._trace.update(output=output, **kwargs)
+
+    def flush(self) -> None:
+        if self._client:
+            self._client.flush()
 
 
-def trace_query(
-    question: str,
-    tenant_id: str,
-    user_id: Optional[str] = None,
-    tags: Optional[list[str]] = None,
-):
+class LangfuseTracer:
     """
-    Decorator to trace RAG query execution.
+    Service-scoped Langfuse tracer.
 
-    Usage:
-        @trace_query("What is X?", "tenant_1")
-        async def process():
-            ...
+    Instantiate once at startup (stored on app.state). Provides per-request
+    trace contexts via the `trace()` context manager.
     """
 
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            if _langfuse is None:
-                return await func(*args, **kwargs)
+    def __init__(self, settings: Settings | None = None) -> None:
+        self._client: Any | None = None
+        cfg = settings or get_settings()
 
-            trace = _langfuse.trace(
-                name="rag_query",
-                user_id=user_id,
-                session_id=tenant_id,
-                tags=tags or ["rag", "query"],
-                input={"question": question},
-            )
-
+        if cfg.langfuse_enabled:
             try:
-                result = await func(*args, **kwargs)
-                trace.update(output=result)
-                return result
-            except Exception as e:
-                trace.update(
-                    output={"error": str(e)},
-                    level="ERROR",
+                from langfuse import Langfuse
+
+                self._client = Langfuse(
+                    public_key=cfg.langfuse_public_key,
+                    secret_key=cfg.langfuse_secret_key,
+                    host=cfg.langfuse_host,
                 )
-                raise
-            finally:
-                _langfuse.flush()
+                logger.info("Langfuse tracing enabled (host=%s)", cfg.langfuse_host)
+            except Exception as exc:
+                logger.warning("Langfuse init failed, tracing disabled: %s", exc)
+        else:
+            logger.info("Langfuse tracing disabled (no credentials)")
 
-        return wrapper
+    @property
+    def enabled(self) -> bool:
+        return self._client is not None
 
-    return decorator
+    @contextmanager
+    def trace(
+        self,
+        name: str,
+        inputs: dict | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+    ) -> Generator[_Trace, None, None]:
+        """
+        Context manager that creates a Langfuse trace for the duration of a block.
 
+        Yields a _Trace object for attaching child spans and generations.
+        All methods on _Trace are no-ops when Langfuse is disabled.
+        """
+        if self._client is None:
+            yield _Trace(None, None)
+            return
 
-@contextmanager
-def trace_span(
-    name: str,
-    metadata: Optional[dict] = None,
-):
-    """
-    Context manager for tracing a span within a trace.
+        lf_trace = self._client.trace(
+            name=name,
+            user_id=user_id,
+            session_id=session_id,
+            tags=tags or [],
+            input=inputs or {},
+        )
+        wrapper = _Trace(lf_trace, self._client)
+        try:
+            yield wrapper
+        except Exception as exc:
+            lf_trace.update(output={"error": str(exc)}, level="ERROR")
+            raise
+        finally:
+            self._client.flush()
 
-    Usage:
-        with trace_span("embedding"):
-            result = embedder.run(text)
-    """
-    if _langfuse is None:
-        yield
-        return
-
-    span = None
-    try:
-        span = _langfuse.span(name=name, metadata=metadata)
-        yield span
-    except Exception as e:
-        if span:
-            span.update(level="ERROR", status_message=str(e))
-        raise
-
-
-def log_generation(
-    model: str,
-    prompt: str,
-    completion: str,
-    usage: Optional[dict] = None,
-    latency_ms: Optional[int] = None,
-):
-    """Log an LLM generation to Langfuse."""
-    if _langfuse is None:
-        return
-
-    _langfuse.generation(
-        name="llm_generation",
-        model=model,
-        input=prompt,
-        output=completion,
-        usage=usage,
-        metadata={"latency_ms": latency_ms} if latency_ms else None,
-    )
-
-
-def log_retrieval(
-    query: str,
-    documents: list[dict],
-    scores: list[float],
-):
-    """Log a retrieval operation to Langfuse."""
-    if _langfuse is None:
-        return
-
-    _langfuse.span(
-        name="retrieval",
-        input={"query": query},
-        output={
-            "document_count": len(documents),
-            "top_score": max(scores) if scores else 0,
-            "documents": documents[:3],  # Log top 3 only
-        },
-    )
+    def shutdown(self) -> None:
+        """Flush and close the Langfuse client."""
+        if self._client:
+            try:
+                self._client.flush()
+            except Exception:
+                pass

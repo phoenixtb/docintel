@@ -61,13 +61,15 @@ services:
       - "8000:8000"
     environment:
       - QDRANT_URL=http://qdrant:6333
-      # Ollama runs natively on host for best performance (Metal on M1, CUDA on Linux)
+      # Ollama runs natively on host (Metal on Apple Silicon, CUDA on Linux, vLLM in prod)
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      # LLM: Qwen3-4B (Apache 2.0 license)
-      - LITELLM_MODEL=ollama/qwen3:4b
-      - LITELLM_FALLBACKS=ollama/phi3:mini,ollama/qwen3:1.7b
-      # Embedding: nomic-embed-text (Apache 2.0, MTEB 62.39)
-      - EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
+      # LLM — chat generation and streaming
+      - OLLAMA_LLM_MODEL=qwen3:4b
+      - OLLAMA_LLM_FALLBACK=phi3:mini
+      # Embeddings — dense vectors via Ollama (GPU/Metal, no Docker model download)
+      - OLLAMA_EMBED_MODEL=nomic-embed-text
+      - OLLAMA_EMBED_DIM=768
+      # Reranker — cross-encoder, CPU-local (no Ollama reranker API in Haystack)
       - RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
       # RAG Pipeline Configuration
       - RAG_RETRIEVER_TOP_K=50

@@ -100,6 +100,39 @@ class ChunkingService:
 
         return self._chunkers[ChunkingMethod.SEMANTIC]
 
+    def _apply_overlap(
+        self, chunks: list[ChunkResult], text: str, overlap_chars: int
+    ) -> list[ChunkResult]:
+        """
+        Post-process chunks to add sliding-window overlap.
+
+        Each chunk (except the first) is extended backwards to include the last
+        `overlap_chars` characters from the previous chunk, preserving context
+        across boundaries.
+        """
+        if overlap_chars <= 0 or len(chunks) <= 1:
+            return chunks
+
+        overlapped: list[ChunkResult] = []
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                overlapped.append(chunk)
+                continue
+
+            prev_end = chunks[i - 1].end_char
+            new_start = max(chunks[i - 1].start_char, prev_end - overlap_chars)
+            overlapped.append(
+                ChunkResult(
+                    content=text[new_start : chunk.end_char],
+                    start_char=new_start,
+                    end_char=chunk.end_char,
+                    token_count=chunk.token_count,  # approximation (no re-tokenise)
+                    metadata=chunk.metadata,
+                )
+            )
+
+        return overlapped
+
     def chunk(self, text: str, config: Optional[ChunkingConfig] = None) -> list[ChunkResult]:
         """
         Chunk text using specified method.
@@ -122,17 +155,24 @@ class ChunkingService:
             )
 
         # Chonkie returns Chunk objects with text, start_index, end_index, token_count
-        chunks = chunker.chunk(text)
+        raw_chunks = chunker.chunk(text)
 
-        return [
+        chunks = [
             ChunkResult(
                 content=chunk.text,
                 start_char=chunk.start_index,
                 end_char=chunk.end_index,
                 token_count=chunk.token_count,
             )
-            for chunk in chunks
+            for chunk in raw_chunks
         ]
+
+        # Apply overlap post-processing (≈4 chars per token)
+        if config.chunk_overlap > 0:
+            overlap_chars = config.chunk_overlap * 4
+            chunks = self._apply_overlap(chunks, text, overlap_chars)
+
+        return chunks
 
     def chunk_document(
         self,

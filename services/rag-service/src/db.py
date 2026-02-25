@@ -3,7 +3,6 @@ Database module for conversation persistence.
 Uses SQLAlchemy with psycopg2 for PostgreSQL access.
 """
 
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,9 +21,14 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
 
-POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://docintel:docintel_secret@postgres:5432/docintel")
+from .config import get_settings as _get_settings
 
-engine = create_engine(POSTGRES_URL, pool_size=5, max_overflow=10, pool_pre_ping=True)
+engine = create_engine(
+    _get_settings().postgres_url,
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True,
+)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 

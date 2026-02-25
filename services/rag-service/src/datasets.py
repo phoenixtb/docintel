@@ -7,10 +7,13 @@ Provides:
 - Zero-shot domain classification
 """
 
+import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
 from functools import lru_cache
+from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -168,20 +171,20 @@ class DatasetLoader:
         config = DATASET_CONFIGS[dataset_key]
 
         # Load from HuggingFace
-        print(f"[DEBUG] Loading dataset: {config['name']}, subset: {config.get('subset')}, split: {config['split']}")
+        logger.debug("Loading dataset: %s, subset: %s, split: %s", config['name'], config.get('subset'), config['split'])
         
         if config["subset"]:
             ds = load_dataset(config["name"], config["subset"], split=config["split"])
         else:
             ds = load_dataset(config["name"], split=config["split"])
 
-        print(f"[DEBUG] Dataset {dataset_key} has {len(ds)} items, columns: {ds.column_names}")
+        logger.debug("Dataset %s has %d items, columns: %s", dataset_key, len(ds), ds.column_names)
 
         # Take only requested samples
         if len(ds) > samples:
             ds = ds.shuffle(seed=42).select(range(samples))
 
-        print(f"[DEBUG] After sampling: {len(ds)} items")
+        logger.debug("After sampling: %d items", len(ds))
 
         documents = []
         extract_fn = config.get("extract_fn")
@@ -191,8 +194,8 @@ class DatasetLoader:
             
             # Debug first item
             if idx == 0:
-                print(f"[DEBUG] First item keys: {list(item.keys())}")
-                print(f"[DEBUG] text_field '{text_field}' extract_fn: {extract_fn}")
+                logger.debug("First item keys: %s", list(item.keys()))
+                logger.debug("text_field '%s' extract_fn: %s", text_field, extract_fn)
 
             text = None
             
@@ -250,7 +253,7 @@ class DatasetLoader:
             if len(documents) >= samples:
                 break
 
-        print(f"[DEBUG] Extracted {len(documents)} documents from {dataset_key}")
+        logger.debug("Extracted %d documents from %s", len(documents), dataset_key)
         return documents[:samples]
 
 

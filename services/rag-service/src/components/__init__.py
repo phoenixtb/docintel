@@ -1,34 +1,34 @@
 """
-Custom Haystack Components for DocIntel RAG Service
-====================================================
-
-All components follow Haystack 2.x component API.
+Custom Haystack Components for DocIntel RAG Service.
+All components follow Haystack 2.x @component API.
 """
 
-from .llm import LiteLLMGenerator, LiteLLMStreamingGenerator
 from .cache import SemanticCacheChecker, SemanticCacheWriter
-from .retriever import SecureRetriever, TenantFilter
-from .router import DomainFilterBuilder, QueryExpander, CostTracker
-from .prompt import PromptBuilder, SystemPromptBuilder
-from src.prompts import DOMAIN_LABELS, RAG_PROMPT_TEMPLATE
+from .embedders import BM25SparseDocumentEmbedder, BM25SparseTextEmbedder
+from .generation import LiteLLMStreamingGenerator
+from .observability import CostTracker
+from .prompt import PromptBuilder
+from .query_transform import QueryExpander
+from .retrieval import SecureRetriever
+from .routing import DomainFilterBuilder
 
 __all__ = [
-    # LLM
-    "LiteLLMGenerator",
-    "LiteLLMStreamingGenerator",
     # Cache
     "SemanticCacheChecker",
     "SemanticCacheWriter",
-    # Retrieval
-    "SecureRetriever",
-    "TenantFilter",
-    # Router
-    "DomainFilterBuilder",
-    "QueryExpander",
+    # Embedders
+    "BM25SparseDocumentEmbedder",
+    "BM25SparseTextEmbedder",
+    # Generation
+    "LiteLLMStreamingGenerator",
+    # Observability
     "CostTracker",
-    "DOMAIN_LABELS",
     # Prompt
     "PromptBuilder",
-    "SystemPromptBuilder",
-    "RAG_PROMPT_TEMPLATE",
+    # Query transformation
+    "QueryExpander",
+    # Retrieval
+    "SecureRetriever",
+    # Routing
+    "DomainFilterBuilder",
 ]

@@ -1,27 +1,22 @@
 """
-Haystack Pipelines for DocIntel RAG Service
-============================================
-
-Indexing and query pipelines for document processing.
+Haystack Pipelines for DocIntel RAG Service.
 """
 
 from .indexing import (
-    create_document_store,
     create_indexing_pipeline,
-    index_chunks,
     delete_document_vectors,
     delete_tenant_vectors,
+    index_chunks,
 )
-from .query import RAGQueryPipeline, get_query_pipeline
+from .query import RAGService, build_query_pipeline
 
 __all__ = [
     # Indexing
-    "create_document_store",
     "create_indexing_pipeline",
     "index_chunks",
     "delete_document_vectors",
     "delete_tenant_vectors",
     # Query
-    "RAGQueryPipeline",
-    "get_query_pipeline",
+    "RAGService",
+    "build_query_pipeline",
 ]

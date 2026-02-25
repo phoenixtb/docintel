@@ -2,65 +2,49 @@
 Prompt Builder Component
 ========================
 
-Builds prompts for RAG generation using Jinja2 templates.
+Builds chat messages for RAG generation from retrieved documents and query.
+Outputs list[ChatMessage] so it connects directly to OllamaChatGenerator.messages.
+
+Pipeline position:
+  [TransformersSimilarityRanker] → PromptBuilder → OllamaChatGenerator
 """
 
-from haystack import component, Document
+from haystack import Document, component
+from haystack.dataclasses import ChatMessage
 from jinja2 import Template
+from typing import Optional
 
-# Import from centralized prompts
-from src.prompts import RAG_PROMPT_TEMPLATE, RAG_PROMPT_WITH_SOURCES, SYSTEM_PROMPT
+from ..prompts import RAG_PROMPT_TEMPLATE, RAG_PROMPT_WITH_HISTORY, RAG_PROMPT_WITH_SOURCES
 
 
 @component
 class PromptBuilder:
     """
-    Builds prompts for RAG generation from documents and query.
-    Uses Jinja2 templating for flexibility.
-    Uses RAG_PROMPT_WITH_SOURCES by default for citation-style answers.
+    Renders the RAG prompt and wraps it in a ChatMessage for the LLM.
+
+    Uses RAG_PROMPT_WITH_SOURCES by default; RAG_PROMPT_WITH_HISTORY when
+    conversation history is provided.
     """
 
     def __init__(self, template: str | None = None):
-        self.template_str = template or RAG_PROMPT_WITH_SOURCES
-        self.template = Template(self.template_str)
+        self._template = Template(template or RAG_PROMPT_WITH_SOURCES)
+        self._history_template = Template(RAG_PROMPT_WITH_HISTORY)
 
-    @component.output_types(prompt=str)
-    def run(self, documents: list[Document], query: str) -> dict:
-        prompt = self.template.render(documents=documents, query=query)
-        return {"prompt": prompt}
+    @component.output_types(messages=list[ChatMessage])
+    def run(
+        self,
+        documents: list[Document],
+        query: str,
+        history: Optional[list[dict]] = None,
+    ) -> dict:
+        if history:
+            prompt = self._history_template.render(
+                documents=documents, query=query, history=history
+            )
+        else:
+            prompt = self._template.render(documents=documents, query=query)
+
+        return {"messages": [ChatMessage.from_user(prompt)]}
 
 
-@component
-class SystemPromptBuilder:
-    """
-    Alternative prompt builder with system/user message separation.
-    Useful for chat-style LLMs.
-    """
-
-    def __init__(self, system_prompt: str | None = None):
-        self.system_prompt = system_prompt or SYSTEM_PROMPT
-
-    @component.output_types(messages=list[dict])
-    def run(self, documents: list[Document], query: str) -> dict:
-        # Build context from documents
-        context_parts = []
-        for i, doc in enumerate(documents):
-            source = doc.meta.get("filename", f"Document {i+1}")
-            chunk_idx = doc.meta.get("chunk_index", "N/A")
-            context_parts.append(f"[Source: {source}, Chunk: {chunk_idx}]\n{doc.content}")
-
-        context = "\n\n---\n\n".join(context_parts)
-
-        user_message = f"""Based on the following context, answer the question.
-
-Context:
-{context}
-
-Question: {query}"""
-
-        return {
-            "messages": [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_message},
-            ]
-        }
+__all__ = ["PromptBuilder"]

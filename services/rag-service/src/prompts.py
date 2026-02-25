@@ -61,6 +61,24 @@ Question: {{ query }}
 Provide a clear, concise answer with citations like [1], [2], etc.
 Do not repeat information. Do not use bullet lists unless the question asks for a list."""
 
+RAG_PROMPT_WITH_HISTORY = """Based on the following document excerpts, answer the question. Include source citations in your response.
+
+Documents:
+{%- for doc in documents %}
+[{{ loop.index }}] {{ doc.meta.get('filename', 'Unknown') }}:
+{{ doc.content }}
+{% endfor %}
+{% if history %}
+Previous conversation:
+{%- for msg in history %}
+{{ msg['role'] | capitalize }}: {{ msg['content'] }}
+{%- endfor %}
+{% endif %}
+Question: {{ query }}
+
+Provide a clear, concise answer with citations like [1], [2], etc.
+Do not repeat information. Do not use bullet lists unless the question asks for a list."""
+
 # =============================================================================
 # No Documents Response
 # =============================================================================
