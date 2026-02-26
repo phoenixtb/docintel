@@ -246,23 +246,69 @@ This project is Part 2B of the "AI for Architects" tutorial series:
 - Part 2A: Production RAG Concepts
 - **Part 2B: Enterprise Document Intelligence (this project)**
 
-## Sample queries for the sample datasets
-Am I doing something wrong?
-HR Policy:
-- How many days of annual leave am I entitled to?
-- What is the maternity leave policy?
-- How do I request time off for a family emergency?
-- What happens to my unused vacation days at year end?
+## Demo Queries
 
-Technical:
-- How do I authenticate API requests?
-- What are the rate limits for the API?
-- How do I upload a document using the API?
+All 20 queries below are validated against the sample datasets (20/20 pass).
+Load sample data first: **Documents → Load Sample Data** (or `./scripts/seed-data.sh`).
 
-Contracts:
-- What happens to my data if the contract is terminated?
-- What is the liability cap in the agreement?
-- How can I terminate the service agreement?
+> Tip: use the **Domain** filter in the chat UI to scope queries to the right dataset.
+
+### HR Policies (`hr_policy`)
+
+| Query | Expected topics |
+|-------|----------------|
+| What is the work from home policy? | acknowledgement, periodic review |
+| How many days of annual leave am I entitled to? | entitlement, leave days |
+| What is the process for requesting parental leave? | parental leave, request procedure |
+| How is employee performance evaluated during the probation period? | evaluation, probation |
+| What are the consequences of not complying with the code of conduct? | disciplinary action |
+| What should I do if I experience workplace harassment? | reporting, policy |
+| How do I submit a complaint or grievance? | grievance procedure |
+
+### Technical (`technical`)
+
+| Query | Expected topics |
+|-------|----------------|
+| How do I troubleshoot a system that keeps crashing? | diagnostics, crash analysis |
+| What are the steps to recover data from a failed hard drive? | data recovery |
+| How do I configure network settings on a remote server? | network configuration |
+| What are best practices for securing a database? | access control, encryption |
+| How do I set up a VPN connection? | VPN, network tunneling |
+| What is the recommended way to back up critical data? | backup strategies, storage |
+
+### Contracts (`contracts`) — real CUAD commercial contracts
+
+| Query | Expected topics |
+|-------|----------------|
+| What are the termination clauses in these contracts? | notice period, termination conditions |
+| Who owns intellectual property developed under this agreement? | IP ownership, assignment |
+| What is the limitation of liability in this contract? | liability cap, damages exclusions |
+| Does this agreement include a non-compete or non-solicitation clause? | restraint of trade |
+| What are the indemnification obligations of each party? | indemnify, hold harmless |
+| What are the payment terms and conditions? | invoicing, due dates |
+| Under what circumstances can the contract be renewed or extended? | renewal, extension term |
+
+### Integration Tests
+
+A reusable test suite lives in `tests/integration/`:
+
+```bash
+cd tests/integration
+pip install -r requirements.txt
+
+# Run all suites (direct rag-service)
+python run_tests.py --url http://localhost:8000 --rag-path /query/stream
+
+# Run via api-gateway
+python run_tests.py
+
+# Run a single suite
+python run_tests.py --suite "Contracts"
+
+# Output: tests/integration/reports/TIMESTAMP.{json,md}
+```
+
+Add new query suites or tweak pass criteria in `tests/integration/queries.yaml`.
 
 ## License
 

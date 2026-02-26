@@ -44,22 +44,22 @@
     ></div>
 
     <!-- Dialog -->
-    <div class="relative z-10 w-full max-w-md rounded-xl bg-gray-900 border border-gray-700 shadow-2xl p-6 mx-4">
-      <h2 id="confirm-title" class="text-lg font-semibold text-white mb-2">{title}</h2>
-      <p class="text-sm text-gray-400 mb-6">{message}</p>
+    <div class="relative z-10 w-full max-w-md rounded-2xl glass-dark border border-white/8 shadow-[0_20px_60px_rgba(0,0,0,0.7)] p-6 mx-4">
+      <h2 id="confirm-title" class="text-base font-semibold text-slate-200 mb-2">{title}</h2>
+      <p class="text-sm text-slate-500 mb-6">{message}</p>
 
       <div class="flex justify-end gap-3">
         <button
           onclick={oncancel}
-          class="px-4 py-2 rounded-lg text-sm font-medium text-gray-300 bg-gray-800 hover:bg-gray-700 transition-colors"
+          class="px-4 py-2 rounded-xl text-sm font-medium text-slate-400 bg-white/5 hover:bg-white/10 border border-white/5 hover:border-white/10 transition-all"
         >
           {cancelLabel}
         </button>
         <button
           onclick={onconfirm}
-          class="px-4 py-2 rounded-lg text-sm font-medium transition-colors {dangerous
-            ? 'bg-red-600 hover:bg-red-500 text-white'
-            : 'bg-blue-600 hover:bg-blue-500 text-white'}"
+          class="px-4 py-2 rounded-xl text-sm font-medium transition-all {dangerous
+            ? 'bg-red-600/80 hover:bg-red-500 text-white border border-red-500/30'
+            : 'bg-emerald-600/80 hover:bg-emerald-500 text-white border border-emerald-500/30'}"
         >
           {confirmLabel}
         </button>

@@ -509,10 +509,42 @@ async def query_documents_stream(
             sparse_result = rag_service._sparse_embedder.run(text=request.question)
             query_sparse_embedding = sparse_result.get("sparse_embedding")
 
-            # Retrieve
-            domain_filter = None
+            # ── Query Routing (Pattern 1 from production-rag-concepts) ──────
+            # If the caller didn't specify a domain, auto-classify the query
+            # so retrieval stays within the relevant knowledge-base partition.
+            # Confidence threshold: only apply the filter when the classifier
+            # is reasonably sure — below it we fall back to unfiltered search.
+            ROUTING_CONFIDENCE_THRESHOLD = 0.55
+            routed_domain: str | None = None
+
             if request.document_type and request.document_type != "all":
-                domain_filter = {"key": "document_type", "match": {"value": request.document_type}}
+                # Explicit caller override — honour it directly.
+                routed_domain = request.document_type
+            else:
+                try:
+                    from ..datasets import get_domain_classifier
+                    clf = get_domain_classifier()
+                    result = clf.classify(request.question)
+                    if result.confidence >= ROUTING_CONFIDENCE_THRESHOLD:
+                        routed_domain = result.domain
+                        logger.info(
+                            "Query routed to domain '%s' (confidence=%.2f)",
+                            routed_domain, result.confidence,
+                        )
+                    else:
+                        logger.info(
+                            "Query routing confidence too low (%.2f) — searching all domains",
+                            result.confidence,
+                        )
+                except Exception as e:
+                    logger.warning("Domain classifier failed (non-fatal): %s", e)
+
+            domain_filter = None
+            if routed_domain:
+                domain_filter = {"key": "document_type", "match": {"value": routed_domain}}
+
+            # Re-emit metadata with routing info so the UI can show which domain was used
+            yield f"data: {json.dumps({'routing': {'domain': routed_domain, 'explicit': bool(request.document_type and request.document_type != 'all')}})}\n\n"
 
             retrieval_result = rag_service._pipeline.get_component("retriever").run(  # type: ignore[union-attr]
                 query_embedding=query_embedding,
@@ -525,7 +557,10 @@ async def query_documents_stream(
             top_k = request.top_k or settings.rag_default_top_k
             documents = retrieval_result["documents"][:top_k]
 
-            logger.debug("Streaming query retrieved %d documents", len(documents))
+            logger.info(
+                "Retrieved %d documents (domain_filter=%s)",
+                len(documents), routed_domain or "none",
+            )
 
             if not documents:
                 from ..prompts import NO_DOCUMENTS_RESPONSE
@@ -603,6 +638,7 @@ async def query_documents_stream(
                     "chunk_index": chunk_idx,
                     "score": doc.score or 0.0,
                     "content": (doc.content or "")[:600],
+                    "domain": doc.meta.get("document_type") or doc.meta.get("domain") or "",
                 })
 
             if request.conversation_id:

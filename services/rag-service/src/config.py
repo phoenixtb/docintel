@@ -45,7 +45,7 @@ class Settings(BaseSettings):
 
     # LLM generation settings
     ollama_llm_temperature: float = 0.1
-    ollama_llm_max_tokens: int = 1024
+    ollama_llm_max_tokens: int = 4096
 
     # ── Reranker ─────────────────────────────────────────────────────────────
     # Runs locally on CPU. Haystack has no Ollama reranker component.

@@ -1,0 +1,1483 @@
+{
+  "run_at": "2026-02-27T01:17:51.854826",
+  "config": {
+    "base_url": "http://localhost:8000",
+    "rag_path": "/query/stream",
+    "tenant_id": "default",
+    "use_cache": false,
+    "use_reranking": true
+  },
+  "suites": [
+    {
+      "name": "HR Policies",
+      "document_type": "hr_policy",
+      "queries": [
+        {
+          "question": "What is the work from home policy?",
+          "expect_keywords": [
+            "acknowledge",
+            "policy",
+            "review"
+          ],
+          "result": {
+            "answer": "The Work From Home (WFH) policy requires all employees to acknowledge they have read, understood, and agree to comply with it, and is subject to periodic review with potential amendments based on business requirements. [4] [2]",
+            "thinking_length": 2414,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "hr_policies_9_e0a509e7",
+                "filename": "hr_policies_sample_9.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.6666667,
+                "content": "USER: What happens if an employee does not acknowledge the WFH policy?\nASSISTANT: If an employee does not acknowledge the WFH policy, they may not be permitted to work from home, as acknowledgement is required to ensure understanding and compliance with the policy."
+              },
+              {
+                "ref_id": 2,
+                "document_id": "hr_policies_413_f9dadd60",
+                "filename": "hr_policies_sample_413.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.6666667,
+                "content": "USER: How often is the Work From Home (WFH) policy reviewed and can it be changed?\nASSISTANT: The Work From Home (WFH) policy is subject to periodic review and may be amended as per business requirements. This means the company regularly evaluates the policy and can make changes when necessary to align with organizational needs."
+              },
+              {
+                "ref_id": 3,
+                "document_id": "hr_policies_46_a28d298a",
+                "filename": "hr_policies_sample_46.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.5,
+                "content": "USER: How often is the Work From Home (WFH) policy reviewed and can it be changed?\nASSISTANT: The Work From Home (WFH) policy is subject to periodic review and may be amended as per business requirements. This means the company regularly evaluates the policy and can make changes when necessary to align with organizational needs."
+              },
+              {
+                "ref_id": 4,
+                "document_id": "hr_policies_420_339ce720",
+                "filename": "hr_policies_sample_420.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.5,
+                "content": "USER: Is it mandatory for employees to acknowledge the Work From Home (WFH) policy?\nASSISTANT: Yes, all employees are required to acknowledge that they have read, understood, and agree to comply with the Work From Home (WFH) policy."
+              },
+              {
+                "ref_id": 5,
+                "document_id": "hr_policies_424_b275193f",
+                "filename": "hr_policies_sample_424.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.2857143,
+                "content": "USER: What happens if an employee does not acknowledge the WFH policy?\nASSISTANT: If an employee does not acknowledge the WFH policy, they may not be permitted to work from home, as acknowledgement is required to ensure understanding and compliance with the policy."
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 21.1,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "acknowledge",
+              "policy",
+              "review"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "How many days of annual leave am I entitled to?",
+          "expect_keywords": [
+            "leave",
+            "days",
+            "entitle"
+          ],
+          "result": {
+            "answer": "Based on the provided document excerpts, **none of the documents specify how many days of annual leave an employee is entitled to**. The excerpts cover topics like out-of-office messaging for extended leave ([1]), annual review timing ([2]), compensatory leave eligibility ([3]), compensatory leave application processes ([4]), and Code of Conduct review frequency ([5]), but **no document states annual leave entitlement numbers** (e.g., 10 days, 15 days, etc.). \n\nThe question about annual leave entitlements is not addressed in any of the provided samples. \n\n**Citation**: No relevant document [1]-[5] contains information on annual leave entitlements.",
+            "thinking_length": 2443,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "hr_policies_367_14507f5c",
+                "filename": "hr_policies_sample_367.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 1.0,
+                "content": "USER: If I am taking leave for more than two days, is there anything specific I need to do?\nASSISTANT: Yes, if you are taking leave for two or more days, you should schedule an out-of-office message, such as 'Unavailable as I will be traveling,' to inform your colleagues of your extended absence."
+              },
+              {
+                "ref_id": 2,
+                "document_id": "hr_policies_594_bfb5119c",
+                "filename": "hr_policies_sample_594.txt",
+                "section": "chunk 1",
+                "chunk_index": 1,
+                "score": 0.33333334,
+                "content": "ASSISTANT: While annual reviews are a good standard practice, amendments should be made as soon as necessary, especially if there are significant changes in laws, regulations, or organizational needs. Waiting for the annual review could leave the organization exposed to risks or non-compliance in the interim."
+              },
+              {
+                "ref_id": 3,
+                "document_id": "hr_policies_75_c3d30102",
+                "filename": "hr_policies_sample_75.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.33333334,
+                "content": "USER: Are managers and employees in leadership roles eligible for compensatory off?\nASSISTANT: Managers and employees in leadership roles are generally not eligible for compensatory off unless it is specifically approved by the CEO."
+              },
+              {
+                "ref_id": 4,
+                "document_id": "hr_policies_133_b3f88cdd",
+                "filename": "hr_policies_sample_133.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.2916667,
+                "content": "USER: What is the process for applying for compensatory off in our company?\nASSISTANT: To apply for compensatory off, you must submit your request within 7 days of performing the extra work. This should be done using the company’s leave management system. The request will then be reviewed and is subject to approval by your reporting manager, based on business requirements and staffing needs."
+              },
+              {
+                "ref_id": 5,
+                "document_id": "hr_policies_338_f98d0048",
+                "filename": "hr_policies_sample_338.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.25,
+                "content": "USER: How often should a company review its Code of Conduct?\nASSISTANT: There is no universal rule, but many companies review their Code of Conduct annually or whenever there are significant changes in laws, regulations, or industry standards. Regular reviews help ensure the Code remains relevant and effective."
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 16.27,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "leave",
+              "days",
+              "entitle"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "What is the process for requesting parental leave?",
+          "expect_keywords": [
+            "parental",
+            "leave",
+            "request"
+          ],
+          "result": {
+            "answer": "Based on the provided document excerpts, there is no information about the process for requesting parental leave. The documents [1] through [5] exclusively cover compensatory leave, general leave notifications, and planned/unplanned leave procedures, but none address parental leave specifically. \n\n**Citations**: [1], [2], [3], [4], [5] (no applicable document contains parental leave policy details).",
+            "thinking_length": 1586,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "hr_policies_133_b3f88cdd",
+                "filename": "hr_policies_sample_133.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 1.0,
+                "content": "USER: What is the process for applying for compensatory off in our company?\nASSISTANT: To apply for compensatory off, you must submit your request within 7 days of performing the extra work. This should be done using the company’s leave management system. The request will then be reviewed and is subject to approval by your reporting manager, based on business requirements and staffing needs."
+              },
+              {
+                "ref_id": 2,
+                "document_id": "hr_policies_364_38ba7926",
+                "filename": "hr_policies_sample_364.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.6666667,
+                "content": "USER: What is the process for informing about planned and unplanned leaves in our company?\nASSISTANT: For planned leaves, you must inform the 'Leave Plans' channel at least a week in advance and obtain approval from your manager to ensure proper workload distribution. For unplanned sick leave, update the 'Leave Plans' channel between 9:30 to 10 AM or before your scrum, whichever is earlier."
+              },
+              {
+                "ref_id": 3,
+                "document_id": "hr_policies_47_0c184178",
+                "filename": "hr_policies_sample_47.txt",
+                "section": "chunk 1",
+                "chunk_index": 1,
+                "score": 0.375,
+                "content": "ASSISTANT: If you forget to apply for compensatory off in the leave management system after getting email approval, your leave will not be officially recorded or approved. It is essential to complete the process in the leave management system to ensure your compensatory off is recognized and can be availed."
+              },
+              {
+                "ref_id": 4,
+                "document_id": "hr_policies_42_943cdbc1",
+                "filename": "hr_policies_sample_42.txt",
+                "section": "chunk 2",
+                "chunk_index": 2,
+                "score": 0.2909091,
+                "content": "After receiving approval, the employee must apply for the compensatory off through the company’s leave management system, and the leave must be approved in the system before it can be availed."
+              },
+              {
+                "ref_id": 5,
+                "document_id": "hr_policies_94_29ea9bef",
+                "filename": "hr_policies_sample_94.txt",
+                "section": "chunk 1",
+                "chunk_index": 1,
+                "score": 0.25,
+                "content": "ASSISTANT: Employees are required to inform their reporting manager and update the HR portal in advance for any planned leave or absence. In the case of unplanned leave, such as a medical emergency, employees should notify their manager as soon as possible via call or message. "
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 10.16,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "parental",
+              "leave",
+              "request"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "How is employee performance evaluated during the probation period?",
+          "expect_keywords": [
+            "performance",
+            "probation",
+            "evaluation"
+          ],
+          "result": {
+            "answer": "Based on the provided document excerpts, there is no information about how employee performance is evaluated during the probation period. The documents contain general performance evaluation criteria ([3], [4]) and remote employee review frequency ([5]), but none address probation-specific evaluation processes. \n\n**Answer**: The provided documents do not include information on probation period performance evaluation.  \n\n**Citations**: [1], [2], [3], [4], [5] (no relevant excerpt addresses probation period evaluation).",
+            "thinking_length": 1585,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "hr_policies_43_0bd5d9de",
+                "filename": "hr_policies_sample_43.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.8333334,
+                "content": "USER: What criteria are used to evaluate employee performance in our company?\n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "hr_policies_368_eac610d9",
+                "filename": "hr_policies_sample_368.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.8333334,
+                "content": "USER: What criteria are used to evaluate employee performance in our company?\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "hr_policies_43_0bd5d9de",
+                "filename": "hr_policies_sample_43.txt",
+                "section": "chunk 1",
+                "chunk_index": 1,
+                "score": 0.45,
+                "content": "ASSISTANT: Employee performance is evaluated based on ownership, adherence to timelines, and quality of work; initiative, dedication, and teamwork; upskilling efforts and work knowledge; communication (especially on Teams), personality, and punctuality; past performance reviews and improvements; and acceptance of responsibility and constructive feedback."
+              },
+              {
+                "ref_id": 4,
+                "document_id": "hr_policies_368_eac610d9",
+                "filename": "hr_policies_sample_368.txt",
+                "section": "chunk 1",
+                "chunk_index": 1,
+                "score": 0.45,
+                "content": "ASSISTANT: Employee performance is evaluated based on ownership, adherence to timelines, and quality of work; initiative, dedication, and teamwork; upskilling efforts and work knowledge; communication (especially on Teams), personality, and punctuality; past performance reviews and improvements; and acceptance of responsibility and constructive feedback."
+              },
+              {
+                "ref_id": 5,
+                "document_id": "hr_policies_403_04545d97",
+                "filename": "hr_policies_sample_403.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.24285716,
+                "content": "USER: How often will performance reviews be conducted for remote employees?\nASSISTANT: Performance reviews for remote employees will be conducted regularly. The specific frequency may vary depending on company policy, but the intent is to ensure ongoing productivity and alignment with organizational goals."
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 10.54,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "performance",
+              "probation",
+              "evaluation"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "What are the consequences of not complying with the code of conduct?",
+          "expect_keywords": [
+            "conduct",
+            "consequence",
+            "disciplin"
+          ],
+          "result": {
+            "answer": "Based on the provided documents, the consequences of not complying with the code of conduct include legal penalties, loss of reputation, decreased employee morale, and loss of customer trust. This occurs when a company fails to update its Code of Conduct, as it risks non-compliance with new laws, falling behind industry standards, and disappointing stakeholders.  \n\n**Source citation**: [5]",
+            "thinking_length": 2330,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "hr_policies_344_c2184c64",
+                "filename": "hr_policies_sample_344.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.5,
+                "content": "USER: Why is training provided for the Code of Business Conduct?\nASSISTANT: Training is provided to help employees, partners, and stakeholders understand the Code of Business Conduct, recognize ethical dilemmas, and make informed decisions. It ensures that everyone is equipped with the knowledge and resources needed to comply with the code and uphold the company's ethical standards."
+              },
+              {
+                "ref_id": 2,
+                "document_id": "hr_policies_630_f6a6bb77",
+                "filename": "hr_policies_sample_630.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.5,
+                "content": "USER: What happens if someone violates the company's Code of Conduct?\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "hr_policies_12_a7758aa2",
+                "filename": "hr_policies_sample_12.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.33333334,
+                "content": "USER: How often should a company review its Code of Conduct?\nASSISTANT: There is no universal rule, but many companies review their Code of Conduct annually or whenever there are significant changes in laws, regulations, or industry standards. Regular reviews help ensure the Code remains relevant and effective."
+              },
+              {
+                "ref_id": 4,
+                "document_id": "hr_policies_630_f6a6bb77",
+                "filename": "hr_policies_sample_630.txt",
+                "section": "chunk 1",
+                "chunk_index": 1,
+                "score": 0.33333334,
+                "content": "ASSISTANT: Violations of the company's Code of Conduct can result in disciplinary action. This may include measures such as termination of employment, legal action, or reporting the incident to appropriate authorities. The company will determine the appropriate level of discipline based on the severity and circumstances of the violation."
+              },
+              {
+                "ref_id": 5,
+                "document_id": "hr_policies_342_1d91ec4d",
+                "filename": "hr_policies_sample_342.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.25,
+                "content": "USER: If a company fails to update its Code of Conduct, what potential risks could it face?\nASSISTANT: If a company does not update its Code of Conduct, it risks non-compliance with new laws, falling behind industry standards, and disappointing stakeholders. This can lead to legal penalties, loss of reputation, decreased employee morale, and loss of customer trust."
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 12.96,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "conduct",
+              "consequence"
+            ],
+            "keyword_miss": [
+              "disciplin"
+            ],
+            "keyword_coverage": 0.67
+          }
+        },
+        {
+          "question": "What should I do if I experience workplace harassment?",
+          "expect_keywords": [
+            "harassment",
+            "report",
+            "policy"
+          ],
+          "result": {
+            "answer": "If you experience workplace harassment, report the incident to your supervisor or human resources department as soon as possible. Kreeda Labs takes all reports seriously and will investigate promptly to ensure a respectful and safe workplace. [2]",
+            "thinking_length": 4040,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "hr_policies_472_f4d97c43",
+                "filename": "hr_policies_sample_472.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.6,
+                "content": "USER: How does Kreeda Labs handle reports of workplace harassment?\nASSISTANT: Kreeda Labs handles reports of workplace harassment with seriousness and confidentiality. All complaints are investigated thoroughly, and appropriate action is taken in accordance with the law and the company's POSH policy."
+              },
+              {
+                "ref_id": 2,
+                "document_id": "hr_policies_320_9c936d7b",
+                "filename": "hr_policies_sample_320.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.5,
+                "content": "USER: What should I do if I witness bullying at work?\nASSISTANT: If you witness bullying at work, you should report the incident to your supervisor or human resources department as soon as possible. Our company takes all reports seriously and will investigate promptly to ensure a respectful and safe workplace."
+              },
+              {
+                "ref_id": 3,
+                "document_id": "hr_policies_52_5541e7b6",
+                "filename": "hr_policies_sample_52.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.33333334,
+                "content": "USER: What happens if someone retaliates against a whistleblower at Kreeda Labs?\nASSISTANT: If someone retaliates against a whistleblower at Kreeda Labs, it is treated as a serious violation of company policy. Such actions may result in disciplinary action, up to and including termination of employment."
+              },
+              {
+                "ref_id": 4,
+                "document_id": "hr_policies_581_8e737eab",
+                "filename": "hr_policies_sample_581.txt",
+                "section": "chunk 1",
+                "chunk_index": 1,
+                "score": 0.33333334,
+                "content": "ASSISTANT: Kreeda Labs conducts regular POSH (Prevention of Sexual Harassment) awareness and training programs for all employees and stakeholders. These initiatives are designed to educate everyone about the policies, procedures, and best practices related to preventing sexual harassment in the workplace."
+              },
+              {
+                "ref_id": 5,
+                "document_id": "hr_policies_50_595e44eb",
+                "filename": "hr_policies_sample_50.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.25,
+                "content": "USER: What happens if an employee engages in illegal or unethical conduct?\nASSISTANT: If an employee engages in illegal or unethical conduct, whether on or off company premises, the company may take disciplinary action. This could include warnings, suspension, or even termination of employment, depending on the severity of the conduct and its impact on the company."
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 21.85,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "harassment",
+              "report"
+            ],
+            "keyword_miss": [
+              "policy"
+            ],
+            "keyword_coverage": 0.67
+          }
+        },
+        {
+          "question": "How do I submit a complaint or grievance?",
+          "expect_keywords": [
+            "complaint",
+            "grievance",
+            "procedure"
+          ],
+          "result": {
+            "answer": "To submit a complaint or grievance, you may email the PCC at posh@kreedalabs.com or submit it in person to any PCC member. Anonymous complaints are accepted if they include sufficient details. [1] [5]",
+            "thinking_length": 1747,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "hr_policies_549_5a1e6132",
+                "filename": "hr_policies_sample_549.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.625,
+                "content": "USER: What are the ways to submit a complaint to the PCC?\nASSISTANT: Complaints can be submitted to the PCC either by sending an email to posh@kreedalabs.com or by submitting the complaint in person to any PCC member."
+              },
+              {
+                "ref_id": 2,
+                "document_id": "hr_policies_14_36f5e4bf",
+                "filename": "hr_policies_sample_14.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.625,
+                "content": "USER: Who can I approach in person to file a complaint with the PCC?\nASSISTANT: You can approach any member of the PCC in person to file your complaint. The committee is responsible for receiving and addressing such complaints."
+              },
+              {
+                "ref_id": 3,
+                "document_id": "hr_policies_61_06e81314",
+                "filename": "hr_policies_sample_61.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.33333334,
+                "content": "USER: If I miss the three-month deadline, can I still file a complaint with the PCC?\nASSISTANT: Generally, complaints should be filed within three months of the incident. If you miss this deadline, it is advisable to contact the PCC directly to see if any exceptions can be made based on the circumstances."
+              },
+              {
+                "ref_id": 4,
+                "document_id": "hr_policies_570_0b6bf3cc",
+                "filename": "hr_policies_sample_570.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.33333334,
+                "content": "USER: Are there consequences for making a complaint in bad faith?\nASSISTANT: Yes, making a complaint in bad faith, such as submitting a false or malicious complaint, can result in disciplinary action against the person who made the complaint."
+              },
+              {
+                "ref_id": 5,
+                "document_id": "hr_policies_546_9702da87",
+                "filename": "hr_policies_sample_546.txt",
+                "section": "chunk 0",
+                "chunk_index": 0,
+                "score": 0.25,
+                "content": "USER: How can someone file a complaint with the PCC regarding an incident?\nASSISTANT: An aggrieved person can file a written complaint with the PCC within three months of the incident. Complaints may be submitted via email to posh@kreedalabs.com or in person to any PCC member. Additionally, anonymous complaints are accepted if they include sufficient details."
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 10.57,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "complaint",
+              "grievance"
+            ],
+            "keyword_miss": [
+              "procedure"
+            ],
+            "keyword_coverage": 0.67
+          }
+        }
+      ]
+    },
+    {
+      "name": "Technical",
+      "document_type": "technical",
+      "queries": [
+        {
+          "question": "How do I troubleshoot a system that keeps crashing?",
+          "expect_keywords": [
+            "crash",
+            "troubleshoot",
+            "diagnostic"
+          ],
+          "result": {
+            "answer": "To troubleshoot a system that keeps crashing, generate diagnostic data, collect available system data, and share with IBM support if the system is WebSphere Message Broker or IBM Integration Bus (AIX, HP-UX, Linux, Solaris) [1]. If crashes are linked to Iolo System Mechanic Professional (as indicated by the error `_ASSERT(qfirst) failed in mxceff`), uninstall the software [2]. For \"General IO error\" issues, contact Technical Support [5].",
+            "thinking_length": 10893,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "techqa_56_cfc9cb48",
+                "filename": "techqa_sample_56.txt",
+                "section": "sample 18, doc 2",
+                "chunk_index": 1,
+                "score": 0.5,
+                "content": "This MustGather document explains how to troubleshoot this problem by yourself, how to generate diagnostic data when the problem is happening, how to collect the available data from your system, and how to share that data with IBM support. \n\nENVIRONMENT\nThese instructions are for WebSphere Message Broker or IBM Integration Bus on AIX, HP-UX, Linux, and Solaris systems.\n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "techqa_495_d0224425",
+                "filename": "techqa_sample_495.txt",
+                "section": "sample 165, doc 0",
+                "chunk_index": 7,
+                "score": 0.5,
+                "content": "The customer has since reported that all of the computers involved in these crashes had Iolo System Mechanic Professional installed. Subsequent runs of the same analysis on computers without System Mechanic ran without error messages or crashes. Users that experience system crashes with the message:\n\n_ASSERT(qfirst) failed in mxceff\n\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "techqa_24_688b2d52",
+                "filename": "techqa_sample_24.txt",
+                "section": "sample 8, doc 0",
+                "chunk_index": 7,
+                "score": 0.33333334,
+                "content": "The customer has since reported that all of the computers involved in these crashes had Iolo System Mechanic Professional installed. Subsequent runs of the same analysis on computers without System Mechanic ran without error messages or crashes. Users that experience system crashes with the message:\n\n_ASSERT(qfirst) failed in mxceff\n\n"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "techqa_56_e9b33a47",
+                "filename": "techqa_sample_56.txt",
+                "section": "sample 18, doc 2",
+                "chunk_index": 1,
+                "score": 0.33333334,
+                "content": "This MustGather document explains how to troubleshoot this problem by yourself, how to generate diagnostic data when the problem is happening, how to collect the available data from your system, and how to share that data with IBM support. \n\nENVIRONMENT\nThese instructions are for WebSphere Message Broker or IBM Integration Bus on AIX, HP-UX, Linux, and Solaris systems.\n"
+              },
+              {
+                "ref_id": 5,
+                "document_id": "techqa_32_b50728fd",
+                "filename": "techqa_sample_32.txt",
+                "section": "sample 10, doc 2",
+                "chunk_index": 17,
+                "score": 0.25,
+                "content": "If difficulties continue with the Web Mode and \"General IO error...\" please contact Technical Support for additional troubleshooting options."
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 64.44,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "crash",
+              "troubleshoot",
+              "diagnostic"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "What are the steps to recover data from a failed hard drive?",
+          "expect_keywords": [
+            "recover",
+            "data",
+            "drive"
+          ],
+          "result": {
+            "answer": "Based on the provided document excerpts, there are no specific steps for recovering data from a failed hard drive. The documents describe hardware requirements and firmware-related issues but do not address hard drive failure recovery procedures. Document [5] mentions \"recovery code\" and \"Flashcards\" in the context of interface card failures, stating: \"If Flashcards are in failed state, Contact Support for resolution.\" However, this refers to storage interface cards (not hard drives) and does not provide actionable recovery steps for hard drives. None of the documents [1]-[5] contain instructions for hard drive data recovery. \n\n**Citation**: [5] (only relevant excerpt, but not specific to hard drives)",
+            "thinking_length": 2461,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "techqa_44_9e664fa9",
+                "filename": "techqa_sample_44.txt",
+                "section": "sample 14, doc 2",
+                "chunk_index": 13,
+                "score": 0.6666667,
+                "content": "Note: If a C100B104 code is displayed, the firmware installation has failed. You should perform the following steps: \n\n1. Ensure that the USB flash drive contains the firmware fix. If necessary, copy the firmware to the USB flash drive again. \n2. Retry the task with another USB flash drive. \n3. If necessary, consult your service provider. \n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "techqa_44_c2727543",
+                "filename": "techqa_sample_44.txt",
+                "section": "sample 14, doc 2",
+                "chunk_index": 13,
+                "score": 0.5833334,
+                "content": "Note: If a C100B104 code is displayed, the firmware installation has failed. You should perform the following steps: \n\n1. Ensure that the USB flash drive contains the firmware fix. If necessary, copy the firmware to the USB flash drive again. \n2. Retry the task with another USB flash drive. \n3. If necessary, consult your service provider. \n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "techqa_6_d7c0051a",
+                "filename": "techqa_sample_6.txt",
+                "section": "sample 2, doc 0",
+                "chunk_index": 8,
+                "score": 0.5,
+                "content": "x86 or x86-64 Processor speed 2.5 GHz > 3 GHz System memory (RAM) 4 GB 8 GB Hard disk Hard drive with sufficient capacity 2 enterprise class hard drives with 10000 RPM or better Disk space For IBM Content Collector program package, prerequisite software, temporary data, and log information 150 GB >"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "techqa_477_b2a4e33a",
+                "filename": "techqa_sample_477.txt",
+                "section": "sample 159, doc 0",
+                "chunk_index": 8,
+                "score": 0.33333334,
+                "content": "x86 or x86-64 Processor speed 2.5 GHz > 3 GHz System memory (RAM) 4 GB 8 GB Hard disk Hard drive with sufficient capacity 2 enterprise class hard drives with 10000 RPM or better Disk space For IBM Content Collector program package, prerequisite software, temporary data, and log information 150 GB >"
+              },
+              {
+                "ref_id": 5,
+                "document_id": "techqa_42_a8e2008f",
+                "filename": "techqa_sample_42.txt",
+                "section": "sample 14, doc 0",
+                "chunk_index": 4,
+                "score": 0.25,
+                "content": "Note: Due to the abrupt halt, and both interface cards halting simultaneously, recovery code can fail Flashcards that are not really not defective. Display using CLI “storage” command, or GUI storage panel. If Flashcards are in failed state, Contact Support for resolution. \n\n \n\nIf lower than 248: \n\n1. Reboot box on a scheduled basis. Reboot will reset timer, and Uptime will be accurate. \n\n"
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 19.01,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "recover",
+              "data",
+              "drive"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "How do I configure network settings on a remote server?",
+          "expect_keywords": [
+            "network",
+            "configure",
+            "server"
+          ],
+          "result": {
+            "answer": "The provided documents do not contain general instructions for configuring network settings on a remote server. Specific network configurations mentioned in the documents include proxy settings for Web Start Studio ([2], [3]) and SSL security configuration for IBM WebSphere Application Server ([5]).",
+            "thinking_length": 9410,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "techqa_758_d09acce8",
+                "filename": "techqa_sample_758.txt",
+                "section": "sample 252, doc 2",
+                "chunk_index": 3,
+                "score": 0.5,
+                "content": "Step 4: Create Backup Object Server\nStep 5: Configure bi-directional Object Server failover gateway\nStep 6: Configure the Process Agents\nStep 7: Start Process Agents\nStep 8: Configure the Object Server to connect to the Process Agent\nStep 9: Test Failover\nStep 10: Test Failback\n\nMore information is available for setting up the Omnibus Multitier architecture at\n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "techqa_60_a558d139",
+                "filename": "techqa_sample_60.txt",
+                "section": "sample 20, doc 0",
+                "chunk_index": 3,
+                "score": 0.5,
+                "content": " * If proxy is used in the network in which the Web Start Studio is running, go to Web Start Studio Menu > Edit > Preferences > Session Login and check the proxy settings."
+              },
+              {
+                "ref_id": 3,
+                "document_id": "techqa_60_b95145d5",
+                "filename": "techqa_sample_60.txt",
+                "section": "sample 20, doc 0",
+                "chunk_index": 3,
+                "score": 0.33333334,
+                "content": " * If proxy is used in the network in which the Web Start Studio is running, go to Web Start Studio Menu > Edit > Preferences > Session Login and check the proxy settings."
+              },
+              {
+                "ref_id": 4,
+                "document_id": "techqa_287_ac7efa06",
+                "filename": "techqa_sample_287.txt",
+                "section": "sample 95, doc 2",
+                "chunk_index": 3,
+                "score": 0.33333334,
+                "content": "Step 4: Create Backup Object Server\nStep 5: Configure bi-directional Object Server failover gateway\nStep 6: Configure the Process Agents\nStep 7: Start Process Agents\nStep 8: Configure the Object Server to connect to the Process Agent\nStep 9: Test Failover\nStep 10: Test Failback\n\nMore information is available for setting up the Omnibus Multitier architecture at\n"
+              },
+              {
+                "ref_id": 5,
+                "document_id": "techqa_757_65fc1ce8",
+                "filename": "techqa_sample_757.txt",
+                "section": "sample 252, doc 1",
+                "chunk_index": 1,
+                "score": 0.25,
+                "content": "Review the security configuration on the IBM WebSphere Application Server for the FileNet Workplace XT application. Check the setting requiresSSL to see whether it has been set to true or false. \n\n\nRESOLVING THE PROBLEM\nThe WebSphere Application Server's security.xml can be reviewed for this specific label requiresSSL. Review the value for the \"requiresSSL\" and ensure it is set to false.\n\n\n\n\n"
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 55.02,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "network",
+              "server"
+            ],
+            "keyword_miss": [
+              "configure"
+            ],
+            "keyword_coverage": 0.67
+          }
+        },
+        {
+          "question": "What are best practices for securing a database?",
+          "expect_keywords": [
+            "secur",
+            "database",
+            "access"
+          ],
+          "result": {
+            "answer": "The provided document excerpts do not contain information on best practices for securing a database. The documents focus on database corruption checks, connection pooling troubleshooting, node synchronization issues, memory errors, and performance optimization during large data imports, but none address database security best practices such as authentication, encryption, access controls, or auditing. \n\n[1], [2], [3], [4], and [5] collectively cover operational and performance-related topics without specifying security protocols or recommendations.",
+            "thinking_length": 7229,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "techqa_32_92056f4a",
+                "filename": "techqa_sample_32.txt",
+                "section": "sample 10, doc 2",
+                "chunk_index": 8,
+                "score": 0.5,
+                "content": "2. Log onto the Synergy server as the Synergy admin user (usually ccm_root) and run the command... \n\n \n\nccmdb check <database path> \n\n\n\n\n\n \n\n......to ensure that there is no database corruption. \n\nResolve any database corruption with reference to the following technotes: \n\n\n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "techqa_782_c712d42b",
+                "filename": "techqa_sample_782.txt",
+                "section": "sample 260, doc 2",
+                "chunk_index": 5,
+                "score": 0.5,
+                "content": "12:21 What best practices should I follow to avoid problems with database connection pooling, and how should I troubleshoot connection pool problems when they do occur? 18:05 How do we debug a node synchronization issue? 23:09 What tools are available to troubleshoot a Outofmemory (OOM) error in our environment? "
+              },
+              {
+                "ref_id": 3,
+                "document_id": "techqa_311_fbcecedd",
+                "filename": "techqa_sample_311.txt",
+                "section": "sample 103, doc 2",
+                "chunk_index": 5,
+                "score": 0.33333334,
+                "content": "12:21 What best practices should I follow to avoid problems with database connection pooling, and how should I troubleshoot connection pool problems when they do occur? 18:05 How do we debug a node synchronization issue? 23:09 What tools are available to troubleshoot a Outofmemory (OOM) error in our environment? "
+              },
+              {
+                "ref_id": 4,
+                "document_id": "techqa_32_b50728fd",
+                "filename": "techqa_sample_32.txt",
+                "section": "sample 10, doc 2",
+                "chunk_index": 8,
+                "score": 0.33333334,
+                "content": "2. Log onto the Synergy server as the Synergy admin user (usually ccm_root) and run the command... \n\n \n\nccmdb check <database path> \n\n\n\n\n\n \n\n......to ensure that there is no database corruption. \n\nResolve any database corruption with reference to the following technotes: \n\n\n"
+              },
+              {
+                "ref_id": 5,
+                "document_id": "techqa_909_a25d074b",
+                "filename": "techqa_sample_909.txt",
+                "section": "sample 303, doc 0",
+                "chunk_index": 2,
+                "score": 0.25,
+                "content": "Here are few tips from engineering to help alleviating performance issue when importing a large volume of views/tables into XMETA via istool and possibly other import tools \n\nIn general, there is no way to optimise XMETA database to load for large volume hosts. By following the best practices described below, an observable performance improvement can be achievable. \n\n"
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 48.2,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "secur",
+              "database",
+              "access"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "How do I set up a VPN connection?",
+          "expect_keywords": [
+            "VPN",
+            "connect",
+            "network"
+          ],
+          "result": {
+            "answer": "The provided documents [1] through [5] do not contain information on how to set up a VPN connections. These documents cover topics such as timeout behavior, connection issues with Spectrum Control, and SPSS configuration, but none address VPN setup procedures.",
+            "thinking_length": 4504,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "techqa_697_e9922120",
+                "filename": "techqa_sample_697.txt",
+                "section": "sample 232, doc 1",
+                "chunk_index": 6,
+                "score": 0.5,
+                "content": "Timeout Behavior Response When the Timeout option is set on the url string, it will take precedence over the User Agent Timeout even if the User Agent is set to a lower Timeout value. The User Agent Timeout will be used if no Timeout option is set. Persistent Also known as the connection reuse timeout. "
+              },
+              {
+                "ref_id": 2,
+                "document_id": "techqa_43_88fdaf4f",
+                "filename": "techqa_sample_43.txt",
+                "section": "sample 14, doc 1",
+                "chunk_index": 7,
+                "score": 0.5,
+                "content": "   * connection between Spectrum Control and the SVC is shut      *\n   * down.                                                        *\n   *                                                              *\n   * See IBM Support Flash (Alert) for additional details:        *\n   * http://www-01.ibm.com/support/docview.wss?uid=swg22002420    *\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "techqa_43_ec959c6f",
+                "filename": "techqa_sample_43.txt",
+                "section": "sample 14, doc 1",
+                "chunk_index": 7,
+                "score": 0.33333334,
+                "content": "   * connection between Spectrum Control and the SVC is shut      *\n   * down.                                                        *\n   *                                                              *\n   * See IBM Support Flash (Alert) for additional details:        *\n   * http://www-01.ibm.com/support/docview.wss?uid=swg22002420    *\n"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "techqa_226_a4613c0f",
+                "filename": "techqa_sample_226.txt",
+                "section": "sample 75, doc 1",
+                "chunk_index": 6,
+                "score": 0.33333334,
+                "content": "Timeout Behavior Response When the Timeout option is set on the url string, it will take precedence over the User Agent Timeout even if the User Agent is set to a lower Timeout value. The User Agent Timeout will be used if no Timeout option is set. Persistent Also known as the connection reuse timeout. "
+              },
+              {
+                "ref_id": 5,
+                "document_id": "techqa_92_959372ae",
+                "filename": "techqa_sample_92.txt",
+                "section": "sample 30, doc 2",
+                "chunk_index": 1,
+                "score": 0.25,
+                "content": "You are getting this error because your Clementine/Modeler hasn't been configured to work with SPSS Statistics application. \n\nTo configure Clementine/Modeler to work with SPSS and other applications, choose Helper Applications from the Tools menu.\n\nIf Statistics is installed on your computer, you can configure Clementine to send data to SPSS using the SPSS Export node. \n\n"
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 31.48,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "VPN",
+              "connect"
+            ],
+            "keyword_miss": [
+              "network"
+            ],
+            "keyword_coverage": 0.67
+          }
+        },
+        {
+          "question": "What is the recommended way to back up critical data?",
+          "expect_keywords": [
+            "backup",
+            "data",
+            "storage"
+          ],
+          "result": {
+            "answer": "The recommended way to back up critical data (for the sample server) is to perform the steps described in the documentation before updating the server, as the databases are deleted and recreated during the update. [1]",
+            "thinking_length": 9255,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "techqa_64_0c205eca",
+                "filename": "techqa_sample_64.txt",
+                "section": "sample 21, doc 1",
+                "chunk_index": 11,
+                "score": 0.5,
+                "content": "The databases used in the sample server are deleted and recreated during the update. If you are using those databases and want to save the existing content, perform the following steps before updating: \n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "techqa_77_4c413d8f",
+                "filename": "techqa_sample_77.txt",
+                "section": "sample 25, doc 2",
+                "chunk_index": 13,
+                "score": 0.5,
+                "content": "   compressed data being lost.  This would only occur if a series\n   of bytes to be compressed could not actually be compressed\n   (every byte was unique). This would then cause a potential loss\n   of data due to how WLM handled the uncompressed bytes.\n   \n   Although it is not recommended, the compression optimizations\n   can be removed and the code reverted back to the prior code if\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "techqa_77_a1f33d4e",
+                "filename": "techqa_sample_77.txt",
+                "section": "sample 25, doc 2",
+                "chunk_index": 13,
+                "score": 0.33333334,
+                "content": "   compressed data being lost.  This would only occur if a series\n   of bytes to be compressed could not actually be compressed\n   (every byte was unique). This would then cause a potential loss\n   of data due to how WLM handled the uncompressed bytes.\n   \n   Although it is not recommended, the compression optimizations\n   can be removed and the code reverted back to the prior code if\n"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "techqa_64_2dfacfc3",
+                "filename": "techqa_sample_64.txt",
+                "section": "sample 21, doc 1",
+                "chunk_index": 11,
+                "score": 0.33333334,
+                "content": "The databases used in the sample server are deleted and recreated during the update. If you are using those databases and want to save the existing content, perform the following steps before updating: \n"
+              },
+              {
+                "ref_id": 5,
+                "document_id": "techqa_57_3f5e75ba",
+                "filename": "techqa_sample_57.txt",
+                "section": "sample 19, doc 0",
+                "chunk_index": 8,
+                "score": 0.25,
+                "content": "   THE PROBLEM WAS SUBMITTED ON :\n   VERSION\n   V5R18.\n   THIS PROBLEM IS NOT REPRODUCIBLE ON :\n   VERSION V5R19\n   SP6.\n   Additional Closure Information:\n   There is a utility in\n   existence already that can repair the missing data.\n   \"Unreproducible\" in this case simply means that the repair\n   already exists and there is no need for a new code\n   delivery.\n"
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 57.53,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "data"
+            ],
+            "keyword_miss": [
+              "backup",
+              "storage"
+            ],
+            "keyword_coverage": 0.33
+          }
+        }
+      ]
+    },
+    {
+      "name": "Contracts",
+      "document_type": "contracts",
+      "queries": [
+        {
+          "question": "What are the termination clauses in these contracts?",
+          "expect_keywords": [
+            "terminat",
+            "clause",
+            "notice"
+          ],
+          "result": {
+            "answer": "Based on the provided document excerpts, the termination clauses specify the conditions and procedures for terminating contracts as follows:\n\n- Termination may be initiated by either party with written notice no later than ninety (90) calendar days prior to the expiration of the relevant term, or through mutual written agreement at any time [5].  \n- Termination notice procedures are defined, with obligations such as providing repairs for a period of thirteen weeks post-termination under specific conditions [4].  \n- Upon termination, certain clauses (e.g., intellectual property rights and economic rights) remain in force [1].  \n\nThese excerpts collectively outline termination mechanisms, notice requirements, and post-termination obligations.",
+            "thinking_length": 3505,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "cuad_71_0115c93c",
+                "filename": "cuad_sample_71.txt",
+                "section": "chunk 65",
+                "chunk_index": 65,
+                "score": 0.6666667,
+                "content": "Upon termination of the contract, the agreement set forth in clause 5 (\"Intellectual property rights and prohibition of transfer to third parties\") and clause 6 (\"Economic rights\") will remain into force. 10. TERMINATION\n\n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "cuad_86_09b5ab16",
+                "filename": "cuad_sample_86.txt",
+                "section": "chunk 201",
+                "chunk_index": 201,
+                "score": 0.625,
+                "content": "termination of or intention to terminate any of the contracts or agreements referred to or described in the Registration Statement, the Prospectus, or any Permitted Free Writing Prospectus, or filed as an exhibit to the Registration Statement, and, to the knowledge of the Blue Hills Parties, no such termination has been threatened by any party to any such contract or agreement.\n\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "cuad_31_d0da83e1",
+                "filename": "cuad_sample_31.txt",
+                "section": "chunk 435",
+                "chunk_index": 435,
+                "score": 0.5,
+                "content": "All costs, penalties or other expenses incurred under or in connection with any Customer Contract as a result of MMT's termination of a Customer Contract pursuant to clause (i) of this Section 11.6 shall be the responsibility of the Party terminating this Agreement, provided that in the event of a termination under Section 11.2, such costs shall be the responsibility of the non-"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "cuad_67_091762d7",
+                "filename": "cuad_sample_67.txt",
+                "section": "chunk 195",
+                "chunk_index": 195,
+                "score": 0.25,
+                "content": "    16.4 SEV shall remain liable for the repairs described in Clause 4.12 identified by DCL for a period of thirteen weeks from the end  of the Contracted Period and shall provide such repairs on a free of charge basis.     16.5 From receipt of notice of termination of this Agreement. "
+              },
+              {
+                "ref_id": 5,
+                "document_id": "cuad_38_36270ef1",
+                "filename": "cuad_sample_38.txt",
+                "section": "chunk 6",
+                "chunk_index": 6,
+                "score": 0.25,
+                "content": "1.1. Termination. This Agreement may be terminated subject to the following clauses:\n\n  1.1.1. By either Vendor or Distributor, upon written notice of termination of this Agreement no later than ninety (90) calendar days prior to the expiration of the relevant Term, then in effect;\n\n  1.1.2. By Vendor and Distributor, at any time, upon the mutual written agreement of Vendor and Distributor;\n\n"
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 24.71,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "terminat",
+              "clause",
+              "notice"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "Who owns intellectual property developed under this agreement?",
+          "expect_keywords": [
+            "intellectual property",
+            "owner",
+            "agreement"
+          ],
+          "result": {
+            "answer": "Based on the provided document excerpts, Garman owns all intellectual property rights developed under this agreement, as explicitly stated in document [5]: \"Garman is the owner of all intellectual property rights in the Work (including any Improvements or Modifications thereto), including all related materials, logos, and names provided pursuant to the terms of this Agreement. No title to the intellectual property in the Work is transferred to Sparkling by this Agreement.\" This indicates that ownership remains with Garman, with no transfer to Sparkling for the intellectual property developed under the agreement. \n\n[5]",
+            "thinking_length": 2849,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "cuad_73_bb5b2814",
+                "filename": "cuad_sample_73.txt",
+                "section": "chunk 169",
+                "chunk_index": 169,
+                "score": 0.5,
+                "content": " in the event that a Divested Entity owns any Intellectual Property Rights licensed to the other Party under this Agreement, such Intellectual Property Rights may be transferred or assignment with such Divested Entity subject to the terms and conditions this Agreement.\n\n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "cuad_61_6e26fe2c",
+                "filename": "cuad_sample_61.txt",
+                "section": "chunk 172",
+                "chunk_index": 172,
+                "score": 0.5,
+                "content": "In the event that any Development IP is jointly invented by the Parties in accordance with applicable intellectual property laws, then the ownership of such Development IP that has been jointly invented shall be co-owned by the Parties in accordance with such applicable intellectual property laws; provided, however,"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "cuad_78_d0b165ea",
+                "filename": "cuad_sample_78.txt",
+                "section": "chunk 174",
+                "chunk_index": 174,
+                "score": 0.5,
+                "content": "During the Term, a Party will not develop intellectual property for, on behalf of, or in collaboration with, the other Party unless the Parties have entered into a Purchase Schedule or other separate written agreement signed by an officer of each Party.\n\n"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "cuad_7_25bea4dc",
+                "filename": "cuad_sample_7.txt",
+                "section": "chunk 732",
+                "chunk_index": 732,
+                "score": 0.33333334,
+                "content": "other than Intellectual Property developed by such Transferee in the course of conducting the Assigning Party's activities under this Agreement to the extent such Intellectual Property would have been so included had it been discovered, created, made, developed, conceived or reduced to practice by such Assigning Party)"
+              },
+              {
+                "ref_id": 5,
+                "document_id": "cuad_4_a64a7a4e",
+                "filename": "cuad_sample_4.txt",
+                "section": "chunk 49",
+                "chunk_index": 49,
+                "score": 0.33333334,
+                "content": "     Garman is the owner of all intellectual property rights in the Work (including any Improvements or Modifications thereto), including all related materials, logos, and names provided pursuant to the terms of this Agreement. No title to the intellectual property in the Work is transferred to Sparkling by this Agreement.\n\n"
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 18.47,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "intellectual property",
+              "owner",
+              "agreement"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "What is the limitation of liability in this contract?",
+          "expect_keywords": [
+            "liabilit",
+            "limit",
+            "damages"
+          ],
+          "result": {
+            "answer": "The limitation of liability in this contract excludes all liability (whether based on contract, tort, negligence, strict liability, warranty, or other legal or equitable claims) and applies regardless of whether a party was advised of potential damages or the failure of the remedy's essential purpose. This limitation is essential to the Agent and would not have been entered into without mutual agreement by the parties. However, it does not apply to breaches of specific sections (13 and 14).  \n\n[1] [3] [2]",
+            "thinking_length": 3151,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "cuad_7_25bea4dc",
+                "filename": "cuad_sample_7.txt",
+                "section": "chunk 626",
+                "chunk_index": 626,
+                "score": 0.5,
+                "content": "ANY THEORY OF LIABILITY (WHETHER IN CONTRACT, TORT (INCLUDING NEGLIGENCE), STRICT LIABILITY OR OTHERWISE). THE LIMITATIONS SET FORTH IN THIS SECTION WILL APPLY EVEN IF A PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES, AND NOTWITHSTANDING ANY FAILURE OF ESSENTIAL PURPOSE OF ANY LIMITED REMEDY.\n\n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "cuad_86_09b5ab16",
+                "filename": "cuad_sample_86.txt",
+                "section": "chunk 443",
+                "chunk_index": 443,
+                "score": 0.5,
+                "content": "It is understood that the above stated limitation on the Agent's liability is essential to the Agent and that the Agent would not have entered into this Agreement if such limitation had not been agreed to by the parties to this Agreement. "
+              },
+              {
+                "ref_id": 3,
+                "document_id": "cuad_4_a64a7a4e",
+                "filename": "cuad_sample_4.txt",
+                "section": "chunk 67",
+                "chunk_index": 67,
+                "score": 0.33333334,
+                "content": "The parties agree that the limitation of liability in this paragraph reflects the allocation of risk between the parties and the price of the licenced Software. The limitation of liability in this Section 15 shall not apply to breaches of Sections 13 and 14.\n\n"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "cuad_57_0b42a37f",
+                "filename": "cuad_sample_57.txt",
+                "section": "chunk 293",
+                "chunk_index": 293,
+                "score": 0.33333334,
+                "content": "     (d) Notwithstanding the foregoing, in no event shall either Equifax or Certegy, or any Member of their respective Group, have any liability, whether based on contract, tort (including, without limitation, negligence or strict liability), warranty or any other legal or equitable\n\n                                       23\n\n"
+              },
+              {
+                "ref_id": 5,
+                "document_id": "cuad_57_0b42a37f",
+                "filename": "cuad_sample_57.txt",
+                "section": "chunk 72",
+                "chunk_index": 72,
+                "score": 0.25,
+                "content": "     (jj) \"Liabilities\" means any and all claims, debts, liabilities and obligations, absolute or contingent, matured or not matured, liquidated or unliquidated, accrued or unaccrued, known or unknown, whenever arising, with respect to a specified object, matter, contract, commitment or undertaking, including without limitation, all claims, debts,"
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 18.84,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "liabilit",
+              "limit",
+              "damages"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "Does this agreement include a non-compete or non-solicitation clause?",
+          "expect_keywords": [
+            "non-compete",
+            "non-solicitation",
+            "restric"
+          ],
+          "result": {
+            "answer": "The agreement includes a non-compete clause, as referenced in document [1] which states that the grant of rights is \"subject to SONY's compliance with the covenant not to compete in Section 8.3 of Asset Purchase Agreement.\" This explicitly confirms the presence of a non-compete provision within the agreement. No non-solicitation clauses are identified in the provided excerpts.",
+            "thinking_length": 2010,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "cuad_0_fe8d10f8",
+                "filename": "cuad_sample_0.txt",
+                "section": "chunk 32",
+                "chunk_index": 32,
+                "score": 0.5,
+                "content": "    3.2 Grant Back by PURCHASER     Subject to SONY's compliance with the covenant not to compete in Section 8.3 of Asset Purchase Agreement, PURCHASER  hereby grants to SONY a worldwide, non-exclusive, fully paid-up, royalty-free license, under the Transferred Patents, to make, use, offer to sell,  sell, otherwise dispose of, and import any products, including any Competing Products. "
+              },
+              {
+                "ref_id": 2,
+                "document_id": "cuad_74_9866916f",
+                "filename": "cuad_sample_74.txt",
+                "section": "chunk 290",
+                "chunk_index": 290,
+                "score": 0.5,
+                "content": "Nothing in this agreement clause shall preclude parties from seeking provisional or injunctive relief remedies in aid of arbitration from a court of appropriate jurisdiction.\n\n\n\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "cuad_19_21ecbdc8",
+                "filename": "cuad_sample_19.txt",
+                "section": "chunk 429",
+                "chunk_index": 429,
+                "score": 0.33333334,
+                "content": "In addition to any other provision of this Agreement, you will be solely responsible for compliance with any laws pertaining to sending electronic communication including, the Controlling the Assault of Non-Solicited Pornography and Marketing Act of 2003 (known as the \"CAN-SPAM Act of 2003\") and the Federal Telephone Consumer Protection Act. "
+              },
+              {
+                "ref_id": 4,
+                "document_id": "cuad_4_a64a7a4e",
+                "filename": "cuad_sample_4.txt",
+                "section": "chunk 97",
+                "chunk_index": 97,
+                "score": 0.33333334,
+                "content": "     (e)    The parties are acting as independent contractors under this Agreement and not as agents or representatives of the other and not as partners or joint ventures. Neither party shall enter into any agreement or commitment on behalf of the other without the written consent of the other.\n\n"
+              },
+              {
+                "ref_id": 5,
+                "document_id": "cuad_17_dc1bb4db",
+                "filename": "cuad_sample_17.txt",
+                "section": "chunk 372",
+                "chunk_index": 372,
+                "score": 0.25,
+                "content": "In addition to any other provision of this Agreement, you will be solely responsible for compliance with any laws pertaining to sending e-mails including but not limited to the Controlling the Assault of Non-Solicited Pornography and Proprietary Marketing Act of 2003 (known as the \"CAN-SPAM Act of 2003\"). 10.10 Changes to Technology. "
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 13.94,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "non-compete",
+              "non-solicitation"
+            ],
+            "keyword_miss": [
+              "restric"
+            ],
+            "keyword_coverage": 0.67
+          }
+        },
+        {
+          "question": "What are the indemnification obligations of each party?",
+          "expect_keywords": [
+            "indemnif",
+            "obligation",
+            "party"
+          ],
+          "result": {
+            "answer": "The indemnification obligations specify that neither party is liable for special, indirect, or consequential damages except in connection with a breach of specific articles (e.g., Article 10 for PaperExchange and VerticalNet under [1], or Article 13 for Neoforma and VerticalNet under [4]). The indemnified party must promptly notify the indemnifying party in writing of claims, suits, or proceedings and cooperate with the indemnifying party regarding such matters (as required by [3]). Following indemnification, the indemnifying party becomes subrogated to all rights of the indemnified party with respect to the indemnified matters (per [2]). Additionally, the indemnifying party is obligated to pay all costs of indemnity arising from defense, settlements, or payments, while the indemnified party must keep the indemnifying party fully informed about the status of the defense (as stated in [5]).",
+            "thinking_length": 3856,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "cuad_43_f69a22f5",
+                "filename": "cuad_sample_43.txt",
+                "section": "chunk 221",
+                "chunk_index": 221,
+                "score": 0.5,
+                "content": "EXCEPT IN CONNECTION WITH A BREACH BY EITHER PARTY OF ARTICLE 10, THE INDEMNIFICATION OBLIGATIONS OF PAPEREXCHANGE UNDER SECTIONS 12.4(c)  [Indemnification by PaperExchange] AND THE INDEMNIFICATION OBLIGATIONS OF VERTICALNET UNDER SECTION 12.5(c)  [Indemnification by VerticalNet], NEITHER PARTY WILL BE LIABLE FOR ANY SPECIAL, INDIRECT, CONSEQUENTIAL,"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "cuad_23_87313b39",
+                "filename": "cuad_sample_23.txt",
+                "section": "chunk 212",
+                "chunk_index": 212,
+                "score": 0.5,
+                "content": "Following indemnification as provided in this Section, the indemnifying party shall be subrogated to all rights of the indemnitee with respect to the matters for which indemnification has been made.\n\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "cuad_56_33d5cf03",
+                "filename": "cuad_sample_56.txt",
+                "section": "chunk 201",
+                "chunk_index": 201,
+                "score": 0.39285713,
+                "content": "The foregoing indemnification obligations are conditioned upon the indemnified party promptly notifying the indemnifying party in writing of the claim, suit or proceeding for which the indemnifying party is obligated under this Section 24, cooperating with, assisting and providing information to, the indemnifying party as reasonably required,"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "cuad_79_37cff7b2",
+                "filename": "cuad_sample_79.txt",
+                "section": "chunk 258",
+                "chunk_index": 258,
+                "score": 0.33333334,
+                "content": "EXCEPT IN CONNECTION WITH A BREACH BY EITHER PARTY OF ARTICLE 13, THE INDEMNIFICATION OBLIGATIONS OF NEOFORMA UNDER SECTIONS 15.4(c)  [INDEMNIFICATION BY NEOFORMA] AND (d) AND THE INDEMNIFICATION OBLIGATIONS OF VERTICALNET UNDER SECTION 15.5(c)  [INDEMNIFICATION BY VERTICALNET] AND (d), NEITHER PARTY WILL BE LIABLE FOR ANY SPECIAL, INDIRECT, CONSEQUENTIAL,"
+              },
+              {
+                "ref_id": 5,
+                "document_id": "cuad_23_87313b39",
+                "filename": "cuad_sample_23.txt",
+                "section": "chunk 211",
+                "chunk_index": 211,
+                "score": 0.33333334,
+                "content": "The indemnifying party shall pay all costs of indemnity arising out of or relating to that defense and any such settlement, compromise, or payment. The indemnitee shall keep the indemnifying party fully apprised at all times as to the status of the defense. "
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 26.13,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "indemnif",
+              "obligation",
+              "party"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        },
+        {
+          "question": "What are the payment terms and conditions?",
+          "expect_keywords": [
+            "payment",
+            "terms",
+            "due"
+          ],
+          "result": {
+            "answer": "Based on the provided document excerpts, the payment terms and conditions for Software Support and Maintenance fees are specified in Exhibit B to the agreement. This is explicitly stated in document [4] cuad_sample_45.txt: \"Payment terms of Software Support and Maintenance fees shall be as set forth in EXHIBIT B hereto.\"\n\n**Citation:** [4]",
+            "thinking_length": 1595,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "cuad_23_87313b39",
+                "filename": "cuad_sample_23.txt",
+                "section": "chunk 2",
+                "chunk_index": 2,
+                "score": 0.5,
+                "content": "THEREFORE, in consideration of the payments to be made and services to be performed hereunder, upon the terms and subject to the conditions set forth in this Agreement and intending to be legally bound, the parties hereto agree as follows:\n\n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "cuad_19_21ecbdc8",
+                "filename": "cuad_sample_19.txt",
+                "section": "chunk 693",
+                "chunk_index": 693,
+                "score": 0.5,
+                "content": "If we accept late payments from you or any payments due, that will not be deemed to be our waiver of any earlier or later breach by you of any terms, provisions, covenants, or conditions of this Agreement. No course of dealings or course of conduct will be effective to amend the terms of this Agreement. 24 NOTICES\n\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "cuad_2_d2a8f42a",
+                "filename": "cuad_sample_2.txt",
+                "section": "chunk 408",
+                "chunk_index": 408,
+                "score": 0.33333334,
+                "content": "  (g) we must approve the material terms and conditions of the proposed Transfer, including without limitation that the price and terms of payment are not so burdensome as to adversely affect the operation of the Franchise;   (h) the Franchise and the Premises shall have been placed in an attractive, neat and sanitary condition;   (i)"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "cuad_45_15a54cb1",
+                "filename": "cuad_sample_45.txt",
+                "section": "chunk 118",
+                "chunk_index": 118,
+                "score": 0.33333334,
+                "content": "Payment terms of Software Support and Maintenance fees shall be          as set forth in EXHIBIT B hereto. "
+              },
+              {
+                "ref_id": 5,
+                "document_id": "cuad_34_0c67e14e",
+                "filename": "cuad_sample_34.txt",
+                "section": "chunk 93",
+                "chunk_index": 93,
+                "score": 0.25,
+                "content": "General Terms and Conditions of Sale Attachment B - List of ExxonMobil Affiliates/Divisions Attachment C - List of West Pharmaceutical Services Affiliates Attachment D - Notices Attachment E - Payment Terms Attachment F - Returnable Metal Crates Attachment G - ExxonMobil Chemical Asia Pacific - Terms and Conditions of Sale Attachment H - ExxonMobil Chemical Petroleum & Chemical BVBA -"
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 11.04,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "payment",
+              "terms"
+            ],
+            "keyword_miss": [
+              "due"
+            ],
+            "keyword_coverage": 0.67
+          }
+        },
+        {
+          "question": "Under what circumstances can the contract be renewed or extended?",
+          "expect_keywords": [
+            "renew",
+            "extend",
+            "term"
+          ],
+          "result": {
+            "answer": "Contracts can be renewed or extended under the following circumstances:  \n- Automatically for additional two-year terms unless either party provides written notice of non-renewal at least ninety (90) days prior to expiration of the current term [5].  \n- For an additional five-year term subject to restructuring of the agreement by the parties [2].  \n- Renewal is generally available until the last year of support but will not extend beyond the last date of support [1].  \n\nContracts that have lapsed after 12 months of the end-of-sale date are not renewable [1].",
+            "thinking_length": 2639,
+            "sources": [
+              {
+                "ref_id": 1,
+                "document_id": "cuad_56_33d5cf03",
+                "filename": "cuad_sample_56.txt",
+                "section": "chunk 319",
+                "chunk_index": 319,
+                "score": 0.8333334,
+                "content": "b. Service contracts that have not been renewed or have lapsed after 12 months of end-of​ sale date are not re-newable.\n\nc. Renewal of your service contract will generally be available until the last year of support, but will not extend\n\nSource: SCANSOURCE, INC., 10-K, 8/22/2019\n\n\n\n\n\nExhibit 10.38\n\nbeyond the last date of support.\n\n"
+              },
+              {
+                "ref_id": 2,
+                "document_id": "cuad_65_a00be89f",
+                "filename": "cuad_sample_65.txt",
+                "section": "chunk 29",
+                "chunk_index": 29,
+                "score": 0.5,
+                "content": "The initial term of the contracted agreement is 5 years from the commencement date. The BSP then have the option to renew the agreement for another 5 years subject to any restructuring of the agreement as required by the parties.\n\nEither party may advise the other of the impending expiry of the then current term, generally in accordance with section 14 .   1.5 Hours of Support\n\n"
+              },
+              {
+                "ref_id": 3,
+                "document_id": "cuad_54_13462947",
+                "filename": "cuad_sample_54.txt",
+                "section": "chunk 36",
+                "chunk_index": 36,
+                "score": 0.34285715,
+                "content": " If NTL renews or extends a license for NTL Technology, NTL may, but shall not be required to obtain rights thereunder for the renewal period or extension provisions for the benefit of Entrust.\n\n"
+              },
+              {
+                "ref_id": 4,
+                "document_id": "cuad_78_d0b165ea",
+                "filename": "cuad_sample_78.txt",
+                "section": "chunk 86",
+                "chunk_index": 86,
+                "score": 0.33333334,
+                "content": "Certificate of insurance confirming that the required insurance coverage and minimal limits are met for the extended, renewed or replacement policy term. ii. Declaration pages of insurance policy (or a copy of the binder until the declaration pages are available) confirming that the required insurance coverage and minimal limits are met for the extended, renewed or replacement policy term. iii. "
+              },
+              {
+                "ref_id": 5,
+                "document_id": "cuad_14_f5629b9b",
+                "filename": "cuad_sample_14.txt",
+                "section": "chunk 47",
+                "chunk_index": 47,
+                "score": 0.325,
+                "content": "This Agreement shall be automatically renewed for additional extended terms each of two (2) years duration unless either party notifies the other in writing of its intention not to renew the Agreement, such notification to be provided at least ninety (90) days prior to the expiration of the then in-effect term. "
+              }
+            ],
+            "source_count": 5,
+            "latency_seconds": 18.2,
+            "error": null
+          },
+          "eval": {
+            "passed": true,
+            "keyword_hits": [
+              "renew",
+              "extend",
+              "term"
+            ],
+            "keyword_miss": [],
+            "keyword_coverage": 1.0
+          }
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total": 20,
+    "passed": 20,
+    "failed": 0
+  }
+}

@@ -1,0 +1,84 @@
+# DocIntel Integration Test Queries
+# ------------------------------------
+# Each suite maps to a dataset domain. `expect_keywords` are optional soft
+# checks — the test passes as long as the answer is non-empty and sources are
+# returned; keyword hits are reported but don't fail the test.
+
+config:
+  base_url: "http://localhost:8080"   # api-gateway; swap to :8000 for direct rag-service
+  rag_path: "/api/v1/query/stream"
+  tenant_id: "default"
+  use_reranking: true
+  use_cache: false
+  timeout_seconds: 120
+
+suites:
+
+  - name: "HR Policies"
+    document_type: "hr_policy"
+    queries:
+      - question: "What is the work from home policy?"
+        expect_keywords: ["acknowledge", "policy", "review"]
+
+      - question: "How many days of annual leave am I entitled to?"
+        expect_keywords: ["leave", "days", "entitle"]
+
+      - question: "What is the process for requesting parental leave?"
+        expect_keywords: ["parental", "leave", "request"]
+
+      - question: "How is employee performance evaluated during the probation period?"
+        expect_keywords: ["performance", "probation", "evaluation"]
+
+      - question: "What are the consequences of not complying with the code of conduct?"
+        expect_keywords: ["conduct", "consequence", "disciplin"]
+
+      - question: "What should I do if I experience workplace harassment?"
+        expect_keywords: ["harassment", "report", "policy"]
+
+      - question: "How do I submit a complaint or grievance?"
+        expect_keywords: ["complaint", "grievance", "procedure"]
+
+  - name: "Technical"
+    document_type: "technical"
+    queries:
+      - question: "How do I troubleshoot a system that keeps crashing?"
+        expect_keywords: ["crash", "troubleshoot", "diagnostic"]
+
+      - question: "What are the steps to recover data from a failed hard drive?"
+        expect_keywords: ["recover", "data", "drive"]
+
+      - question: "How do I configure network settings on a remote server?"
+        expect_keywords: ["network", "configure", "server"]
+
+      - question: "What are best practices for securing a database?"
+        expect_keywords: ["secur", "database", "access"]
+
+      - question: "How do I set up a VPN connection?"
+        expect_keywords: ["VPN", "connect", "network"]
+
+      - question: "What is the recommended way to back up critical data?"
+        expect_keywords: ["backup", "data", "storage"]
+
+  - name: "Contracts"
+    document_type: "contracts"
+    queries:
+      - question: "What are the termination clauses in these contracts?"
+        expect_keywords: ["terminat", "clause", "notice"]
+
+      - question: "Who owns intellectual property developed under this agreement?"
+        expect_keywords: ["intellectual property", "owner", "agreement"]
+
+      - question: "What is the limitation of liability in this contract?"
+        expect_keywords: ["liabilit", "limit", "damages"]
+
+      - question: "Does this agreement include a non-compete or non-solicitation clause?"
+        expect_keywords: ["non-compete", "non-solicitation", "restric"]
+
+      - question: "What are the indemnification obligations of each party?"
+        expect_keywords: ["indemnif", "obligation", "party"]
+
+      - question: "What are the payment terms and conditions?"
+        expect_keywords: ["payment", "terms", "due"]
+
+      - question: "Under what circumstances can the contract be renewed or extended?"
+        expect_keywords: ["renew", "extend", "term"]

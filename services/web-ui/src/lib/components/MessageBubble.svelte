@@ -10,6 +10,7 @@
     chunk_index?: number;
     score: number;
     content?: string;
+    domain?: string;
   }
 
   interface Message {
@@ -20,6 +21,7 @@
     sources?: Source[];
     liked?: boolean | null;
     queryId?: string;
+    routedDomain?: string;
   }
 
   let {
@@ -83,76 +85,108 @@
         `[data-message-id="${message.id}"] [data-ref-id="${refId}"]`
       );
       card?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      card?.classList.add('ring-2', 'ring-blue-400');
-      setTimeout(() => card?.classList.remove('ring-2', 'ring-blue-400'), 1200);
+      card?.classList.add('ring-1', 'ring-emerald-400');
+      setTimeout(() => card?.classList.remove('ring-1', 'ring-emerald-400'), 1200);
     });
   }
 
   function scoreColor(score: number): string {
-    if (score >= 0.8) return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300';
-    if (score >= 0.5) return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300';
-    return 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400';
+    if (score >= 0.8) return 'bg-emerald-900/50 text-emerald-300';
+    if (score >= 0.5) return 'bg-amber-900/50 text-amber-300';
+    return 'bg-white/5 text-slate-400';
+  }
+
+  const DOMAIN_CHIP: Record<string, string> = {
+    hr_policy: 'bg-purple-900/50 text-purple-300',
+    technical:  'bg-cyan-900/50   text-cyan-300',
+    contracts:  'bg-amber-900/50  text-amber-300',
+    general:    'bg-white/5       text-slate-400',
+  };
+
+  const DOMAIN_LABEL: Record<string, string> = {
+    hr_policy: 'HR',
+    technical:  'Tech',
+    contracts:  'Contract',
+    general:    'General',
+  };
+
+  function domainChip(domain: string): { cls: string; label: string } {
+    return {
+      cls:   DOMAIN_CHIP[domain]  ?? DOMAIN_CHIP['general'],
+      label: DOMAIN_LABEL[domain] ?? domain,
+    };
   }
 </script>
 
 <style>
-  /* Scoped badge styles — Tailwind purges dynamic class strings injected via @html */
-  :global(.inline-ref) {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    margin: 0 1px;
-    padding: 0 5px;
-    border-radius: 9999px;
-    background-color: rgb(219 234 254); /* blue-100 */
-    color: rgb(29 78 216);              /* blue-700 */
-    font-size: 0.7rem;
+  /* Scoped badge styles — inline-ref already handled in app.css globally */
+  :global(.prose-ai) {
+    color: #cbd5e1;
+  }
+  :global(.prose-ai p)   { margin: 0.375rem 0; }
+  :global(.prose-ai ul)  { list-style: disc; padding-left: 1.25rem; margin: 0.375rem 0; }
+  :global(.prose-ai ol)  { list-style: decimal; padding-left: 1.25rem; margin: 0.375rem 0; }
+  :global(.prose-ai li)  { margin: 0.2rem 0; }
+  :global(.prose-ai h1, .prose-ai h2, .prose-ai h3, .prose-ai h4) {
+    color: #e2e8f0;
     font-weight: 600;
-    line-height: 1.4;
-    cursor: pointer;
-    vertical-align: super;
-    transition: background-color 0.15s;
-    text-decoration: none;
+    margin: 0.75rem 0 0.25rem;
   }
-  :global(.dark .inline-ref) {
-    background-color: rgb(30 58 138 / 0.6); /* blue-900/60 */
-    color: rgb(147 197 253);                 /* blue-300 */
+  :global(.prose-ai h1) { font-size: 1.15rem; }
+  :global(.prose-ai h2) { font-size: 1.05rem; }
+  :global(.prose-ai h3) { font-size: 0.95rem; }
+  :global(.prose-ai strong) { color: #e2e8f0; font-weight: 600; }
+  :global(.prose-ai a)  { color: #34d399; text-decoration: underline; }
+  :global(.prose-ai blockquote) {
+    border-left: 2px solid rgba(16,185,129,0.4);
+    padding-left: 0.75rem;
+    color: #94a3b8;
+    font-style: italic;
   }
-  :global(.inline-ref:hover) {
-    background-color: rgb(191 219 254); /* blue-200 */
-  }
-  :global(.dark .inline-ref:hover) {
-    background-color: rgb(30 64 175 / 0.5);
-  }
+  :global(.prose-ai table) { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  :global(.prose-ai th) { background: rgba(16,185,129,0.08); color: #6ee7b7; padding: 0.4rem 0.6rem; border: 1px solid rgba(255,255,255,0.06); }
+  :global(.prose-ai td) { padding: 0.35rem 0.6rem; border: 1px solid rgba(255,255,255,0.06); color: #94a3b8; }
+  :global(.prose-ai hr) { border-color: rgba(255,255,255,0.06); margin: 0.75rem 0; }
 </style>
 
-<div class="group flex justify-start">
+<div class="group flex justify-start animate-fade-in">
   <div class="max-w-3xl w-full space-y-2">
 
     <!-- ── Thinking section (collapsible) ─────────────────────────── -->
     {#if message.thinking}
-      <details class="rounded-lg border border-dashed border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900/40 text-xs">
-        <summary class="flex items-center gap-2 px-3 py-2 cursor-pointer select-none text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 list-none">
+      <details class="rounded-xl border border-dashed border-emerald-500/20 bg-emerald-950/15 backdrop-blur-sm text-xs">
+        <summary class="flex items-center gap-2 px-3 py-2 cursor-pointer select-none text-emerald-600 hover:text-emerald-400 list-none transition-colors">
           <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
           </svg>
           <span class="font-medium">Thinking</span>
-          <span class="ml-auto text-gray-400">(click to expand)</span>
+          <span class="ml-auto text-slate-600">(click to expand)</span>
         </summary>
-        <pre class="px-3 pb-3 pt-1 font-mono text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap overflow-x-auto leading-relaxed">{message.thinking}</pre>
+        <pre class="px-3 pb-3 pt-1 font-mono text-xs text-slate-500 whitespace-pre-wrap overflow-x-auto leading-relaxed">{message.thinking}</pre>
       </details>
     {/if}
 
+    <!-- ── Routing indicator ──────────────────────────────────────── -->
+    {#if message.routedDomain}
+      {@const chip = domainChip(message.routedDomain)}
+      <div class="flex items-center gap-1.5 px-1 text-xs text-slate-600">
+        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+        </svg>
+        <span>Searched in</span>
+        <span class="px-1.5 py-0.5 rounded-full font-medium {chip.cls}">{chip.label}</span>
+        <span class="text-slate-700">(auto-routed)</span>
+      </div>
+    {/if}
+
     <!-- ── Answer bubble ──────────────────────────────────────────── -->
-    <div class="px-4 py-3 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm text-gray-900 dark:text-gray-100">
+    <div class="px-4 py-4 rounded-2xl glass border border-emerald-500/10 hover:border-emerald-500/15 transition-all duration-200">
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <div
         role="presentation"
-        class="prose prose-sm dark:prose-invert max-w-none
-                prose-p:my-1.5 prose-headings:mt-3 prose-headings:mb-1
-                prose-code:bg-gray-100 prose-code:dark:bg-gray-700 prose-code:px-1 prose-code:rounded
-                prose-pre:bg-gray-100 prose-pre:dark:bg-gray-700"
+        class="prose-ai text-sm leading-relaxed max-w-none"
         onclick={handleProseClick}
       >
         {@html renderMarkdown(message.content)}
@@ -162,45 +196,59 @@
     <!-- ── Source cards ───────────────────────────────────────────── -->
     {#if message.sources && message.sources.length > 0}
       <div class="space-y-1.5">
-        <p class="text-xs font-medium text-gray-400 dark:text-gray-500 px-1">Sources</p>
+        <p class="text-xs font-medium text-slate-600 px-1 flex items-center gap-1.5">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          Sources
+        </p>
         <div class="grid grid-cols-1 gap-1.5">
           {#each message.sources as source, i}
             {@const idx = source.ref_id ?? i + 1}
             <div
               data-ref-id={idx}
-              class="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 overflow-hidden transition-shadow hover:shadow-sm"
+              class="rounded-xl glass border border-white/5 hover:border-emerald-500/20 overflow-hidden transition-all duration-200"
             >
               <!-- Card header -->
               <button
                 type="button"
                 onclick={() => toggleSource(idx)}
-                class="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+                class="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-emerald-500/5 transition-colors"
               >
-                <span class="shrink-0 w-5 h-5 rounded-full bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 text-xs font-bold flex items-center justify-center">
+                <span class="shrink-0 w-5 h-5 rounded-full
+                  bg-emerald-900/60 text-emerald-400
+                  text-xs font-bold flex items-center justify-center
+                  border border-emerald-500/30">
                   {idx}
                 </span>
-                <span class="flex-1 text-xs font-medium text-gray-700 dark:text-gray-300 truncate">
+                <span class="flex-1 text-xs font-medium text-slate-300 truncate">
                   {source.filename}
                 </span>
+                {#if source.domain}
+                  {@const chip = domainChip(source.domain)}
+                  <span class="shrink-0 px-1.5 py-0.5 rounded-full text-xs font-medium {chip.cls}">
+                    {chip.label}
+                  </span>
+                {/if}
                 {#if source.section}
-                  <span class="text-xs text-gray-400 dark:text-gray-500 shrink-0">{source.section}</span>
+                  <span class="text-xs text-slate-600 shrink-0">{source.section}</span>
                 {/if}
                 <span class="shrink-0 px-1.5 py-0.5 rounded text-xs font-medium {scoreColor(source.score)}">
                   {(source.score * 100).toFixed(0)}%
                 </span>
-                <svg class="w-3.5 h-3.5 shrink-0 text-gray-400 transition-transform {expandedSources.has(idx) ? 'rotate-180' : ''}"
+                <svg class="w-3 h-3 shrink-0 text-slate-600 transition-transform {expandedSources.has(idx) ? 'rotate-180' : ''}"
                   fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
                 </svg>
               </button>
               <!-- Card body (expandable) -->
               {#if expandedSources.has(idx)}
-                <div class="px-3 pb-3 pt-2 border-t border-gray-100 dark:border-gray-700 space-y-1.5">
+                <div class="px-3 pb-3 pt-2 border-t border-white/5 space-y-1.5">
                   {#if source.content}
-                    <p class="text-xs text-gray-600 dark:text-gray-400 leading-relaxed whitespace-pre-wrap">{source.content}</p>
+                    <p class="text-xs text-slate-500 leading-relaxed whitespace-pre-wrap">{source.content}</p>
                   {/if}
-                  <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400 dark:text-gray-500 pt-1 border-t border-gray-100 dark:border-gray-700/50">
-                    <span>Doc: <span class="font-mono text-gray-500 dark:text-gray-400 select-all">{source.document_id}</span></span>
+                  <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600 pt-1 border-t border-white/5">
+                    <span>Doc: <span class="font-mono text-slate-500 select-all">{source.document_id}</span></span>
                     {#if source.chunk_index !== undefined}
                       <span>Chunk #{source.chunk_index}</span>
                     {/if}
@@ -214,19 +262,19 @@
     {/if}
 
     <!-- ── Action bar ─────────────────────────────────────────────── -->
-    <div class="flex items-center gap-1 px-1 opacity-0 group-hover:opacity-100 transition-opacity">
+    <div class="flex items-center gap-1 px-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
       <!-- Copy -->
       <button
         type="button"
         onclick={copyAnswer}
         title="Copy answer"
-        class="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+        class="flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-slate-500 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
       >
         {#if copied}
-          <svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
           </svg>
-          <span>Copied</span>
+          <span class="text-emerald-400">Copied</span>
         {:else}
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -241,7 +289,7 @@
         type="button"
         onclick={onRegenerate}
         title="Regenerate"
-        class="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+        class="flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-slate-500 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
       >
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -250,17 +298,17 @@
         <span>Regenerate</span>
       </button>
 
-      <div class="h-4 w-px bg-gray-200 dark:bg-gray-600 mx-1"></div>
+      <div class="h-3 w-px bg-white/10 mx-1"></div>
 
       <!-- Thumbs up -->
       <button
         type="button"
         onclick={() => onFeedback(true)}
         title="Good response"
-        class="p-1.5 rounded-md transition-colors
+        class="p-1.5 rounded-lg transition-colors
           {message.liked === true
-            ? 'text-green-600 bg-green-50 dark:bg-green-900/30'
-            : 'text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600'}"
+            ? 'text-emerald-400 bg-emerald-500/10'
+            : 'text-slate-500 hover:text-emerald-400 hover:bg-emerald-500/10'}"
       >
         <svg class="w-3.5 h-3.5" fill={message.liked === true ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -273,10 +321,10 @@
         type="button"
         onclick={() => onFeedback(false)}
         title="Poor response"
-        class="p-1.5 rounded-md transition-colors
+        class="p-1.5 rounded-lg transition-colors
           {message.liked === false
-            ? 'text-red-600 bg-red-50 dark:bg-red-900/30'
-            : 'text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600'}"
+            ? 'text-red-400 bg-red-500/10'
+            : 'text-slate-500 hover:text-red-400 hover:bg-red-500/10'}"
       >
         <svg class="w-3.5 h-3.5" fill={message.liked === false ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"

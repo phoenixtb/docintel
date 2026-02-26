@@ -24,13 +24,13 @@ DOMAIN_LABELS = ["hr_policy", "technical", "contracts", "general"]
 
 DATASET_CONFIGS = {
     "techqa": {
-        "name": "galileo-ai/ragbench",
-        "subset": "techqa",
-        "split": "test",
+        "name": "m-ric/huggingface_doc",
+        "subset": None,
+        "split": "train",
         "domain": "technical",
-        "text_field": "documents",  # List of docs
-        "is_list_field": True,
-        "extract_fn": None,  # Use default list extraction
+        "text_field": "text",   # Full documentation page text
+        "is_list_field": False,
+        "extract_fn": None,
     },
     "hr_policies": {
         "name": "syncora/hr-policies-qa-dataset",
@@ -42,13 +42,13 @@ DATASET_CONFIGS = {
         "extract_fn": "messages",  # Special extraction for chat format
     },
     "cuad": {
-        "name": "lex_glue",  # Using lex_glue as CUAD is deprecated
-        "subset": "ecthr_a",
+        "name": "Nadav-Timor/CUAD",   # Parquet-native mirror of theatticusproject/cuad-qa
+        "subset": None,
         "split": "train",
         "domain": "contracts",
-        "text_field": "text",  # Legal case text
+        "text_field": "context",   # Full contract clause text
         "is_list_field": False,
-        "extract_fn": None,
+        "extract_fn": "cuad_dedupe",  # Deduplicate by contract title
     },
 }
 
@@ -188,7 +188,8 @@ class DatasetLoader:
 
         documents = []
         extract_fn = config.get("extract_fn")
-        
+        seen_titles: set[str] = set()  # for cuad_dedupe
+
         for idx, item in enumerate(ds):
             text_field = config["text_field"]
             
@@ -200,7 +201,15 @@ class DatasetLoader:
             text = None
             
             # Handle special extraction functions
-            if extract_fn == "messages":
+            if extract_fn == "cuad_dedupe":
+                # CUAD-QA: 22k items across 510 contracts — deduplicate by title
+                # so each contract appears once with its full context text.
+                title = item.get("title", "")
+                if title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                text = item.get(text_field, "")
+            elif extract_fn == "messages":
                 # Extract from chat messages format (HR policies)
                 messages = item.get(text_field, [])
                 if isinstance(messages, list):
@@ -236,6 +245,9 @@ class DatasetLoader:
             
             # Add document if we have valid text
             if text and len(text.strip()) > 50:
+                extra_meta: dict = {}
+                if extract_fn == "cuad_dedupe":
+                    extra_meta["contract_title"] = item.get("title", "")
                 documents.append(LoadedDocument(
                     content=text.strip(),
                     domain=config["domain"],
@@ -246,6 +258,7 @@ class DatasetLoader:
                         "tenant_id": tenant_id,
                         "domain": config["domain"],
                         "document_type": config["domain"],
+                        **extra_meta,
                     },
                 ))
 
