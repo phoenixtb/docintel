@@ -23,6 +23,7 @@ SERVICES=(
   "document-service"
   "rag-service"
   "admin-service"
+  "analytics-service"
 )
 
 DESCRIPTIONS=(
@@ -31,6 +32,7 @@ DESCRIPTIONS=(
   "Document management (Kotlin)"
   "RAG pipeline (Python/Haystack)"
   "Admin operations (Kotlin)"
+  "Analytics + ClickHouse ingestion (Kotlin)"
 )
 
 # Colors
@@ -76,17 +78,17 @@ done
 cursor=0
 
 # Terminal control
-cursor_to()    { printf "\033[%s;0H" "$1"; }
-clear_line()   { printf "\033[2K"; }
-cursor_hide()  { printf "\033[?25l"; }
-cursor_show()  { printf "\033[?25h"; }
-bold()         { printf "\033[1m%s\033[0m" "$1"; }
+cursor_to()  { printf "\033[%s;0H" "$1"; }
+clear_line() { printf "\033[2K"; }
+bold()       { printf "\033[1m%s\033[0m" "$1"; }
 
+SAVED_TTY=$(stty -g 2>/dev/null)
 cleanup() {
-    cursor_show
-    stty echo 2>/dev/null
+    stty "$SAVED_TTY" 2>/dev/null
+    printf "\033[?25h"
+    echo ""
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 draw_menu() {
     local start_row=$1
@@ -126,89 +128,47 @@ draw_menu() {
     printf "${DIM}↑↓ navigate • space select • a all • enter build • q quit${NC}"
 }
 
-read_key() {
-    local key
-    IFS= read -rsn1 key
-    case "$key" in
-        $'\x1b')
-            read -rsn2 -t 0.1 key
-            case "$key" in
-                '[A') echo "up" ;;
-                '[B') echo "down" ;;
-            esac
-            ;;
-        ' ') echo "space" ;;
-        '') echo "enter" ;;
-        'a'|'A') echo "all" ;;
-        'q'|'Q') echo "quit" ;;
-    esac
-}
-
 # Draw header
 echo ""
 echo -e "${BOLD}DocIntel Build Tool${NC}"
 echo -e "${DIM}Select services to build:${NC}"
 echo ""
 
-# Get current cursor position for menu start
 start_row=5
-
-cursor_hide
-stty -echo 2>/dev/null
+printf "\033[?25l"
+stty -echo -icanon min 1 time 0 2>/dev/null
 
 draw_menu $start_row
 
-while true; do
-    key=$(read_key)
-    case "$key" in
-        up)
-            ((cursor > 0)) && ((cursor--))
-            ;;
-        down)
-            ((cursor < ${#SERVICES[@]} - 1)) && ((cursor++))
-            ;;
-        space)
-            if [[ "${selected[$cursor]}" == "true" ]]; then
-                selected[$cursor]="false"
-            else
-                selected[$cursor]="true"
-            fi
-            ;;
-        all)
-            # Toggle all
-            any_unselected=false
-            for s in "${selected[@]}"; do
-                [[ "$s" == "false" ]] && any_unselected=true
-            done
-            for i in "${!selected[@]}"; do
-                if [[ "$any_unselected" == "true" ]]; then
-                    selected[$i]="true"
-                else
-                    selected[$i]="false"
-                fi
-            done
-            ;;
-        enter)
-            break
-            ;;
-        quit)
-            cursor_show
-            stty echo 2>/dev/null
-            # Clear menu
-            for i in $(seq 0 $((${#SERVICES[@]} + 2))); do
-                cursor_to $((start_row + i))
-                clear_line
-            done
-            cursor_to $start_row
-            echo -e "${DIM}Cancelled.${NC}"
-            exit 0
-            ;;
-    esac
+while IFS= read -r -n1 -s key; do
+    if [[ "$key" == $'\x1b' ]]; then
+        IFS= read -r -n2 -s -t 1 seq
+        case "$seq" in
+            '[A') ((cursor > 0)) && ((cursor--)) ;;
+            '[B') ((cursor < ${#SERVICES[@]} - 1)) && ((cursor++)) ;;
+        esac
+    elif [[ "$key" == '' ]]; then
+        break
+    elif [[ "$key" == ' ' ]]; then
+        [[ "${selected[$cursor]}" == "true" ]] && selected[$cursor]="false" || selected[$cursor]="true"
+    elif [[ "$key" == 'a' || "$key" == 'A' ]]; then
+        any_unselected=false
+        for s in "${selected[@]}"; do [[ "$s" == "false" ]] && any_unselected=true; done
+        for i in "${!selected[@]}"; do
+            [[ "$any_unselected" == "true" ]] && selected[$i]="true" || selected[$i]="false"
+        done
+    elif [[ "$key" == 'q' || "$key" == 'Q' ]]; then
+        for i in $(seq 0 $((${#SERVICES[@]} + 2))); do cursor_to $((start_row + i)); clear_line; done
+        cursor_to $start_row
+        echo -e "${DIM}Cancelled.${NC}"
+        exit 0
+    fi
     draw_menu $start_row
 done
 
-cursor_show
-stty echo 2>/dev/null
+# Restore terminal before any further reads (e.g. "Restart?" prompt)
+stty "$SAVED_TTY" 2>/dev/null
+printf "\033[?25h"
 
 # Move cursor below menu
 cursor_to $((start_row + ${#SERVICES[@]} + 3))

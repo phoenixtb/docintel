@@ -28,6 +28,35 @@ from .dependencies import JWTClaimsDep, RAGServiceDep, SettingsDep, TracerDep
 logger = logging.getLogger(__name__)
 
 
+async def _emit_query_event(
+    query_id: str,
+    tenant_id: str,
+    user_id: str,
+    latency_ms: int,
+    model_used: str,
+    cache_hit: bool,
+    source_count: int,
+    analytics_url: str,
+) -> None:
+    """Fire-and-forget: POST query telemetry to analytics-service."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post(
+                f"{analytics_url}/events/query",
+                json={
+                    "query_id": query_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                    "latency_ms": latency_ms,
+                    "model_used": model_used,
+                    "cache_hit": cache_hit,
+                    "source_count": source_count,
+                },
+            )
+    except Exception as e:
+        logger.debug("Query telemetry emit failed (non-fatal): %s", e)
+
+
 # =============================================================================
 # Lifespan
 # =============================================================================
@@ -180,6 +209,7 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     answer: str
+    thinking: str = ""
     sources: list[dict]
     cache_hit: bool
     latency_ms: int
@@ -418,8 +448,19 @@ async def query_documents(
             conversation_id=request.conversation_id,
             min_score=request.min_score,
         )
+        asyncio.create_task(_emit_query_event(
+            query_id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
+            user_id=user_id or "",
+            latency_ms=result["latency_ms"],
+            model_used=result.get("model_used", "unknown"),
+            cache_hit=result["cache_hit"],
+            source_count=len(result["sources"]),
+            analytics_url=settings.analytics_service_url,
+        ))
         return QueryResponse(
             answer=result["answer"],
+            thinking=result.get("thinking", ""),
             sources=result["sources"],
             cache_hit=result["cache_hit"],
             latency_ms=result["latency_ms"],
@@ -445,7 +486,6 @@ async def query_documents_stream(
     """
     import asyncio
 
-    from haystack.dataclasses import ChatMessage
     from haystack_integrations.components.generators.ollama import OllamaChatGenerator
 
     from ..pipelines.query import _build_section_label
@@ -499,20 +539,26 @@ async def query_documents_stream(
             )
             messages: list[ChatMessage] = prompt_result["messages"]
 
-            # Stream LLM
+            # Stream LLM via Haystack's OllamaChatGenerator.
+            # ollama-haystack ≥6.1 maps message.thinking → chunk.reasoning.reasoning_text
+            # and message.content → chunk.content, giving clean separation without
+            # any custom parsing or direct Ollama API calls.
             queue: asyncio.Queue = asyncio.Queue()
 
+            full_thinking = ""
+            full_answer = ""
+
             async def streaming_callback(chunk):
-                try:
-                    content = getattr(chunk, "content", None)
-                    if isinstance(content, str) and content:
-                        queue.put_nowait(content)
-                except Exception:
-                    pass
+                # chunk.reasoning is ReasoningContent during thinking phase; None otherwise.
+                if chunk.reasoning and chunk.reasoning.reasoning_text:
+                    queue.put_nowait(("thinking", chunk.reasoning.reasoning_text))
+                elif chunk.content:
+                    queue.put_nowait(("answer", chunk.content))
 
             llm = OllamaChatGenerator(
                 model=settings.ollama_llm_model,
                 url=settings.ollama_base_url,
+                think=True,
                 generation_kwargs={
                     "temperature": settings.ollama_llm_temperature,
                     "num_predict": settings.ollama_llm_max_tokens,
@@ -529,16 +575,22 @@ async def query_documents_stream(
                     queue.put_nowait(None)
 
             task = asyncio.create_task(run_llm())
-            full_response = ""
+
             while True:
                 item = await queue.get()
                 if item is None:
                     break
-                full_response += item
-                yield f"data: {json.dumps({'token': item})}\n\n"
+                kind, text = item
+                if kind == "thinking":
+                    full_thinking += text
+                    yield f"data: {json.dumps({'thinking_token': text})}\n\n"
+                else:
+                    full_answer += text
+                    yield f"data: {json.dumps({'token': text})}\n\n"
+
             await task
 
-            answer = full_response.strip()
+            answer = full_answer.strip()
 
             sources = []
             for i, doc in enumerate(documents):
@@ -550,6 +602,7 @@ async def query_documents_stream(
                     "section": _build_section_label(doc.meta, chunk_idx),
                     "chunk_index": chunk_idx,
                     "score": doc.score or 0.0,
+                    "content": (doc.content or "")[:600],
                 })
 
             if request.conversation_id:
@@ -559,6 +612,18 @@ async def query_documents_stream(
                     add_message(request.conversation_id, "assistant", answer, sources=sources)
                 except Exception as e:
                     logger.warning("Failed to persist streaming conversation: %s", e)
+
+            # Fire-and-forget query telemetry to analytics-service.
+            asyncio.create_task(_emit_query_event(
+                query_id=query_id,
+                tenant_id=tenant_id,
+                user_id=user_id or "",
+                latency_ms=0,
+                model_used=settings.ollama_llm_model,
+                cache_hit=False,
+                source_count=len(sources),
+                analytics_url=settings.analytics_service_url,
+            ))
 
             yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
 

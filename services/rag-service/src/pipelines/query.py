@@ -17,8 +17,8 @@ Architecture (separation of concerns):
   │  8. Conversation persist    → PostgreSQL                                 │
   └─────────────────────────────────────────────────────────────────────────┘
          ↓ pipeline.run()
-  ┌── Haystack Pipeline (serialisable, warm-up managed, OTel-traceable) ───┐
-  │  SecureRetriever → TransformersSimilarityRanker → PromptBuilder → LLM  │
+  ┌── Haystack Pipeline (serialisable, warm-up managed, OTel-traceable) ─────┐
+  │  SecureRetriever → SentenceTransformersSimilarityRanker → PromptBuilder → LLM  │
   └─────────────────────────────────────────────────────────────────────────┘
 
 All model inference (LLM + dense embeddings) runs through Ollama for GPU acceleration.
@@ -37,7 +37,7 @@ import time
 from typing import Optional
 
 from haystack import Pipeline
-from haystack.components.rankers import TransformersSimilarityRanker
+from haystack.components.rankers import SentenceTransformersSimilarityRanker
 from haystack.components.routers import TransformersZeroShotTextRouter
 from haystack_integrations.components.embedders.ollama import OllamaTextEmbedder
 
@@ -77,10 +77,10 @@ def build_query_pipeline(settings: Settings) -> Pipeline:
     )
     pipeline.add_component(
         "reranker",
-        TransformersSimilarityRanker(
+        SentenceTransformersSimilarityRanker(
             model=settings.reranker_model,
             top_k=settings.rag_reranker_top_k,
-            device="cpu",
+            device=None,  # auto: CPU in Docker (no MPS/CUDA passthrough)
         ),
     )
     pipeline.add_component("prompt_builder", PromptBuilder())
@@ -134,6 +134,21 @@ def _parse_json_answer(raw: str) -> str:
     return raw
 
 
+def _extract_think(raw: str) -> tuple[str, str]:
+    """
+    Split <think>...</think> reasoning from the answer text.
+
+    Returns (thinking, answer). The thinking block is stripped from the
+    answer so the two can be rendered separately in the UI.
+    Works on both complete and empty think blocks.
+    """
+    import re
+    m = re.search(r"<think>(.*?)</think>(.*)", raw, re.DOTALL)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return "", raw.strip()
+
+
 # ---------------------------------------------------------------------------
 # RAGService
 # ---------------------------------------------------------------------------
@@ -181,12 +196,11 @@ class RAGService:
 
         cfg = self._settings
 
-        # Dense embedder — runs via Ollama (Metal/GPU on Apple Silicon, no Docker model download)
+        # Dense embedder — stateless HTTP client to Ollama (Metal/GPU, no warm_up needed)
         self._dense_embedder = OllamaTextEmbedder(
             model=cfg.ollama_embed_model,
             url=cfg.ollama_base_url,
         )
-        self._dense_embedder.warm_up()
 
         # BM25 sparse embedder
         self._sparse_embedder = BM25SparseTextEmbedder()
@@ -391,7 +405,7 @@ class RAGService:
             meta = getattr(reply, "meta", {}) or {}
             model_used = meta.get("model", cfg.ollama_llm_model) if isinstance(meta, dict) else cfg.ollama_llm_model
 
-        answer = _parse_json_answer(raw_text)
+        thinking, answer = _extract_think(_parse_json_answer(raw_text))
         latency_ms = int((time.time() - start_time) * 1000)
 
         # ── Step 7: Build sources ─────────────────────────────────────────────
@@ -428,6 +442,7 @@ class RAGService:
 
         return {
             "answer": answer,
+            "thinking": thinking,
             "sources": sources,
             "cache_hit": False,
             "latency_ms": latency_ms,

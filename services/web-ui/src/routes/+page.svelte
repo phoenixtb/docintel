@@ -2,14 +2,10 @@
   import { onMount } from 'svelte';
   import { env } from '$env/dynamic/public';
   import { getAuthHeaders, getTenantId, getAuthState } from '$lib/auth';
-  
-  interface Message {
-    id: string;
-    role: 'user' | 'assistant';
-    content: string;
-    sources?: Source[];
-  }
-  
+  import { toast } from 'svelte-sonner';
+  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+  import MessageBubble from '$lib/components/MessageBubble.svelte';
+
   interface Source {
     ref_id?: number;
     document_id: string;
@@ -17,6 +13,17 @@
     section?: string;
     chunk_index?: number;
     score: number;
+    content?: string;
+  }
+
+  interface Message {
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    thinking?: string;
+    sources?: Source[];
+    liked?: boolean | null;
+    queryId?: string;
   }
   
   interface Conversation {
@@ -30,13 +37,19 @@
   let input = $state('');
   let isStreaming = $state(false);
   let currentResponse = $state('');
+  let currentThinking = $state('');
   let currentSources: Source[] = $state([]);
+  let currentQueryId = $state('');
   
   // Conversation state
   let conversations: Conversation[] = $state([]);
   let activeConversationId: string | null = $state(null);
   let sidebarOpen = $state(true);
   let loadingConversations = $state(true);
+
+  // Confirm dialog state
+  let confirmOpen = $state(false);
+  let confirmConvId: string | null = $state(null);
   
   const API_BASE = env.PUBLIC_API_URL || 'http://localhost:8080';
   
@@ -109,9 +122,17 @@
     }
   }
   
-  async function deleteConversation(convId: string, event: MouseEvent) {
+  function deleteConversation(convId: string, event: MouseEvent) {
     event.stopPropagation();
-    if (!confirm('Delete this conversation?')) return;
+    confirmConvId = convId;
+    confirmOpen = true;
+  }
+
+  async function doDeleteConversation() {
+    if (!confirmConvId) return;
+    const convId = confirmConvId;
+    confirmOpen = false;
+    confirmConvId = null;
     try {
       await fetch(
         `${API_BASE}/api/v1/conversations/${convId}?tenant_id=${getTenantId()}`,
@@ -121,8 +142,10 @@
       if (activeConversationId === convId) {
         startNewChat();
       }
+      toast.success('Conversation deleted');
     } catch (e) {
       console.error('Failed to delete conversation:', e);
+      toast.error('Failed to delete conversation');
     }
   }
   
@@ -136,11 +159,12 @@
   // Send message
   // ==========================================================================
   
-  async function sendMessage() {
-    if (!input.trim() || isStreaming) return;
-    
-    const userMessage = input.trim();
-    input = '';
+  async function sendMessage(overrideText?: string) {
+    if (isStreaming) return;
+    if (!overrideText && !input.trim()) return;
+
+    const userMessage = overrideText ?? input.trim();
+    if (!overrideText) input = '';
     
     // Auto-create conversation on first message
     if (!activeConversationId) {
@@ -156,7 +180,9 @@
     
     isStreaming = true;
     currentResponse = '';
+    currentThinking = '';
     currentSources = [];
+    currentQueryId = '';
     
     try {
       const response = await fetch(`${API_BASE}/api/v1/query/stream`, {
@@ -191,18 +217,25 @@
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6));
+              if (data.metadata?.query_id) currentQueryId = data.metadata.query_id;
+              if (data.thinking_token) currentThinking += data.thinking_token;
               if (data.token) currentResponse += data.token;
               if (data.sources) currentSources = data.sources;
+              if (data.error) throw new Error(data.error);
+              if (data.done) { reader.cancel(); break; }
             } catch { /* skip malformed */ }
           }
         }
       }
       
-      messages = [...messages, { 
-        id: generateId(), 
-        role: 'assistant', 
+      messages = [...messages, {
+        id: generateId(),
+        role: 'assistant',
         content: currentResponse,
-        sources: currentSources.length > 0 ? currentSources : undefined
+        thinking: currentThinking || undefined,
+        sources: currentSources.length > 0 ? currentSources : undefined,
+        liked: null,
+        queryId: currentQueryId || undefined,
       }];
       
       // Update conversation title in sidebar (from first user message)
@@ -222,7 +255,9 @@
     } finally {
       isStreaming = false;
       currentResponse = '';
+      currentThinking = '';
       currentSources = [];
+      currentQueryId = '';
     }
   }
   
@@ -231,6 +266,38 @@
       event.preventDefault();
       sendMessage();
     }
+  }
+
+  async function setFeedback(messageId: string, liked: boolean) {
+    const msg = messages.find(m => m.id === messageId);
+    if (!msg) return;
+    // Optimistic update — toggle off if already selected
+    const newLiked = msg.liked === liked ? null : liked;
+    messages = messages.map(m => m.id === messageId ? { ...m, liked: newLiked } : m);
+    if (newLiked === null) return; // untoggled, no POST needed
+    try {
+      await fetch(`${API_BASE}/api/v1/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          query_id: msg.queryId ?? '',
+          tenant_id: getTenantId(),
+          user_id: getAuthState().user?.id ?? '',
+          liked: newLiked,
+        }),
+      });
+    } catch (e) {
+      console.error('Feedback POST failed:', e);
+    }
+  }
+
+  async function regenerate(messageId: string) {
+    const idx = messages.findIndex(m => m.id === messageId);
+    if (idx === -1) return;
+    const userMsg = [...messages].slice(0, idx).findLast(m => m.role === 'user');
+    if (!userMsg) return;
+    messages = messages.slice(0, idx);
+    await sendMessage(userMsg.content);
   }
   
   /** Parse content into segments for rendering [1], [2] as clickable refs */
@@ -380,59 +447,45 @@
         {/if}
         
         {#each messages as message (message.id)}
-          <div class="flex {message.role === 'user' ? 'justify-end' : 'justify-start'}" data-message-id={message.id}>
-            <div class="max-w-2xl">
-              <div class="px-4 py-3 rounded-2xl {message.role === 'user' 
-                ? 'bg-blue-600 text-white' 
-                : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm text-gray-900 dark:text-gray-100'}">
-                {#if message.role === 'assistant' && message.sources && message.sources.length > 0}
-                  <p class="whitespace-pre-wrap">
-                    {#each parseContentWithRefs(message.content) as seg}
-                      {#if seg.type === 'ref'}
-                        <button
-                          type="button"
-                          onclick={() => scrollToSource(seg.refId!, message.id)}
-                          class="inline-flex align-baseline px-0.5 mx-0.5 rounded text-blue-600 dark:text-blue-400 hover:underline font-medium cursor-pointer"
-                          title="Jump to source"
-                        >{seg.content}</button>
-                      {:else}
-                        {seg.content}
-                      {/if}
-                    {/each}
-                  </p>
-                {:else}
+          <div data-message-id={message.id}>
+            {#if message.role === 'user'}
+              <div class="flex justify-end">
+                <div class="max-w-2xl px-4 py-3 rounded-2xl bg-blue-600 text-white shadow-sm">
                   <p class="whitespace-pre-wrap">{message.content}</p>
-                {/if}
+                </div>
               </div>
-              
-              {#if message.sources && message.sources.length > 0}
-                <div class="mt-2 flex flex-wrap gap-2">
-                  {#each message.sources as source, i}
-                    <span
-                      data-ref-id={source.ref_id ?? i + 1}
-                      class="inline-flex items-center px-2 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-xs text-gray-600 dark:text-gray-300 transition-all"
-                    >
-                      <svg class="w-3 h-3 mr-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                      </svg>
-                      {source.filename}{#if source.section} ({source.section}){/if}
-                    </span>
-                  {/each}
+            {:else}
+              <MessageBubble
+                {message}
+                onRegenerate={() => regenerate(message.id)}
+                onFeedback={(liked) => setFeedback(message.id, liked)}
+              />
+            {/if}
+          </div>
+        {/each}
+
+        {#if isStreaming}
+          <div class="flex justify-start">
+            <div class="max-w-3xl w-full space-y-2">
+              {#if currentThinking}
+                <details open class="rounded-lg border border-dashed border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900/40 text-xs">
+                  <summary class="flex items-center gap-2 px-3 py-2 cursor-pointer select-none text-gray-500 dark:text-gray-400 list-none">
+                    <span class="animate-pulse w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                    <span class="font-medium">Thinking...</span>
+                  </summary>
+                  <pre class="px-3 pb-3 pt-1 font-mono text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap">{currentThinking}</pre>
+                </details>
+              {/if}
+              {#if currentResponse}
+                <div class="px-4 py-3 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm">
+                  <p class="whitespace-pre-wrap text-gray-900 dark:text-gray-100">{currentResponse}<span class="animate-pulse text-blue-600 dark:text-blue-400">▌</span></p>
                 </div>
               {/if}
             </div>
           </div>
-        {/each}
-        
-        {#if isStreaming && currentResponse}
-          <div class="flex justify-start">
-            <div class="max-w-2xl px-4 py-3 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm">
-              <p class="whitespace-pre-wrap text-gray-900 dark:text-gray-100">{currentResponse}<span class="animate-pulse text-blue-600 dark:text-blue-400">▌</span></p>
-            </div>
-          </div>
         {/if}
         
-        {#if isStreaming && !currentResponse}
+        {#if isStreaming && !currentResponse && !currentThinking}
           <div class="flex justify-start">
             <div class="px-4 py-3 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm">
               <div class="flex items-center gap-2 text-gray-500 dark:text-gray-400">
@@ -464,7 +517,7 @@
             ></textarea>
           </div>
           <button
-            onclick={sendMessage}
+            onclick={() => sendMessage()}
             disabled={isStreaming || !input.trim()}
             class="p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex-shrink-0"
           >
@@ -487,3 +540,13 @@
     </div>
   </div>
 </div>
+
+<ConfirmDialog
+  open={confirmOpen}
+  title="Delete conversation?"
+  message="This conversation will be permanently deleted."
+  confirmLabel="Delete"
+  dangerous={true}
+  onconfirm={doDeleteConversation}
+  oncancel={() => { confirmOpen = false; confirmConvId = null; }}
+/>

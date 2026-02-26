@@ -53,16 +53,16 @@ LABELS=(
 )
 
 # Terminal control
-cursor_to()    { printf "\033[%s;0H" "$1"; }
-clear_line()   { printf "\033[2K"; }
-cursor_hide()  { printf "\033[?25l"; }
-cursor_show()  { printf "\033[?25h"; }
+cursor_to()  { printf "\033[%s;0H" "$1"; }
+clear_line() { printf "\033[2K"; }
 
+SAVED_TTY=$(stty -g 2>/dev/null)
 cleanup() {
-    cursor_show
-    stty echo 2>/dev/null
+    stty "$SAVED_TTY" 2>/dev/null
+    printf "\033[?25h"
+    echo ""
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 cursor=0
 
@@ -89,22 +89,6 @@ draw_menu() {
     printf "  ${DIM}↑↓ navigate • enter select • q quit${NC}"
 }
 
-read_key() {
-    local key
-    IFS= read -rsn1 key
-    case "$key" in
-        $'\x1b')
-            read -rsn2 -t 0.1 key
-            case "$key" in
-                '[A') echo "up" ;;
-                '[B') echo "down" ;;
-            esac
-            ;;
-        '') echo "enter" ;;
-        'q'|'Q') echo "quit" ;;
-    esac
-}
-
 # Header
 clear
 echo ""
@@ -113,36 +97,26 @@ echo -e "  ${DIM}Manage your DocIntel environment${NC}"
 echo ""
 
 start_row=5
-
-cursor_hide
-stty -echo 2>/dev/null
+printf "\033[?25l"
+stty -echo -icanon min 1 time 0 2>/dev/null
 
 draw_menu $start_row
 
-while true; do
-    key=$(read_key)
-    case "$key" in
-        up)
-            ((cursor > 0)) && ((cursor--))
-            ;;
-        down)
-            ((cursor < ${#ACTIONS[@]} - 1)) && ((cursor++))
-            ;;
-        enter)
-            break
-            ;;
-        quit)
-            cursor_show
-            stty echo 2>/dev/null
-            cursor_to $((start_row + ${#ACTIONS[@]} + 3))
-            exit 0
-            ;;
-    esac
+while IFS= read -r -n1 -s key; do
+    if [[ "$key" == $'\x1b' ]]; then
+        IFS= read -r -n2 -s -t 1 seq
+        case "$seq" in
+            '[A') ((cursor > 0)) && ((cursor--)) ;;
+            '[B') ((cursor < ${#ACTIONS[@]} - 1)) && ((cursor++)) ;;
+        esac
+    elif [[ "$key" == '' ]]; then
+        break
+    elif [[ "$key" == 'q' || "$key" == 'Q' ]]; then
+        cursor_to $((start_row + ${#ACTIONS[@]} + 3))
+        exit 0
+    fi
     draw_menu $start_row
 done
-
-cursor_show
-stty echo 2>/dev/null
 
 # Move below menu
 cursor_to $((start_row + ${#ACTIONS[@]} + 3))
@@ -152,6 +126,11 @@ action="${ACTIONS[$cursor]}"
 echo ""
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
+
+# Restore terminal before exec — bash's EXIT trap does not fire on exec,
+# so the raw mode set by this script would otherwise be inherited.
+stty "$SAVED_TTY" 2>/dev/null
+printf "\033[?25h"
 
 case "$action" in
     setup)

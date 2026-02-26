@@ -7,7 +7,7 @@ Builds tenant + role + domain Qdrant filters and delegates to the
 Haystack-native retrievers for hybrid dense+sparse (RRF) or dense-only search.
 
 Pipeline position:
-  [BM25SparseTextEmbedder] → SecureRetriever → [TransformersSimilarityRanker]
+  [BM25SparseTextEmbedder] → SecureRetriever → [SentenceTransformersSimilarityRanker]
 """
 
 from haystack import Document, component

@@ -5,6 +5,7 @@
   import { browser } from '$app/environment';
   import UserMenu from '$lib/components/UserMenu.svelte';
   import { isAuthEnabled, getAuthState, restoreAuthState, login } from '$lib/auth';
+  import { Toaster } from 'svelte-sonner';
 
   let { children } = $props();
   let isReady = $state(false);
@@ -125,3 +126,5 @@
     </main>
   </div>
 {/if}
+
+<Toaster theme="dark" position="bottom-right" richColors />

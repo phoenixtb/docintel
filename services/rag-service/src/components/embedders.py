@@ -22,9 +22,8 @@ class BM25SparseDocumentEmbedder:
     Computes BM25 sparse embeddings for documents and populates
     Document.sparse_embedding so DocumentWriter stores them in Qdrant.
 
-    Designed to sit before SentenceTransformersDocumentEmbedder in the
-    indexing pipeline:
-      BM25SparseDocumentEmbedder → SentenceTransformersDocumentEmbedder → DocumentWriter
+    Designed to sit before OllamaDocumentEmbedder in the indexing pipeline:
+      BM25SparseDocumentEmbedder → OllamaDocumentEmbedder → DocumentWriter
     """
 
     def __init__(self, model_name: str = "Qdrant/bm25"):

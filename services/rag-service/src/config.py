@@ -82,6 +82,7 @@ class Settings(BaseSettings):
 
     # ── External services ─────────────────────────────────────────────────────
     document_service_url: str = "http://document-service:8081"
+    analytics_service_url: str = "http://analytics-service:8001"
     postgres_url: str = "postgresql://docintel:docintel_secret@postgres:5432/docintel"
 
     # ── Service metadata ──────────────────────────────────────────────────────

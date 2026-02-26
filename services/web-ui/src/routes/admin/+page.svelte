@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { env } from '$env/dynamic/public';
   import { getAuthHeaders, getTenantId } from '$lib/auth';
+  import { toast } from 'svelte-sonner';
+  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   
   const API_BASE = env.PUBLIC_API_URL || 'http://localhost:8080';
   
@@ -13,6 +15,8 @@
   let health: any = $state(null);
   let stats: any = $state(null);
   let vectorStats: any = $state(null);
+  let querySummary: any = $state(null);
+  let feedbackSummary: any = $state(null);
   
   // Cache data
   let cacheStats: any = $state(null);
@@ -26,6 +30,10 @@
   // Bulk delete
   let deletingDocs = $state(false);
   let deleteResult: string | null = $state(null);
+
+  // Confirm dialog state
+  let confirmOpen = $state(false);
+  let confirmTenantId: string | null = $state(null);
   
   const headers = () => ({ ...getAuthHeaders() });
   
@@ -37,10 +45,12 @@
   async function loadDashboard() {
     loading = true;
     try {
-      [health, stats, vectorStats] = await Promise.all([
+      [health, stats, vectorStats, querySummary, feedbackSummary] = await Promise.all([
         fetchJson('/api/v1/admin/health'),
         fetchJson('/api/v1/admin/stats'),
         fetchJson('/api/v1/vector-stats'),
+        fetchJson('/api/v1/analytics/queries/summary'),
+        fetchJson('/api/v1/analytics/feedback/summary'),
       ]);
     } catch (e) { console.error(e); }
     loading = false;
@@ -69,8 +79,16 @@
     tenantUsage = await fetchJson(`/api/v1/tenants/${tenantId}/usage`);
   }
   
-  async function deleteAllDocuments(tenantId: string) {
-    if (!confirm(`Delete ALL documents for tenant "${tenantId}"? This removes documents, chunks, and vectors. This cannot be undone.`)) return;
+  function deleteAllDocuments(tenantId: string) {
+    confirmTenantId = tenantId;
+    confirmOpen = true;
+  }
+
+  async function doDeleteAllDocuments() {
+    if (!confirmTenantId) return;
+    const tenantId = confirmTenantId;
+    confirmOpen = false;
+    confirmTenantId = null;
     deletingDocs = true;
     deleteResult = null;
     try {
@@ -81,13 +99,16 @@
       if (res.ok) {
         const data = await res.json();
         deleteResult = `Deleted ${data.deleted} documents for tenant "${tenantId}"`;
+        toast.success(deleteResult);
         await loadDashboard();
         await loadTenants();
       } else {
         deleteResult = `Failed: ${res.status}`;
+        toast.error(deleteResult);
       }
     } catch (e) {
       deleteResult = `Error: ${e}`;
+      toast.error(deleteResult);
     }
     deletingDocs = false;
   }
@@ -169,6 +190,36 @@
           {/each}
         </div>
         
+        <!-- Analytics Stats -->
+        {#if querySummary || feedbackSummary}
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            {#each [
+              { label: 'Total Queries', value: querySummary?.totalQueries ?? '-' },
+              { label: 'Avg Latency', value: querySummary ? `${Math.round(querySummary.avgLatencyMs)}ms` : '-' },
+              { label: 'Cache Hit Rate', value: querySummary ? `${(querySummary.cacheHitRate * 100).toFixed(1)}%` : '-' },
+              { label: 'P95 Latency', value: querySummary ? `${querySummary.p95LatencyMs}ms` : '-' },
+            ] as card}
+              <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+                <p class="text-sm text-gray-500 dark:text-gray-400">{card.label}</p>
+                <p class="text-2xl font-bold text-gray-900 dark:text-white mt-1">{card.value}</p>
+              </div>
+            {/each}
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            {#each [
+              { label: 'Total Feedback', value: feedbackSummary?.totalFeedback ?? '-' },
+              { label: 'Likes', value: feedbackSummary?.likes ?? '-' },
+              { label: 'Dislikes', value: feedbackSummary?.dislikes ?? '-' },
+              { label: 'Like Rate', value: feedbackSummary ? `${(feedbackSummary.likeRate * 100).toFixed(1)}%` : '-' },
+            ] as card}
+              <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+                <p class="text-sm text-gray-500 dark:text-gray-400">{card.label}</p>
+                <p class="text-2xl font-bold text-gray-900 dark:text-white mt-1">{card.value}</p>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
         <!-- Vector Stats -->
         {#if vectorStats}
           <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
@@ -354,3 +405,13 @@
     {/if}
   </div>
 </div>
+
+<ConfirmDialog
+  open={confirmOpen}
+  title="Delete all documents?"
+  message={confirmTenantId ? `This will permanently delete ALL documents, chunks, and vectors for tenant "${confirmTenantId}". This cannot be undone.` : ''}
+  confirmLabel="Delete All"
+  dangerous={true}
+  onconfirm={doDeleteAllDocuments}
+  oncancel={() => { confirmOpen = false; confirmTenantId = null; }}
+/>

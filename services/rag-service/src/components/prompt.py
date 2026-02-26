@@ -6,7 +6,7 @@ Builds chat messages for RAG generation from retrieved documents and query.
 Outputs list[ChatMessage] so it connects directly to OllamaChatGenerator.messages.
 
 Pipeline position:
-  [TransformersSimilarityRanker] → PromptBuilder → OllamaChatGenerator
+  [SentenceTransformersSimilarityRanker] → PromptBuilder → OllamaChatGenerator
 """
 
 from haystack import Document, component

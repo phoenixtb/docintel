@@ -43,9 +43,35 @@ echo "================================================"
 
 if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
     echo ""
-    echo "Warning: Ollama is not running on http://localhost:11434"
-    echo "Please start Ollama before using the application."
+    echo "Warning: Ollama is not running!"
     echo ""
+    if command -v ollama &> /dev/null; then
+        echo "Ollama is installed but not running."
+        echo "  - On macOS: Open the Ollama app from Applications"
+        echo "  - On Linux: Run 'ollama serve' in a separate terminal"
+        echo ""
+        read -p "Press Enter once Ollama is running, or Ctrl+C to abort..."
+        if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+            echo "Ollama is still not responding. Aborting."
+            exit 1
+        fi
+    else
+        echo "Ollama is not installed. Run ./scripts/setup.sh first."
+        exit 1
+    fi
+fi
+
+REQUIRED_MODELS=("qwen3:4b" "nomic-embed-text")
+MISSING_MODELS=()
+for model in "${REQUIRED_MODELS[@]}"; do
+    if ! ollama list 2>/dev/null | grep -q "^${model}"; then
+        MISSING_MODELS+=("$model")
+    fi
+done
+if [ ${#MISSING_MODELS[@]} -gt 0 ]; then
+    echo "Missing required models: ${MISSING_MODELS[*]}"
+    echo "Run ./scripts/setup.sh to pull them."
+    exit 1
 fi
 
 # =============================================================================
@@ -141,16 +167,60 @@ fi
 echo "Waiting for application services..."
 sleep 5
 
-echo -n "API Gateway: "
+echo -n "  API Gateway: "
 if curl -s http://localhost:8080/actuator/health > /dev/null 2>&1; then
     echo "ready"
 else
     echo "starting..."
 fi
 
+printf "  RAG Service: "
+for i in {1..60}; do
+    if curl -s http://localhost:8000/health > /dev/null 2>&1; then
+        echo "ready"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "timeout (check logs: docker compose logs rag-service)"
+    fi
+    sleep 2
+done
+
+printf "  Analytics Service: "
+for i in {1..30}; do
+    if curl -s http://localhost:8001/health > /dev/null 2>&1; then
+        echo "ready"
+        break
+    fi
+    if [ $i -eq 30 ]; then
+        echo "timeout (check logs: docker compose logs analytics-service)"
+    fi
+    sleep 2
+done
+
+printf "  Web UI: "
+for i in {1..30}; do
+    if curl -s http://localhost:3001 > /dev/null 2>&1; then
+        echo "ready"
+        break
+    fi
+    if [ $i -eq 30 ]; then
+        echo "timeout (check logs: docker compose logs web-ui)"
+    fi
+    sleep 2
+done
+
 # =============================================================================
 # Done
 # =============================================================================
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    open http://localhost:3001
+elif command -v xdg-open &> /dev/null; then
+    xdg-open http://localhost:3001
+elif command -v wslview &> /dev/null; then
+    wslview http://localhost:3001
+fi
 
 echo ""
 echo "================================================"
@@ -161,6 +231,7 @@ echo "  Service              URL                              Credentials"
 echo "  -------------------  -------------------------------  -------------------------"
 echo "  Web UI               http://localhost:3001"
 echo "  API Gateway          http://localhost:8080"
+echo "  Analytics Service    http://localhost:8001"
 echo "  Langfuse             http://localhost:3000             admin@docintel.local / admin123"
 echo "  MinIO Console        http://localhost:9001             minioadmin / minioadmin"
 echo "  Qdrant               http://localhost:6333"

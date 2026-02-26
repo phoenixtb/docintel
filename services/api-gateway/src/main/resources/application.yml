@@ -48,6 +48,20 @@ spring:
           filters:
             - RewritePath=/api/v1/vector-stats, /vector-stats
 
+        - id: analytics-service-feedback
+          uri: ${ANALYTICS_SERVICE_URL:http://localhost:8001}
+          predicates:
+            - Path=/api/v1/feedback
+          filters:
+            - RewritePath=/api/v1/feedback, /events/feedback
+
+        - id: analytics-service-analytics
+          uri: ${ANALYTICS_SERVICE_URL:http://localhost:8001}
+          predicates:
+            - Path=/api/v1/analytics/**
+          filters:
+            - RewritePath=/api/v1/analytics/(?<segment>.*), /analytics/${segment}
+
         - id: admin-service
           uri: ${ADMIN_SERVICE_URL:http://localhost:8082}
           predicates:

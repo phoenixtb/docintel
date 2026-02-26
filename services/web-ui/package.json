@@ -14,8 +14,12 @@
   },
   "dependencies": {
     "@ai-sdk/svelte": "^1.0.0",
+    "@types/dompurify": "^3.0.5",
     "ai": "^4.0.0",
-    "oidc-client-ts": "^3.4.1"
+    "dompurify": "^3.3.1",
+    "marked": "^17.0.3",
+    "oidc-client-ts": "^3.4.1",
+    "svelte-sonner": "^1.0.7"
   },
   "devDependencies": {
     "@playwright/test": "^1.42.0",

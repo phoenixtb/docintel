@@ -2576,6 +2576,87 @@ Targets:
 
 ---
 
+## Analytics Service Architecture
+
+### Decision Record
+
+**Stack chosen:** Kotlin/Spring Boot 4 + WebFlux + ClickHouse JDBC
+
+**Rationale:**
+- Event ingestion (`/events/query`, `/events/feedback`) is high-throughput, benefits from non-blocking WebFlux I/O
+- ClickHouse is purpose-built for analytical workloads (time-series, aggregations, P95 latency) — far more efficient than PostgreSQL for this
+- Kotlin/Spring Boot aligns with the enterprise stack (document-service, admin-service, document-service are all JVM-based)
+- Python notebooks (`notebooks/`) handle offline/batch analytics (RLHF export, quality analysis) — no need to bake analytical libs into the ingestion service
+- Grafana + ClickHouse plugin is the enterprise-standard dashboard path (future, not baked in)
+
+**Why not Python/FastAPI for this service:**
+- clickhouse-connect has more Python analytical library integrations, but that's for batch analysis, not real-time event ingestion
+- Java is more performant for always-on ingestion workloads
+- Consistent JVM ops story (single Docker base image family, single deployment model)
+
+**Why not embedding analytics into an existing service:**
+- Separation of concerns — RAG service stays stateless; analytics is a separate platform offering
+- Can scale independently (analytics traffic ≠ RAG traffic)
+- Platform extensibility: analytics-service becomes the data backend for future dashboards, RLHF pipelines
+
+### ClickHouse Schema
+
+```sql
+CREATE DATABASE IF NOT EXISTS docintel_analytics;
+
+CREATE TABLE IF NOT EXISTS docintel_analytics.query_events (
+    query_id      String,
+    tenant_id     String,
+    user_id       String,
+    latency_ms    UInt32,
+    model_used    LowCardinality(String),
+    cache_hit     Bool,
+    source_count  UInt8,
+    created_at    DateTime DEFAULT now()
+) ENGINE = MergeTree()
+ORDER BY (tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS docintel_analytics.feedback_events (
+    query_id    String,
+    tenant_id   String,
+    user_id     String,
+    liked       Nullable(Bool),
+    comment     Nullable(String),
+    created_at  DateTime DEFAULT now()
+) ENGINE = MergeTree()
+ORDER BY (tenant_id, created_at);
+```
+
+### API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/events/query` | Ingest query event from RAG service |
+| POST | `/events/feedback` | Ingest like/dislike/comment from web-ui |
+| GET | `/analytics/queries/summary?tenantId=` | Aggregated query stats (count, avg/P95 latency, cache hit rate) |
+| GET | `/analytics/feedback/summary?tenantId=` | Aggregated feedback stats (total, likes, dislikes, like rate) |
+| GET | `/health` | Health check |
+
+### Data Flow
+
+```
+RAG Service ──── POST /events/query ──────► analytics-service ──► ClickHouse
+Web UI      ──── POST /events/feedback ──►  analytics-service ──► ClickHouse
+Admin UI    ──── GET /analytics/**    ◄───  analytics-service ◄── ClickHouse
+Grafana     ──── ClickHouse plugin (future) directly to ClickHouse
+Notebooks   ──── clickhouse-connect (batch/RLHF export)
+```
+
+### Extension Points
+
+- Add `model_version`, `domain` columns to `query_events` for routing analytics
+- Add `rating` (1-5 scale) to `feedback_events` for RLHF fine-grained signal
+- Add `GET /analytics/queries/latency-by-model` for per-model P95 breakdown
+- Grafana dashboard: connect directly to ClickHouse via official plugin — no API proxy needed
+- RLHF export: Python notebook queries ClickHouse, exports to JSONL for fine-tuning
+
+---
+
 ## Notes for AI-Assisted Coding
 
 When using Cursor or Claude Code to implement these components:

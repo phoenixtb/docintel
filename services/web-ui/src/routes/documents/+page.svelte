@@ -1,6 +1,8 @@
 <script lang="ts">
   import { env } from '$env/dynamic/public';
   import { getAuthHeaders, getTenantId } from '$lib/auth';
+  import { toast } from 'svelte-sonner';
+  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 
   interface Document {
     id: string;
@@ -54,6 +56,10 @@
   let samplesPerDataset = $state(100);
 
   const API_BASE = env.PUBLIC_API_URL || 'http://localhost:8080';
+
+  // Confirm dialog state
+  let confirmOpen = $state(false);
+  let confirmDocId: string | null = $state(null);
 
   const DOMAIN_OPTIONS = [
     { value: 'auto', label: 'Auto-detect', description: 'AI classifies domain' },
@@ -239,9 +245,16 @@
     }
   }
 
-  async function deleteDocument(id: string) {
-    if (!confirm('Delete this document?')) return;
+  function deleteDocument(id: string) {
+    confirmDocId = id;
+    confirmOpen = true;
+  }
 
+  async function doDeleteDocument() {
+    if (!confirmDocId) return;
+    const id = confirmDocId;
+    confirmOpen = false;
+    confirmDocId = null;
     try {
       const response = await fetch(`${API_BASE}/api/v1/documents/${id}`, {
         method: 'DELETE',
@@ -252,8 +265,11 @@
       }
 
       await refreshAll();
+      toast.success('Document deleted');
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Delete failed';
+      const msg = e instanceof Error ? e.message : 'Delete failed';
+      error = msg;
+      toast.error(msg);
     }
   }
 
@@ -694,3 +710,13 @@
     </div>
   </div>
 </div>
+
+<ConfirmDialog
+  open={confirmOpen}
+  title="Delete document?"
+  message="This document and all its chunks will be permanently deleted."
+  confirmLabel="Delete"
+  dangerous={true}
+  onconfirm={doDeleteDocument}
+  oncancel={() => { confirmOpen = false; confirmDocId = null; }}
+/>
