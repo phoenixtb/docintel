@@ -61,7 +61,7 @@ if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
     fi
 fi
 
-REQUIRED_MODELS=("qwen3.5:27b" "nomic-embed-text")
+REQUIRED_MODELS=("qwen3:8b" "nomic-embed-text")
 MISSING_MODELS=()
 for model in "${REQUIRED_MODELS[@]}"; do
     if ! ollama list 2>/dev/null | grep -q "^${model}"; then

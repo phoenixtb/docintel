@@ -66,7 +66,7 @@ services:
       # Ollama runs natively on host (Metal on Apple Silicon, CUDA on Linux, vLLM in prod)
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       # LLM — chat generation and streaming
-      - OLLAMA_LLM_MODEL=qwen3.5:27b
+      - OLLAMA_LLM_MODEL=qwen3:8b
       - OLLAMA_LLM_FALLBACK=phi3:mini
       # Embeddings — dense vectors via Ollama (GPU/Metal, no Docker model download)
       - OLLAMA_EMBED_MODEL=nomic-embed-text

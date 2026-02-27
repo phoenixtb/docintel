@@ -98,7 +98,7 @@ if [ "$REMOVE_MODELS" = true ]; then
     echo "This will free up approximately 8-10GB of disk space."
     echo ""
     
-    MODELS=("qwen3.5:27b" "phi3:mini" "nomic-embed-text")
+    MODELS=("qwen3:8b" "phi3:mini" "nomic-embed-text")
     
     # Check if Ollama is available
     if ! command -v ollama &> /dev/null; then
