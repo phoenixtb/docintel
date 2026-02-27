@@ -45,3 +45,4 @@ data/
 htmlcov/
 .coverage
 .pytest_cache/
+tests/integration/reports/

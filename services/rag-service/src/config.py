@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://host.docker.internal:11434"
 
     # LLM — chat generation and streaming
-    ollama_llm_model: str = "qwen3:4b"
+    ollama_llm_model: str = "qwen3.5:27b"
     ollama_llm_fallback: str = "phi3:mini"
 
     # Embeddings — dense vectors (768-dim). Must match qdrant_embedding_dim.

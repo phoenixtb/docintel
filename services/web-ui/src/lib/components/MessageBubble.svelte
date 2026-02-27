@@ -119,34 +119,49 @@
 </script>
 
 <style>
-  /* Scoped badge styles — inline-ref already handled in app.css globally */
-  :global(.prose-ai) {
-    color: #cbd5e1;
-  }
+  /* ── Shared prose-ai layout ── */
   :global(.prose-ai p)   { margin: 0.375rem 0; }
   :global(.prose-ai ul)  { list-style: disc; padding-left: 1.25rem; margin: 0.375rem 0; }
   :global(.prose-ai ol)  { list-style: decimal; padding-left: 1.25rem; margin: 0.375rem 0; }
   :global(.prose-ai li)  { margin: 0.2rem 0; }
   :global(.prose-ai h1, .prose-ai h2, .prose-ai h3, .prose-ai h4) {
-    color: #e2e8f0;
     font-weight: 600;
     margin: 0.75rem 0 0.25rem;
   }
   :global(.prose-ai h1) { font-size: 1.15rem; }
   :global(.prose-ai h2) { font-size: 1.05rem; }
   :global(.prose-ai h3) { font-size: 0.95rem; }
-  :global(.prose-ai strong) { color: #e2e8f0; font-weight: 600; }
-  :global(.prose-ai a)  { color: #34d399; text-decoration: underline; }
   :global(.prose-ai blockquote) {
     border-left: 2px solid rgba(16,185,129,0.4);
     padding-left: 0.75rem;
-    color: #94a3b8;
     font-style: italic;
   }
   :global(.prose-ai table) { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-  :global(.prose-ai th) { background: rgba(16,185,129,0.08); color: #6ee7b7; padding: 0.4rem 0.6rem; border: 1px solid rgba(255,255,255,0.06); }
-  :global(.prose-ai td) { padding: 0.35rem 0.6rem; border: 1px solid rgba(255,255,255,0.06); color: #94a3b8; }
-  :global(.prose-ai hr) { border-color: rgba(255,255,255,0.06); margin: 0.75rem 0; }
+  :global(.prose-ai th) { background: rgba(16,185,129,0.08); padding: 0.4rem 0.6rem; }
+  :global(.prose-ai td) { padding: 0.35rem 0.6rem; }
+  :global(.prose-ai hr) { margin: 0.75rem 0; }
+
+  /* ── Dark mode colors ── */
+  :global(html.dark .prose-ai)          { color: #cbd5e1; }
+  :global(html.dark .prose-ai h1, html.dark .prose-ai h2,
+          html.dark .prose-ai h3, html.dark .prose-ai h4) { color: #e2e8f0; }
+  :global(html.dark .prose-ai strong)   { color: #e2e8f0; font-weight: 600; }
+  :global(html.dark .prose-ai a)        { color: #34d399; text-decoration: underline; }
+  :global(html.dark .prose-ai blockquote) { color: #94a3b8; }
+  :global(html.dark .prose-ai th)       { color: #6ee7b7; border: 1px solid rgba(255,255,255,0.06); }
+  :global(html.dark .prose-ai td)       { border: 1px solid rgba(255,255,255,0.06); color: #94a3b8; }
+  :global(html.dark .prose-ai hr)       { border-color: rgba(255,255,255,0.06); }
+
+  /* ── Light mode colors ── */
+  :global(html:not(.dark) .prose-ai)         { color: #334155; }
+  :global(html:not(.dark) .prose-ai h1, html:not(.dark) .prose-ai h2,
+          html:not(.dark) .prose-ai h3, html:not(.dark) .prose-ai h4) { color: #0f172a; }
+  :global(html:not(.dark) .prose-ai strong)  { color: #0f172a; font-weight: 600; }
+  :global(html:not(.dark) .prose-ai a)       { color: #059669; text-decoration: underline; }
+  :global(html:not(.dark) .prose-ai blockquote) { color: #64748b; }
+  :global(html:not(.dark) .prose-ai th)      { color: #065f46; border: 1px solid rgba(0,0,0,0.08); }
+  :global(html:not(.dark) .prose-ai td)      { border: 1px solid rgba(0,0,0,0.08); color: #475569; }
+  :global(html:not(.dark) .prose-ai hr)      { border-color: rgba(0,0,0,0.08); }
 </style>
 
 <div class="group flex justify-start animate-fade-in">
@@ -182,7 +197,8 @@
     {/if}
 
     <!-- ── Answer bubble ──────────────────────────────────────────── -->
-    <div class="px-4 py-4 rounded-2xl glass border border-emerald-500/10 hover:border-emerald-500/15 transition-all duration-200">
+    <div class="px-4 py-4 rounded-2xl glass border border-emerald-500/10 hover:border-emerald-500/15 transition-all duration-200
+      dark:shadow-none shadow-sm">
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <div
         role="presentation"

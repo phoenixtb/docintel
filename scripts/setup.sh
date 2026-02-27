@@ -116,7 +116,7 @@ echo "This will download ~8-10GB of models. Please wait..."
 echo ""
 
 # List of required models
-MODELS=("qwen3:4b" "phi3:mini" "nomic-embed-text")
+MODELS=("qwen3.5:27b" "phi3:mini" "nomic-embed-text")
 
 for model in "${MODELS[@]}"; do
     echo "Pulling ${model}..."

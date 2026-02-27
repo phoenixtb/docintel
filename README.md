@@ -251,7 +251,7 @@ This project is Part 2B of the "AI for Architects" tutorial series:
 All 20 queries below are validated against the sample datasets (20/20 pass).
 Load sample data first: **Documents → Load Sample Data** (or `./scripts/seed-data.sh`).
 
-> Tip: use the **Domain** filter in the chat UI to scope queries to the right dataset.
+
 
 ### HR Policies (`hr_policy`)
 
@@ -294,18 +294,17 @@ A reusable test suite lives in `tests/integration/`:
 
 ```bash
 cd tests/integration
-pip install -r requirements.txt
 
-# Run all suites (direct rag-service)
+# Run all suites — direct rag-service (faster, no auth needed)
 python run_tests.py --url http://localhost:8000 --rag-path /query/stream
 
-# Run via api-gateway
+# Or via api-gateway (tests the full stack)
 python run_tests.py
 
 # Run a single suite
-python run_tests.py --suite "Contracts"
+python run_tests.py --url http://localhost:8000 --rag-path /query/stream --suite "Technical"
 
-# Output: tests/integration/reports/TIMESTAMP.{json,md}
+# Output: ttests/integration/reports/YYYYMMDD_HHMMSS.{json,md}
 ```
 
 Add new query suites or tweak pass criteria in `tests/integration/queries.yaml`.

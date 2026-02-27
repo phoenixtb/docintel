@@ -10,7 +10,7 @@
   type Theme = 'light' | 'dark' | 'system';
   
   let isOpen = $state(false);
-  let currentTheme: Theme = $state('system');
+  let currentTheme: Theme = $state('dark');
   let authState = $state(getAuthState());
   
   $effect(() => {

@@ -111,15 +111,25 @@ def call_streaming(
 # Evaluation
 # =============================================================================
 
-def evaluate(result: dict, expect_keywords: list[str]) -> dict:
+def evaluate(result: dict, expect_keywords: list[str], min_answer_length: int = 5) -> dict:
     answer = result["answer"].lower()
-    keyword_hits = [kw for kw in expect_keywords if kw.lower() in answer]
-    keyword_miss = [kw for kw in expect_keywords if kw.lower() not in answer]
+
+    # Check keywords in both answer AND source content so that a short but
+    # factually correct answer (e.g. "Garman [4]") is not penalised when the
+    # keyword appears in the retrieved source chunks.
+    source_text = " ".join(
+        (s.get("content") or "") for s in result.get("sources", [])
+    ).lower()
+    combined = answer + " " + source_text
+
+    keyword_hits = [kw for kw in expect_keywords if kw.lower() in combined]
+    keyword_miss = [kw for kw in expect_keywords if kw.lower() not in combined]
 
     passed = (
         result["error"] is None
-        and len(result["answer"]) > 30
+        and len(result["answer"]) >= min_answer_length
         and result["source_count"] > 0
+        and len(keyword_miss) == 0   # all expected keywords found (in answer OR sources)
     )
 
     return {
@@ -130,6 +140,8 @@ def evaluate(result: dict, expect_keywords: list[str]) -> dict:
             round(len(keyword_hits) / len(expect_keywords), 2)
             if expect_keywords else 1.0
         ),
+        "answer_length": len(result["answer"]),
+        "thinking_length": result.get("thinking_length", 0),
     }
 
 
@@ -234,6 +246,7 @@ def main() -> int:
     use_cache = not args.no_cache and run_cfg.get("use_cache", False)
     use_reranking = run_cfg.get("use_reranking", True)
     timeout   = run_cfg.get("timeout_seconds", 120)
+    min_answer_length = run_cfg.get("min_answer_length", 5)
 
     suites = cfg["suites"]
     if args.suite:
@@ -290,7 +303,7 @@ def main() -> int:
                 use_cache=use_cache,
                 timeout=timeout,
             )
-            ev = evaluate(result, expect_kw)
+            ev = evaluate(result, expect_kw, min_answer_length=min_answer_length)
 
             icon = PASS if ev["passed"] else FAIL
             kw_info = ""

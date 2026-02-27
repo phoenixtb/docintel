@@ -10,7 +10,10 @@ config:
   tenant_id: "default"
   use_reranking: true
   use_cache: false
-  timeout_seconds: 120
+  timeout_seconds: 180
+  # Minimum answer length to pass. Factual answers can be short and correct —
+  # set low; use expect_keywords for quality signal instead.
+  min_answer_length: 5
 
 suites:
 
@@ -39,25 +42,27 @@ suites:
         expect_keywords: ["complaint", "grievance", "procedure"]
 
   - name: "Technical"
+    # Source: m-ric/huggingface_doc — HuggingFace library documentation
+    # (Transformers, Datasets, Gradio, Hub, Evaluate, etc.)
     document_type: "technical"
     queries:
-      - question: "How do I troubleshoot a system that keeps crashing?"
-        expect_keywords: ["crash", "troubleshoot", "diagnostic"]
+      - question: "How do I load a dataset using the HuggingFace datasets library?"
+        expect_keywords: ["load_dataset", "dataset", "split"]
 
-      - question: "What are the steps to recover data from a failed hard drive?"
-        expect_keywords: ["recover", "data", "drive"]
+      - question: "How do I fine-tune a pre-trained transformer model?"
+        expect_keywords: ["fine-tune", "train", "model"]
 
-      - question: "How do I configure network settings on a remote server?"
-        expect_keywords: ["network", "configure", "server"]
+      - question: "How do I create a Gradio demo for my machine learning model?"
+        expect_keywords: ["gradio", "interface", "demo"]
 
-      - question: "What are best practices for securing a database?"
-        expect_keywords: ["secur", "database", "access"]
+      - question: "How do I push a model to the HuggingFace Hub?"
+        expect_keywords: ["push", "hub", "repository"]
 
-      - question: "How do I set up a VPN connection?"
-        expect_keywords: ["VPN", "connect", "network"]
+      - question: "What is the difference between AutoModel and pipeline in Transformers?"
+        expect_keywords: ["pipeline", "AutoModel", "model"]
 
-      - question: "What is the recommended way to back up critical data?"
-        expect_keywords: ["backup", "data", "storage"]
+      - question: "How do I evaluate a model using the evaluate library?"
+        expect_keywords: ["evaluate", "metric", "score"]
 
   - name: "Contracts"
     document_type: "contracts"
