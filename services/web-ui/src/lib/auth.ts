@@ -25,6 +25,7 @@ export interface User {
   email: string;
   name: string;
   tenantId: string;
+  role: string;
 }
 
 export interface AuthState {
@@ -42,6 +43,7 @@ const DEV_STATE: AuthState = {
     email: 'dev@docintel.local',
     name: 'Developer',
     tenantId: 'default',
+    role: 'platform_admin',
   },
   accessToken: null,
 };
@@ -65,7 +67,10 @@ function getUserManager(): UserManager {
       redirect_uri: `${window.location.origin}/auth/callback`,
       post_logout_redirect_uri: window.location.origin,
       response_type: 'code',
-      scope: 'openid profile email tenant',
+      scope: 'openid profile email tenant role',
+      // Fetch userinfo endpoint after login so custom scope claims
+      // (role, tenant_id) from Authentik scope mappings are merged into user.profile
+      loadUserInfo: true,
       automaticSilentRenew: true,
       userStore: new WebStorageStateStore({ store: sessionStorage }),
     });
@@ -95,6 +100,9 @@ function oidcUserToState(user: OidcUser | null): AuthState {
     ((profile as Record<string, unknown>).tenant as Record<string, string>)?.tenant_id ||
     'default';
 
+  const role =
+    (profile as Record<string, unknown>).role as string || 'tenant_user';
+
   return {
     isAuthenticated: true,
     user: {
@@ -102,6 +110,7 @@ function oidcUserToState(user: OidcUser | null): AuthState {
       email: profile.email || '',
       name: profile.name || profile.preferred_username || 'User',
       tenantId,
+      role,
     },
     accessToken: user.access_token,
   };
@@ -119,6 +128,19 @@ export function getAuthState(): AuthState {
 
 export function getTenantId(): string {
   return cachedState.user?.tenantId || 'default';
+}
+
+export function getRole(): string {
+  return cachedState.user?.role || 'tenant_user';
+}
+
+export function isPlatformAdmin(): boolean {
+  return getRole() === 'platform_admin';
+}
+
+export function isTenantAdmin(): boolean {
+  const role = getRole();
+  return role === 'tenant_admin' || role === 'platform_admin';
 }
 
 export function getAccessToken(): string | null {

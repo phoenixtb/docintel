@@ -4,6 +4,7 @@ import com.docintel.admin.dto.*
 import com.docintel.admin.service.CacheService
 import com.docintel.admin.service.HealthService
 import com.docintel.admin.service.StatsService
+import com.docintel.admin.service.TenantManagementService
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 
@@ -12,7 +13,8 @@ import org.springframework.web.bind.annotation.*
 class AdminController(
     private val healthService: HealthService,
     private val cacheService: CacheService,
-    private val statsService: StatsService
+    private val statsService: StatsService,
+    private val tenantManagementService: TenantManagementService
 ) {
     /**
      * System health check with component status.
@@ -70,5 +72,59 @@ class AdminController(
         val usage = statsService.getTenantUsage(tenantId)
             ?: return ResponseEntity.notFound().build()
         return ResponseEntity.ok(usage)
+    }
+
+    /**
+     * Create a new tenant (provisions PostgreSQL record + Authentik group).
+     */
+    @PostMapping("/tenants")
+    fun createTenant(@RequestBody req: CreateTenantRequest): ResponseEntity<TenantSummary> {
+        val tenant = tenantManagementService.createTenant(req)
+        return ResponseEntity.ok(tenant)
+    }
+
+    /**
+     * Update tenant name and/or quotas.
+     */
+    @PutMapping("/tenants/{tenantId}")
+    fun updateTenant(
+        @PathVariable tenantId: String,
+        @RequestBody req: UpdateTenantRequest
+    ): ResponseEntity<TenantSummary> {
+        val tenant = tenantManagementService.updateTenant(tenantId, req)
+            ?: return ResponseEntity.notFound().build()
+        return ResponseEntity.ok(tenant)
+    }
+
+    /**
+     * Delete a tenant and all associated data.
+     */
+    @DeleteMapping("/tenants/{tenantId}")
+    fun deleteTenant(@PathVariable tenantId: String): ResponseEntity<DeleteTenantResponse> {
+        val result = tenantManagementService.deleteTenant(tenantId)
+        return if (result.success) ResponseEntity.ok(result)
+        else ResponseEntity.notFound().build()
+    }
+
+    /**
+     * List users for a tenant (sourced from Authentik).
+     */
+    @GetMapping("/tenants/{tenantId}/users")
+    fun getTenantUsers(@PathVariable tenantId: String): ResponseEntity<List<TenantUser>> {
+        return ResponseEntity.ok(tenantManagementService.getTenantUsers(tenantId))
+    }
+
+    /**
+     * Update a user's role within a tenant.
+     */
+    @PutMapping("/tenants/{tenantId}/users/{userId}/role")
+    fun updateUserRole(
+        @PathVariable tenantId: String,
+        @PathVariable userId: String,
+        @RequestBody req: UpdateUserRoleRequest
+    ): ResponseEntity<Void> {
+        val updated = tenantManagementService.updateUserRole(tenantId, userId, req)
+        return if (updated) ResponseEntity.ok().build()
+        else ResponseEntity.badRequest().build()
     }
 }

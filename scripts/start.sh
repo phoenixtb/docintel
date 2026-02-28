@@ -15,8 +15,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
-DEFAULT_PASSWORD="${DOCINTEL_DEMO_PASSWORD:-DocIntel@123}"
-
 # Parse arguments
 NO_AUTH=false
 DO_BUILD=false
@@ -242,10 +240,13 @@ if [ "$NO_AUTH" = false ] && [ "$AUTH_SETUP_OK" = true ]; then
     echo ""
     echo "  Authentik Admin      http://localhost:9090/if/admin/  akadmin / ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}"
     echo ""
-    echo "  Demo Users (password: ${DEFAULT_PASSWORD}):"
-    echo "    demo-admin   (tenant: default)"
-    echo "    demo-user    (tenant: default)"
-    echo "    tenant-user  (tenant: demo)"
+    echo "  Users:"
+    echo "    akadmin     / ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}  — Authentik superuser (platform_admin)"
+    echo "    diadmin     / Diadmin@123     — Platform Admin    (platform_admin)"
+    echo "    alphaadmin  / Alphaadmin@123  — Alpha Tenant Admin (tenant_admin)"
+    echo "    alphauser   / Alphauser@123   — Alpha Tenant User  (tenant_user)"
+    echo "    betaadmin   / Betaadmin@123   — Beta Tenant Admin  (tenant_admin)"
+    echo "    betauser    / Betauser@123    — Beta Tenant User   (tenant_user)"
 else
     echo "  Authentication: DISABLED (dev mode)"
 fi

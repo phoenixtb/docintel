@@ -8,7 +8,7 @@
   const API_BASE = env.PUBLIC_API_URL || 'http://localhost:8080';
   
   // State
-  let activeTab: 'dashboard' | 'documents' | 'cache' | 'tenants' = $state('dashboard');
+  let activeTab: 'dashboard' | 'documents' | 'cache' | 'tenants' | 'tenant-mgmt' | 'users' = $state('dashboard');
   let loading = $state(true);
   
   // Dashboard data
@@ -34,8 +34,25 @@
   // Confirm dialog state
   let confirmOpen = $state(false);
   let confirmTenantId: string | null = $state(null);
-  
+  let confirmMode: 'delete-docs' | 'delete-tenant' = $state('delete-docs');
+
+  // Tenant management
+  let newTenant = $state({ id: '', name: '', quotaDocuments: 1000, quotaQueriesPerDay: 10000 });
+  let creatingTenant = $state(false);
+  let editingTenantId: string | null = $state(null);
+  let editTenant = $state({ name: '', quotaDocuments: 0, quotaQueriesPerDay: 0 });
+  let savingTenant = $state(false);
+  let deletingTenant = $state(false);
+
+  // Users
+  interface TenantUser { id: string; email: string; username: string; name: string; role: string; tenantId: string }
+  let users: TenantUser[] = $state([]);
+  let usersLoading = $state(false);
+  let selectedUserTenant = $state('');
+  let updatingRoleFor: string | null = $state(null);
+
   const headers = () => ({ ...getAuthHeaders() });
+  const jsonHeaders = () => ({ ...getAuthHeaders(), 'Content-Type': 'application/json' });
   
   async function fetchJson(url: string) {
     const res = await fetch(`${API_BASE}${url}`, { headers: headers() });
@@ -78,9 +95,12 @@
     selectedTenant = tenantId;
     tenantUsage = await fetchJson(`/api/v1/tenants/${tenantId}/usage`);
   }
+
+  // ---- Bulk doc delete ----
   
   function deleteAllDocuments(tenantId: string) {
     confirmTenantId = tenantId;
+    confirmMode = 'delete-docs';
     confirmOpen = true;
   }
 
@@ -112,6 +132,123 @@
     }
     deletingDocs = false;
   }
+
+  // ---- Tenant CRUD ----
+
+  async function createTenant() {
+    if (!newTenant.id.trim() || !newTenant.name.trim()) { toast.error('Tenant ID and name are required'); return; }
+    creatingTenant = true;
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/tenants`, {
+        method: 'POST',
+        headers: jsonHeaders(),
+        body: JSON.stringify({
+          id: newTenant.id.trim(),
+          name: newTenant.name.trim(),
+          quotaDocuments: newTenant.quotaDocuments,
+          quotaQueriesPerDay: newTenant.quotaQueriesPerDay,
+        }),
+      });
+      if (res.ok) {
+        toast.success(`Tenant "${newTenant.name}" created`);
+        newTenant = { id: '', name: '', quotaDocuments: 1000, quotaQueriesPerDay: 10000 };
+        await loadTenants();
+      } else {
+        toast.error(`Failed: ${res.status}`);
+      }
+    } catch (e) { toast.error(`Error: ${e}`); }
+    creatingTenant = false;
+  }
+
+  function startEditTenant(tenant: any) {
+    editingTenantId = tenant.tenantId;
+    editTenant = { name: tenant.name, quotaDocuments: tenant.quotaDocuments ?? 1000, quotaQueriesPerDay: tenant.quotaQueriesPerDay ?? 10000 };
+  }
+
+  async function saveEditTenant() {
+    if (!editingTenantId) return;
+    savingTenant = true;
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/tenants/${editingTenantId}`, {
+        method: 'PUT',
+        headers: jsonHeaders(),
+        body: JSON.stringify({
+          name: editTenant.name || null,
+          quotaDocuments: editTenant.quotaDocuments || null,
+          quotaQueriesPerDay: editTenant.quotaQueriesPerDay || null,
+        }),
+      });
+      if (res.ok) {
+        toast.success('Tenant updated');
+        editingTenantId = null;
+        await loadTenants();
+      } else {
+        toast.error(`Failed: ${res.status}`);
+      }
+    } catch (e) { toast.error(`Error: ${e}`); }
+    savingTenant = false;
+  }
+
+  function confirmDeleteTenant(tenantId: string) {
+    confirmTenantId = tenantId;
+    confirmMode = 'delete-tenant';
+    confirmOpen = true;
+  }
+
+  async function doDeleteTenant() {
+    if (!confirmTenantId) return;
+    const tenantId = confirmTenantId;
+    confirmOpen = false;
+    confirmTenantId = null;
+    deletingTenant = true;
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/tenants/${tenantId}`, {
+        method: 'DELETE',
+        headers: headers(),
+      });
+      if (res.ok) {
+        toast.success(`Tenant "${tenantId}" deleted`);
+        await loadTenants();
+        await loadDashboard();
+      } else {
+        toast.error(`Failed: ${res.status}`);
+      }
+    } catch (e) { toast.error(`Error: ${e}`); }
+    deletingTenant = false;
+  }
+
+  async function handleConfirm() {
+    if (confirmMode === 'delete-docs') await doDeleteAllDocuments();
+    else await doDeleteTenant();
+  }
+
+  // ---- Users ----
+
+  async function loadUsers(tenantId?: string) {
+    if (!tenantId && !selectedUserTenant) return;
+    const tid = tenantId ?? selectedUserTenant;
+    usersLoading = true;
+    users = (await fetchJson(`/api/v1/tenants/${tid}/users`)) ?? [];
+    usersLoading = false;
+  }
+
+  async function updateUserRole(user: TenantUser, newRole: string) {
+    updatingRoleFor = user.id;
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/tenants/${user.tenantId}/users/${user.id}/role`, {
+        method: 'PUT',
+        headers: jsonHeaders(),
+        body: JSON.stringify({ role: newRole }),
+      });
+      if (res.ok) {
+        toast.success(`Updated role for ${user.username}`);
+        await loadUsers();
+      } else {
+        toast.error(`Failed: ${res.status}`);
+      }
+    } catch (e) { toast.error(`Error: ${e}`); }
+    updatingRoleFor = null;
+  }
   
   function switchTab(tab: typeof activeTab) {
     activeTab = tab;
@@ -119,6 +256,8 @@
     if (tab === 'dashboard') loadDashboard();
     if (tab === 'cache') loadCache();
     if (tab === 'tenants') loadTenants();
+    if (tab === 'tenant-mgmt') loadTenants();
+    if (tab === 'users') { loadTenants(); users = []; }
   }
   
   onMount(() => {
@@ -132,12 +271,14 @@
     <h1 class="text-2xl font-bold text-gray-900 dark:text-white mb-6">Admin</h1>
     
     <!-- Tabs -->
-    <div class="flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700">
+    <div class="flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700 flex-wrap">
       {#each [
         { id: 'dashboard', label: 'Dashboard' },
         { id: 'documents', label: 'Documents' },
         { id: 'cache', label: 'Cache' },
-        { id: 'tenants', label: 'Tenants' },
+        { id: 'tenants', label: 'Usage' },
+        { id: 'tenant-mgmt', label: 'Tenants' },
+        { id: 'users', label: 'Users' },
       ] as tab}
         <button
           onclick={() => switchTab(tab.id as typeof activeTab)}
@@ -403,15 +544,238 @@
         </div>
       </div>
     {/if}
+    <!-- Tenant Management Tab -->
+    {#if activeTab === 'tenant-mgmt'}
+      <div class="space-y-6">
+        <!-- Create tenant -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Create Tenant</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div>
+              <label for="new-tenant-id" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Tenant ID</label>
+              <input
+                id="new-tenant-id"
+                type="text"
+                bind:value={newTenant.id}
+                placeholder="e.g. acme"
+                class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600
+                  bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                  focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label for="new-tenant-name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Display Name</label>
+              <input
+                id="new-tenant-name"
+                type="text"
+                bind:value={newTenant.name}
+                placeholder="e.g. ACME Corp"
+                class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600
+                  bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                  focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label for="new-tenant-quota-docs" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Doc Quota</label>
+              <input
+                id="new-tenant-quota-docs"
+                type="number"
+                bind:value={newTenant.quotaDocuments}
+                class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600
+                  bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                  focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label for="new-tenant-quota-queries" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Query Quota / Day</label>
+              <input
+                id="new-tenant-quota-queries"
+                type="number"
+                bind:value={newTenant.quotaQueriesPerDay}
+                class="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600
+                  bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                  focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+          </div>
+          <button
+            onclick={createTenant}
+            disabled={creatingTenant || !newTenant.id.trim() || !newTenant.name.trim()}
+            class="px-4 py-2 text-sm font-medium rounded-lg
+              bg-blue-600 text-white hover:bg-blue-700
+              disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {creatingTenant ? 'Creating...' : 'Create Tenant'}
+          </button>
+        </div>
+
+        <!-- Tenant list with edit/delete -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+          <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white">All Tenants</h3>
+          </div>
+          {#if tenants.length === 0}
+            <div class="text-center py-8 text-sm text-gray-400">No tenants found.</div>
+          {:else}
+            <div class="divide-y divide-gray-100 dark:divide-gray-700">
+              {#each tenants as tenant}
+                <div class="p-4">
+                  {#if editingTenantId === tenant.tenantId}
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+                      <input
+                        type="text"
+                        bind:value={editTenant.name}
+                        placeholder="Name"
+                        class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600
+                          bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      />
+                      <input
+                        type="number"
+                        bind:value={editTenant.quotaDocuments}
+                        placeholder="Doc quota"
+                        class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600
+                          bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      />
+                      <input
+                        type="number"
+                        bind:value={editTenant.quotaQueriesPerDay}
+                        placeholder="Query quota/day"
+                        class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600
+                          bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      />
+                    </div>
+                    <div class="flex gap-2">
+                      <button
+                        onclick={saveEditTenant}
+                        disabled={savingTenant}
+                        class="px-3 py-1 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                      >
+                        {savingTenant ? 'Saving...' : 'Save'}
+                      </button>
+                      <button
+                        onclick={() => editingTenantId = null}
+                        class="px-3 py-1 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  {:else}
+                    <div class="flex items-center justify-between">
+                      <div>
+                        <p class="text-sm font-medium text-gray-900 dark:text-white">{tenant.name}</p>
+                        <p class="text-xs text-gray-500 dark:text-gray-400 font-mono">{tenant.tenantId} &middot; {tenant.documentCount ?? 0} docs, {tenant.queryCount ?? 0} queries</p>
+                      </div>
+                      <div class="flex gap-2">
+                        <button
+                          onclick={() => startEditTenant(tenant)}
+                          class="px-2.5 py-1 text-xs rounded-lg border border-gray-300 dark:border-gray-600
+                            text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onclick={() => confirmDeleteTenant(tenant.tenantId)}
+                          disabled={deletingTenant}
+                          class="px-2.5 py-1 text-xs rounded-lg text-red-600 dark:text-red-400
+                            hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
+    <!-- Users Tab -->
+    {#if activeTab === 'users'}
+      <div class="space-y-4">
+        <!-- Tenant selector -->
+        <div class="flex items-center gap-3">
+          <select
+            bind:value={selectedUserTenant}
+            class="px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600
+              bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+              focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option value="">Select a tenant...</option>
+            {#each tenants as tenant}
+              <option value={tenant.tenantId}>{tenant.name} ({tenant.tenantId})</option>
+            {/each}
+          </select>
+          <button
+            onclick={() => loadUsers()}
+            disabled={!selectedUserTenant || usersLoading}
+            class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700
+              disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {usersLoading ? 'Loading...' : 'Load Users'}
+          </button>
+        </div>
+
+        {#if users.length > 0}
+          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="bg-gray-50 dark:bg-gray-700/50 border-b border-gray-200 dark:border-gray-700">
+                <tr>
+                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">User</th>
+                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Email</th>
+                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Tenant</th>
+                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Role</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
+                {#each users as user}
+                  <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                    <td class="px-4 py-3">
+                      <p class="font-medium text-gray-900 dark:text-white">{user.name || user.username}</p>
+                      <p class="text-xs text-gray-400">@{user.username}</p>
+                    </td>
+                    <td class="px-4 py-3 text-gray-500 dark:text-gray-400">{user.email}</td>
+                    <td class="px-4 py-3 font-mono text-xs text-gray-500 dark:text-gray-400">{user.tenantId}</td>
+                    <td class="px-4 py-3">
+                      <select
+                        value={user.role}
+                        onchange={(e) => updateUserRole(user, (e.target as HTMLSelectElement).value)}
+                        disabled={updatingRoleFor === user.id}
+                        class="text-xs rounded-lg border border-gray-300 dark:border-gray-600
+                          bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1
+                          disabled:opacity-50 focus:ring-1 focus:ring-blue-500"
+                      >
+                        <option value="tenant_user">tenant_user</option>
+                        <option value="tenant_admin">tenant_admin</option>
+                        <option value="platform_admin">platform_admin</option>
+                      </select>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else if !usersLoading && selectedUserTenant}
+          <p class="text-sm text-gray-400">No users found for this tenant. Ensure the Authentik token is configured.</p>
+        {/if}
+      </div>
+    {/if}
+
   </div>
 </div>
 
 <ConfirmDialog
   open={confirmOpen}
-  title="Delete all documents?"
-  message={confirmTenantId ? `This will permanently delete ALL documents, chunks, and vectors for tenant "${confirmTenantId}". This cannot be undone.` : ''}
-  confirmLabel="Delete All"
+  title={confirmMode === 'delete-tenant' ? 'Delete tenant?' : 'Delete all documents?'}
+  message={confirmTenantId
+    ? confirmMode === 'delete-tenant'
+      ? `This will permanently delete tenant "${confirmTenantId}", ALL its documents, chunks, vectors, users, and query history. This cannot be undone.`
+      : `This will permanently delete ALL documents, chunks, and vectors for tenant "${confirmTenantId}". This cannot be undone.`
+    : ''}
+  confirmLabel={confirmMode === 'delete-tenant' ? 'Delete Tenant' : 'Delete All'}
   dangerous={true}
-  onconfirm={doDeleteAllDocuments}
+  onconfirm={handleConfirm}
   oncancel={() => { confirmOpen = false; confirmTenantId = null; }}
 />

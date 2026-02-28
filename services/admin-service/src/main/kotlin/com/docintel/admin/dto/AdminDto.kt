@@ -58,3 +58,38 @@ data class ClearCacheResponse(
     val entriesCleared: Long,
     val tenantId: String?
 )
+
+// ---- Tenant Management DTOs ----
+
+data class CreateTenantRequest(
+    val id: String,
+    val name: String,
+    val quotaDocuments: Int = 1000,
+    val quotaQueriesPerDay: Int = 10000
+)
+
+data class UpdateTenantRequest(
+    val name: String?,
+    val quotaDocuments: Int?,
+    val quotaQueriesPerDay: Int?
+)
+
+data class DeleteTenantResponse(
+    val success: Boolean,
+    val tenantId: String
+)
+
+// ---- User Management DTOs ----
+
+data class TenantUser(
+    val id: String,
+    val email: String,
+    val username: String,
+    val name: String,
+    val role: String,
+    val tenantId: String
+)
+
+data class UpdateUserRoleRequest(
+    val role: String
+)

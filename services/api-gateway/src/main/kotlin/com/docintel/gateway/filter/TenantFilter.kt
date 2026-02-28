@@ -3,7 +3,6 @@ package com.docintel.gateway.filter
 import org.springframework.cloud.gateway.filter.GatewayFilterChain
 import org.springframework.cloud.gateway.filter.GlobalFilter
 import org.springframework.core.Ordered
-import org.springframework.http.HttpHeaders
 import org.springframework.security.core.context.ReactiveSecurityContextHolder
 import org.springframework.security.oauth2.jwt.Jwt
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken
@@ -28,8 +27,11 @@ class TenantFilter : GlobalFilter, Ordered {
         const val USER_ID_HEADER = "X-User-Id"
         const val USER_EMAIL_HEADER = "X-User-Email"
         const val USER_NAME_HEADER = "X-User-Name"
+        const val USER_ROLE_HEADER = "X-User-Role"
         const val DEFAULT_TENANT = "default"
+        const val DEFAULT_ROLE = "tenant_user"
         const val JWT_TENANT_CLAIM = "tenant_id"
+        const val JWT_ROLE_CLAIM = "role"
     }
 
     override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> {
@@ -53,14 +55,15 @@ class TenantFilter : GlobalFilter, Ordered {
                         tenantId = extractTenantId(jwt),
                         userId = jwt.subject ?: "",
                         userEmail = jwt.getClaimAsString("email") ?: "",
-                        userName = jwt.getClaimAsString("name") 
-                            ?: jwt.getClaimAsString("preferred_username") ?: ""
+                        userName = jwt.getClaimAsString("name")
+                            ?: jwt.getClaimAsString("preferred_username") ?: "",
+                        userRole = jwt.getClaimAsString(JWT_ROLE_CLAIM) ?: DEFAULT_ROLE
                     )
                 } else {
-                    JwtClaimData(DEFAULT_TENANT, "", "", "")
+                    JwtClaimData(DEFAULT_TENANT, "", "", "", DEFAULT_ROLE)
                 }
             }
-            .defaultIfEmpty(JwtClaimData(DEFAULT_TENANT, "", "", ""))
+            .defaultIfEmpty(JwtClaimData(DEFAULT_TENANT, "", "", "", DEFAULT_ROLE))
             .flatMap { claims ->
                 continueWithClaims(exchange, chain, claims)
             }
@@ -98,6 +101,7 @@ class TenantFilter : GlobalFilter, Ordered {
         // The original Authorization header is preserved automatically
         val mutatedRequest = exchange.request.mutate()
             .header(TENANT_HEADER, claims.tenantId)
+            .header(USER_ROLE_HEADER, claims.userRole)
             .apply {
                 if (claims.userId.isNotBlank()) {
                     header(USER_ID_HEADER, claims.userId)
@@ -120,6 +124,7 @@ class TenantFilter : GlobalFilter, Ordered {
         val tenantId: String,
         val userId: String,
         val userEmail: String,
-        val userName: String
+        val userName: String,
+        val userRole: String
     )
 }

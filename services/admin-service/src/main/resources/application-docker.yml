@@ -17,6 +17,10 @@ redis:
   host: redis
   port: 6379
 
+authentik:
+  url: ${AUTHENTIK_URL:http://authentik-server:9000}
+  token: ${AUTHENTIK_TOKEN:}
+
 logging:
   level:
     com.docintel: INFO

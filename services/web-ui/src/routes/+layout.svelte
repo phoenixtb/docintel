@@ -4,20 +4,28 @@
   import { onMount } from 'svelte';
   import { browser } from '$app/environment';
   import UserMenu from '$lib/components/UserMenu.svelte';
-  import { isAuthEnabled, getAuthState, restoreAuthState, login } from '$lib/auth';
+  import { goto } from '$app/navigation';
+  import { isAuthEnabled, getAuthState, restoreAuthState, login, isPlatformAdmin } from '$lib/auth';
   import { Toaster } from 'svelte-sonner';
 
   let { children } = $props();
   let isReady = $state(false);
   let authState = $state(getAuthState());
-  
-  const navItems = [
-    { href: '/', label: 'Chat' },
-    { href: '/documents', label: 'Documents' },
-    { href: '/admin', label: 'Admin' },
-  ];
-  
+
   const publicRoutes = ['/auth/callback'];
+
+  // $derived automatically recomputes whenever authState changes,
+  // so nav updates the moment the role is known after login.
+  let navItems = $derived.by(() => {
+    const role = authState.user?.role ?? 'tenant_user';
+    const items = [
+      { href: '/', label: 'Chat' },
+      { href: '/documents', label: 'Documents' },
+    ];
+    if (role === 'tenant_admin') items.push({ href: '/settings', label: 'Settings' });
+    if (role === 'platform_admin') items.push({ href: '/admin', label: 'Admin' });
+    return items;
+  });
   
   function isActive(href: string): boolean {
     const currentPath = $page.url.pathname;
@@ -28,16 +36,25 @@
   function isPublicRoute(): boolean {
     return publicRoutes.some(route => $page.url.pathname.startsWith(route));
   }
+
+  function guardRoute(path: string) {
+    if (path.startsWith('/admin') && !isPlatformAdmin()) {
+      goto('/');
+    } else if (path.startsWith('/settings') && authState.user?.role !== 'tenant_admin' && authState.user?.role !== 'platform_admin') {
+      goto('/');
+    }
+  }
   
   onMount(async () => {
     await restoreAuthState();
-    authState = getAuthState();
+    authState = getAuthState(); // triggers $derived navItems recompute automatically
     
     if (isAuthEnabled() && !authState.isAuthenticated && !isPublicRoute()) {
       login();
       return;
     }
-    
+
+    guardRoute($page.url.pathname);
     isReady = true;
   });
 </script>

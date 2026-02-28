@@ -4,7 +4,10 @@
     isAuthEnabled, 
     getAuthState, 
     login, 
-    logout 
+    logout,
+    getRole,
+    isPlatformAdmin,
+    isTenantAdmin
   } from '$lib/auth';
   
   type Theme = 'light' | 'dark' | 'system';
@@ -60,7 +63,7 @@
     authState = getAuthState();
   }
   
-  onMount(async () => {
+  onMount(() => {
     authState = getAuthState();
     
     const saved = localStorage.getItem('theme') as Theme | null;
@@ -109,7 +112,30 @@
         {#if authState.isAuthenticated && authState.user}
           <p class="text-sm font-semibold text-slate-200">{authState.user.name}</p>
           <p class="text-xs text-slate-500 mt-0.5">{authState.user.email}</p>
-          <p class="text-xs text-emerald-500/70 mt-1">Tenant: {authState.user.tenantId}</p>
+          <div class="mt-2 flex items-center gap-2">
+            {#if isPlatformAdmin()}
+              <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium
+                bg-violet-500/15 text-violet-400 ring-1 ring-violet-500/25">
+                <svg class="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M9.664 1.319a.75.75 0 01.672 0 41.059 41.059 0 018.198 5.424.75.75 0 01-.254 1.285 31.372 31.372 0 00-7.86 3.83.75.75 0 01-.84 0 31.508 31.508 0 00-2.08-1.287V9.48a.75.75 0 01.327-.64A33.14 33.14 0 019.664 7.16V1.319zm0 0" clip-rule="evenodd"/>
+                </svg>
+                Platform Admin
+              </span>
+            {:else if isTenantAdmin()}
+              <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium
+                bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/25">
+                Admin
+              </span>
+              <span class="text-xs text-slate-500">
+                {authState.user.tenantId.charAt(0).toUpperCase() + authState.user.tenantId.slice(1)}
+              </span>
+            {:else}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                bg-emerald-500/10 text-emerald-500/80 ring-1 ring-emerald-500/20">
+                {authState.user.tenantId.charAt(0).toUpperCase() + authState.user.tenantId.slice(1)}
+              </span>
+            {/if}
+          </div>
         {:else}
           <p class="text-sm font-semibold text-slate-200">Guest</p>
           <p class="text-xs text-slate-500">Not signed in</p>

@@ -6,11 +6,11 @@
 # Loaded automatically by Authentik from /blueprints/custom/ on startup.
 #
 # Creates:
-#   - Custom tenant_id scope mapping
-#   - OAuth2/OIDC Provider (confidential, authorization code)
+#   - Scope mappings: tenant_id, role claims
+#   - OAuth2/OIDC Provider
 #   - DocIntel Application
-#   - Tenant groups (default, demo)
-#   - Demo users with passwords
+#   - Groups: platform-admin, alpha-tenant-admin, alpha-tenant, beta-tenant-admin, beta-tenant
+#   - Users: diadmin (platform admin), alphaadmin, alphauser, betaadmin, betauser
 #   - Branding (title, logo, favicon)
 #   - Combined username+password login page
 #
@@ -21,7 +21,7 @@ version: 1
 metadata:
   name: DocIntel Setup
   labels:
-    blueprints.goauthentik.io/description: "DocIntel OAuth2 setup with branding and demo users"
+    blueprints.goauthentik.io/description: "DocIntel OAuth2 setup with branding and users"
 
 entries:
   # ============================================================================
@@ -41,10 +41,24 @@ entries:
         }
 
   # ============================================================================
+  # 1b. Scope Mapping: role claim
+  # ============================================================================
+  - model: authentik_providers_oauth2.scopemapping
+    id: role-scope-mapping
+    identifiers:
+      managed: goauthentik.io/providers/oauth2/scope-role
+    attrs:
+      name: "DocIntel Role Scope"
+      scope_name: role
+      description: "Includes role from user's group attributes (platform_admin, tenant_admin, tenant_user)"
+      expression: |
+        return {
+            "role": request.user.group_attributes().get("role", "tenant_user")
+        }
+
+  # ============================================================================
   # 2. OAuth2/OIDC Provider
   # ============================================================================
-  # _redirect_uris is a JSONField: list of {matching_mode, url} objects
-  # Ref: authentik/providers/oauth2/models.py -> OAuth2Provider._redirect_uris
   - model: authentik_providers_oauth2.oauth2provider
     id: docintel-provider
     identifiers:
@@ -66,6 +80,7 @@ entries:
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
         - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-tenant]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-role]]
 
   # ============================================================================
   # 3. Application
@@ -86,8 +101,6 @@ entries:
   # ============================================================================
   # 4. Branding
   # ============================================================================
-  # Update default brand: title, logo, favicon, custom styling
-  # Logo/favicon served from ./config/authentik/media mounted at /web/dist/custom
   - model: authentik_brands.brand
     identifiers:
       domain: authentik-default
@@ -161,7 +174,6 @@ entries:
       layout: stacked
 
   # Combine username + password on single page
-  # Set password_stage on identification stage -> inlines password field
   - model: authentik_stages_identification.identificationstage
     identifiers:
       name: default-authentication-identification
@@ -172,68 +184,141 @@ entries:
       password_stage: !Find [authentik_stages_password.passwordstage, [name, default-authentication-password]]
 
   # ============================================================================
-  # 5. Groups with tenant_id attribute
+  # 5. Groups
   # ============================================================================
+
+  # Platform admin group — cross-tenant, role: platform_admin
   - model: authentik_core.group
-    id: default-tenant-group
+    id: platform-admin-group
     identifiers:
-      name: default-tenant
+      name: platform-admin
     attrs:
-      name: default-tenant
+      name: platform-admin
       attributes:
-        tenant_id: default
+        role: platform_admin
 
+  # Alpha tenant — admin group
   - model: authentik_core.group
-    id: demo-tenant-group
+    id: alpha-tenant-admin-group
     identifiers:
-      name: demo-tenant
+      name: alpha-tenant-admin
     attrs:
-      name: demo-tenant
+      name: alpha-tenant-admin
       attributes:
-        tenant_id: demo
+        tenant_id: alpha
+        role: tenant_admin
+
+  # Alpha tenant — user group
+  - model: authentik_core.group
+    id: alpha-tenant-group
+    identifiers:
+      name: alpha-tenant
+    attrs:
+      name: alpha-tenant
+      attributes:
+        tenant_id: alpha
+        role: tenant_user
+
+  # Beta tenant — admin group
+  - model: authentik_core.group
+    id: beta-tenant-admin-group
+    identifiers:
+      name: beta-tenant-admin
+    attrs:
+      name: beta-tenant-admin
+      attributes:
+        tenant_id: beta
+        role: tenant_admin
+
+  # Beta tenant — user group
+  - model: authentik_core.group
+    id: beta-tenant-group
+    identifiers:
+      name: beta-tenant
+    attrs:
+      name: beta-tenant
+      attributes:
+        tenant_id: beta
+        role: tenant_user
 
   # ============================================================================
-  # 6. Demo Users (with passwords set directly via blueprint)
+  # 6. Users
   # ============================================================================
-  # Ref: https://docs.goauthentik.io/customize/blueprints/v1/models/#password
-  - model: authentik_core.user
-    id: demo-admin
-    identifiers:
-      username: demo-admin
-    attrs:
-      username: demo-admin
-      name: Demo Admin
-      email: demo-admin@docintel.local
-      password: "DocIntel@123"
-      path: users
-      is_active: true
-      groups:
-        - !KeyOf default-tenant-group
 
+  # Platform admin
   - model: authentik_core.user
-    id: demo-user
+    id: diadmin
     identifiers:
-      username: demo-user
+      username: diadmin
     attrs:
-      username: demo-user
-      name: Demo User
-      email: demo-user@docintel.local
-      password: "DocIntel@123"
+      username: diadmin
+      name: DocIntel Admin
+      email: diadmin@docintel.local
+      password: "Diadmin@123"
       path: users
       is_active: true
       groups:
-        - !KeyOf default-tenant-group
+        - !KeyOf platform-admin-group
 
+  # Alpha tenant admin
   - model: authentik_core.user
-    id: tenant-user
+    id: alphaadmin
     identifiers:
-      username: tenant-user
+      username: alphaadmin
     attrs:
-      username: tenant-user
-      name: Tenant User
-      email: tenant-user@docintel.local
-      password: "DocIntel@123"
+      username: alphaadmin
+      name: Alpha Admin
+      email: alphaadmin@alpha.local
+      password: "Alphaadmin@123"
       path: users
       is_active: true
       groups:
-        - !KeyOf demo-tenant-group
+        - !KeyOf alpha-tenant-admin-group
+
+  # Alpha tenant user
+  - model: authentik_core.user
+    id: alphauser
+    identifiers:
+      username: alphauser
+    attrs:
+      username: alphauser
+      name: Alpha User
+      email: alphauser@alpha.local
+      password: "Alphauser@123"
+      path: users
+      is_active: true
+      groups:
+        - !KeyOf alpha-tenant-group
+
+  # Beta tenant admin
+  - model: authentik_core.user
+    id: betaadmin
+    identifiers:
+      username: betaadmin
+    attrs:
+      username: betaadmin
+      name: Beta Admin
+      email: betaadmin@beta.local
+      password: "Betaadmin@123"
+      path: users
+      is_active: true
+      groups:
+        - !KeyOf beta-tenant-admin-group
+
+  # Beta tenant user
+  - model: authentik_core.user
+    id: betauser
+    identifiers:
+      username: betauser
+    attrs:
+      username: betauser
+      name: Beta User
+      email: betauser@beta.local
+      password: "Betauser@123"
+      path: users
+      is_active: true
+      groups:
+        - !KeyOf beta-tenant-group
+
+  # Note: akadmin (Authentik superuser) is automatically added to the
+  # platform-admin group by setup-authentik.sh via the add_user API call.

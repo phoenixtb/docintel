@@ -99,9 +99,9 @@ spring:
         - id: admin-tenants
           uri: http://admin-service:8082
           predicates:
-            - Path=/api/v1/tenants/**
+            - Path=/api/v1/tenants, /api/v1/tenants/**
           filters:
-            - RewritePath=/api/v1/tenants/(?<segment>.*), /internal/tenants/${segment}
+            - RewritePath=/api/v1/tenants(?<segment>/?.*), /internal/tenants${segment}
 
 logging:
   level:

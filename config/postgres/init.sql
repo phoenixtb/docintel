@@ -154,13 +154,11 @@ CREATE TRIGGER conversations_updated_at
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- =============================================================================
--- Insert Default Tenant
+-- Seed Tenants
 -- =============================================================================
-INSERT INTO tenants (id, name) VALUES ('default', 'Default Tenant');
+-- 'default' is the fallback tenant_id for platform admins (no real tenant scope)
+INSERT INTO tenants (id, name) VALUES ('default', 'DocIntel Platform');
 
--- Insert Demo Tenant
-INSERT INTO tenants (id, name, settings) VALUES 
-    ('demo', 'Demo Tenant', '{"max_documents": 100, "rate_limit": 100}');
+INSERT INTO tenants (id, name) VALUES ('alpha', 'Alpha Corp');
 
-INSERT INTO users (tenant_id, email, roles) VALUES 
-    ('demo', 'admin@demo.local', ARRAY['admin', 'hr', 'technical', 'contracts']);
+INSERT INTO tenants (id, name) VALUES ('beta', 'Beta Corp');

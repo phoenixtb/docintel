@@ -22,7 +22,6 @@ cd "$PROJECT_DIR"
 
 AUTHENTIK_URL="${AUTHENTIK_URL:-http://localhost:9090}"
 TOKEN="${AUTHENTIK_BOOTSTRAP_TOKEN:-docintel-api-token-change-in-prod}"
-DEFAULT_PASSWORD="DocIntel@123"
 
 # Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -104,7 +103,29 @@ if [ "$BLUEPRINT_OK" != "true" ]; then
 fi
 
 # ==========================================================================
-# 3. Verify OAuth2 endpoint is working
+# 3. Add akadmin to platform-admin group
+# ==========================================================================
+log_step "Adding akadmin to platform-admin group..."
+
+PLATFORM_ADMIN_GROUP_PK=$(api "/api/v3/core/groups/?name=platform-admin" | \
+    python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['pk'])" 2>/dev/null || echo "")
+
+AKADMIN_PK=$(api "/api/v3/core/users/?username=akadmin" | \
+    python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['pk'])" 2>/dev/null || echo "")
+
+if [ -n "$PLATFORM_ADMIN_GROUP_PK" ] && [ -n "$AKADMIN_PK" ]; then
+    curl -s -X POST \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"pk\": $AKADMIN_PK}" \
+        "${AUTHENTIK_URL}/api/v3/core/groups/${PLATFORM_ADMIN_GROUP_PK}/add_user/" > /dev/null 2>&1
+    log_ok "akadmin added to platform-admin group (role: platform_admin)"
+else
+    log_warn "Could not add akadmin to platform-admin group (group PK: ${PLATFORM_ADMIN_GROUP_PK:-not found}, user PK: ${AKADMIN_PK:-not found})"
+fi
+
+# ==========================================================================
+# 4. Verify OAuth2 endpoint is working
 # ==========================================================================
 log_step "Verifying OAuth2 configuration..."
 ISSUER=$(curl -s "${AUTHENTIK_URL}/application/o/docintel/.well-known/openid-configuration" | \
@@ -118,7 +139,24 @@ else
 fi
 
 # ==========================================================================
-# 4. Done
+# 5. Persist AUTHENTIK_TOKEN to .env so admin-service can call Authentik API
+# ==========================================================================
+log_step "Persisting AUTHENTIK_TOKEN to .env..."
+ENV_FILE="$PROJECT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+    if grep -q "^AUTHENTIK_TOKEN=" "$ENV_FILE"; then
+        # Update existing entry
+        sed -i.bak "s|^AUTHENTIK_TOKEN=.*|AUTHENTIK_TOKEN=${TOKEN}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
+    else
+        echo "AUTHENTIK_TOKEN=${TOKEN}" >> "$ENV_FILE"
+    fi
+    log_ok "AUTHENTIK_TOKEN written to .env"
+else
+    log_warn ".env not found — run ./scripts/setup.sh first to create it"
+fi
+
+# ==========================================================================
+# 6. Done
 # ==========================================================================
 echo ""
 echo "================================================"
@@ -126,14 +164,15 @@ echo "  Setup Complete"
 echo "================================================"
 echo ""
 echo "Authentik Admin:"
-echo "  URL:       ${AUTHENTIK_URL}/if/admin/"
-echo "  User:      akadmin"
-echo "  Password:  ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}"
+echo "  URL:      ${AUTHENTIK_URL}/if/admin/"
+echo "  User:     akadmin / ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}  (platform_admin)"
 echo ""
-echo "Demo Users (password: ${DEFAULT_PASSWORD}):"
-echo "  demo-admin   (tenant: default)"
-echo "  demo-user    (tenant: default)"
-echo "  tenant-user  (tenant: demo)"
+echo "Users:"
+echo "  Platform: diadmin     / Diadmin@123     (role: platform_admin)"
+echo "  Alpha:    alphaadmin  / Alphaadmin@123  (role: tenant_admin)"
+echo "            alphauser   / Alphauser@123   (role: tenant_user)"
+echo "  Beta:     betaadmin   / Betaadmin@123   (role: tenant_admin)"
+echo "            betauser    / Betauser@123    (role: tenant_user)"
 echo ""
 echo "OAuth2:"
 echo "  Client ID:  docintel"

@@ -46,6 +46,11 @@ management:
     redis:
       enabled: false
 
+# Authentik API for tenant/user management
+authentik:
+  url: ${AUTHENTIK_URL:http://localhost:9090}
+  token: ${AUTHENTIK_TOKEN:}
+
 # Logging
 logging:
   level:

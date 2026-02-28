@@ -29,8 +29,8 @@ dependencies {
     // Database
     runtimeOnly("org.postgresql:postgresql")
     
-    // HTTP Client for Qdrant (using RestTemplate instead of gRPC)
-    implementation("org.springframework.boot:spring-boot-starter-web")
+    // WebClient for Authentik API calls
+    implementation("org.springframework.boot:spring-boot-starter-webflux")
     
     // Kotlin
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
