@@ -2,7 +2,8 @@
 Indexing Pipeline
 =================
 
-Haystack Pipeline for embedding and storing document chunks.
+Haystack Pipeline for embedding and storing document chunks into per-tenant
+Qdrant collections (documents_{tenant_id}).
 
 Flow: Documents → BM25SparseDocumentEmbedder → OllamaDocumentEmbedder → DocumentWriter
 
@@ -28,22 +29,20 @@ from ..stores import create_document_store
 logger = logging.getLogger(__name__)
 
 
-def create_indexing_pipeline(settings: Settings | None = None) -> Pipeline:
+def create_indexing_pipeline(settings: Settings, tenant_id: str) -> Pipeline:
     """
-    Build and return the indexing pipeline.
-
-    Flow: BM25SparseDocumentEmbedder → OllamaDocumentEmbedder → DocumentWriter
+    Build and return an indexing pipeline for the given tenant's Qdrant collection.
     """
-    cfg = settings or get_settings()
-    document_store = create_document_store(cfg)
+    collection = f"documents_{tenant_id}"
+    document_store = create_document_store(settings, collection=collection)
 
     pipeline = Pipeline()
     pipeline.add_component("sparse_embedder", BM25SparseDocumentEmbedder())
     pipeline.add_component(
         "embedder",
         OllamaDocumentEmbedder(
-            model=cfg.ollama_embed_model,
-            url=cfg.ollama_base_url,
+            model=settings.ollama_embed_model,
+            url=settings.ollama_base_url,
         ),
     )
     pipeline.add_component("writer", DocumentWriter(document_store=document_store))
@@ -62,11 +61,11 @@ async def index_chunks(
     pipeline: Optional[Pipeline] = None,
 ) -> dict:
     """
-    Index document chunks with dense + BM25 sparse embeddings.
+    Index document chunks into the tenant's dedicated Qdrant collection.
 
     Args:
         chunks:      List of dicts with 'content' and 'metadata' keys.
-        tenant_id:   Tenant ID for isolation.
+        tenant_id:   Tenant ID — determines target collection (documents_{tenant_id}).
         document_id: Document ID.
         settings:    Optional Settings (defaults to get_settings()).
         pipeline:    Optional pre-built pipeline (created if not provided).
@@ -75,8 +74,10 @@ async def index_chunks(
         {'embedded_count': int, 'collection': str}
     """
     cfg = settings or get_settings()
+    collection = f"documents_{tenant_id}"
+
     if pipeline is None:
-        pipeline = create_indexing_pipeline(cfg)
+        pipeline = create_indexing_pipeline(cfg, tenant_id)
 
     documents = [
         Document(
@@ -100,7 +101,7 @@ async def index_chunks(
 
     return {
         "embedded_count": result["writer"]["documents_written"],
-        "collection": cfg.qdrant_collection,
+        "collection": collection,
     }
 
 
@@ -109,26 +110,26 @@ async def delete_document_vectors(
     tenant_id: str,
     settings: Settings | None = None,
 ) -> dict:
-    """Delete all vectors for a specific document."""
+    """Delete all vectors for a specific document from the tenant's collection."""
     cfg = settings or get_settings()
     client = QdrantClient(url=cfg.qdrant_url)
-    client.delete(
-        collection_name=cfg.qdrant_collection,
-        points_selector=models.FilterSelector(
-            filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="tenant_id",
-                        match=models.MatchValue(value=tenant_id),
-                    ),
-                    models.FieldCondition(
-                        key="document_id",
-                        match=models.MatchValue(value=document_id),
-                    ),
-                ]
-            )
-        ),
-    )
+    collection = f"documents_{tenant_id}"
+    try:
+        client.delete(
+            collection_name=collection,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="document_id",
+                            match=models.MatchValue(value=document_id),
+                        ),
+                    ]
+                )
+            ),
+        )
+    except Exception as e:
+        logger.warning("Could not delete vectors for document %s in %s: %s", document_id, collection, e)
     return {"deleted": True, "document_id": document_id}
 
 
@@ -136,20 +137,13 @@ async def delete_tenant_vectors(
     tenant_id: str,
     settings: Settings | None = None,
 ) -> dict:
-    """Delete all vectors for a tenant."""
+    """Delete the entire tenant Qdrant collection (called on tenant delete)."""
     cfg = settings or get_settings()
     client = QdrantClient(url=cfg.qdrant_url)
-    client.delete(
-        collection_name=cfg.qdrant_collection,
-        points_selector=models.FilterSelector(
-            filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="tenant_id",
-                        match=models.MatchValue(value=tenant_id),
-                    ),
-                ]
-            )
-        ),
-    )
+    collection = f"documents_{tenant_id}"
+    try:
+        client.delete_collection(collection)
+        logger.info("Deleted Qdrant collection: %s", collection)
+    except Exception as e:
+        logger.warning("Could not delete Qdrant collection %s: %s", collection, e)
     return {"deleted": True, "tenant_id": tenant_id}

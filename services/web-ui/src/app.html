@@ -21,14 +21,10 @@
     <!-- Apply saved theme before first paint to prevent flash.
          Falls back to dark if no preference is stored. -->
     <script>
-      (function () {
-        var saved = localStorage.getItem('theme');
-        var effective = saved === 'light' ? 'light'
-          : saved === 'system'
-            ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
-            : 'dark'; // default: dark
-        if (effective === 'dark') document.documentElement.classList.add('dark');
-      })();
+      /* Dark is always the default. Only an explicit saved 'light' overrides. */
+      if (localStorage.getItem('theme') !== 'light') {
+        document.documentElement.classList.add('dark');
+      }
     </script>
     
     %sveltekit.head%

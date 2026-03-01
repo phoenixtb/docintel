@@ -4,17 +4,27 @@ spring:
     redis:
       host: redis
       port: 6379
+      password: ${SPRING_DATA_REDIS_PASSWORD:redissecret}
 
-  # OAuth2 Resource Server configuration (enabled in prod profile)
+  # OAuth2 Resource Server — JWT validation active in docker profile (not just prod).
+  # Using jwk-set-uri (internal Docker URL) instead of issuer-uri to avoid issuer mismatch:
+  # browsers authenticate via localhost:9090 so the JWT iss = http://localhost:9090/...
+  # but the gateway only reaches Authentik via the internal docker hostname.
   security:
     oauth2:
       resourceserver:
         jwt:
-          # Authentik OIDC issuer URI (internal docker network uses port 9000)
-          issuer-uri: ${AUTHENTIK_ISSUER_URI:http://authentik-server:9000/application/o/docintel/}
+          jwk-set-uri: ${AUTHENTIK_JWK_SET_URI:http://authentik-server:9000/application/o/docintel/jwks/}
 
   cloud:
     gateway:
+      # Global rate limiter: 100 req/s per tenant, burst 150
+      default-filters:
+        - name: RequestRateLimiter
+          args:
+            rate-limiter: "#{@defaultRedisRateLimiter}"
+            key-resolver: "#{@tenantRateLimitKeyResolver}"
+
       routes:
         - id: document-service
           uri: http://document-service:8081
@@ -46,6 +56,10 @@ spring:
             - Path=/api/v1/query
           filters:
             - RewritePath=/api/v1/query, /query
+            - name: RequestRateLimiter
+              args:
+                rate-limiter: "#{@queryRedisRateLimiter}"
+                key-resolver: "#{@tenantRateLimitKeyResolver}"
 
         - id: rag-service-query-stream
           uri: http://rag-service:8000
@@ -53,6 +67,10 @@ spring:
             - Path=/api/v1/query/stream
           filters:
             - RewritePath=/api/v1/query/stream, /query/stream
+            - name: RequestRateLimiter
+              args:
+                rate-limiter: "#{@queryRedisRateLimiter}"
+                key-resolver: "#{@tenantRateLimitKeyResolver}"
 
         - id: rag-service-classify
           uri: http://rag-service:8000
@@ -82,13 +100,6 @@ spring:
           filters:
             - RewritePath=/api/v1/vector-stats, /vector-stats
 
-        - id: rag-service-debug
-          uri: http://rag-service:8000
-          predicates:
-            - Path=/api/v1/debug/**
-          filters:
-            - RewritePath=/api/v1/debug/(?<segment>.*), /debug/${segment}
-
         - id: admin-service
           uri: http://admin-service:8082
           predicates:
@@ -102,6 +113,25 @@ spring:
             - Path=/api/v1/tenants, /api/v1/tenants/**
           filters:
             - RewritePath=/api/v1/tenants(?<segment>/?.*), /internal/tenants${segment}
+
+        - id: analytics-service-feedback
+          uri: http://analytics-service:8001
+          predicates:
+            - Path=/api/v1/feedback
+          filters:
+            - RewritePath=/api/v1/feedback, /events/feedback
+
+        - id: analytics-service-analytics
+          uri: http://analytics-service:8001
+          predicates:
+            - Path=/api/v1/analytics/**
+          filters:
+            - RewritePath=/api/v1/analytics/(?<segment>.*), /analytics/${segment}
+
+# OPA URL for OpaAuthorizationFilter
+docintel:
+  opa:
+    url: ${OPA_URL:http://opa:8181}
 
 logging:
   level:

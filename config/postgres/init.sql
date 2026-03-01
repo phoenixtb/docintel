@@ -11,6 +11,15 @@ CREATE DATABASE authentik;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- =============================================================================
+-- Application Role (non-superuser, used by all app services for RLS enforcement)
+-- =============================================================================
+-- docintel (POSTGRES_USER) is a superuser — bypasses RLS
+-- docintel_app is a non-superuser — RLS policies are enforced
+CREATE ROLE docintel_app WITH LOGIN PASSWORD 'docintel_app_secret';
+GRANT CONNECT ON DATABASE docintel TO docintel_app;
+GRANT USAGE ON SCHEMA public TO docintel_app;
+
+-- =============================================================================
 -- Tenants Table
 -- =============================================================================
 CREATE TABLE tenants (
@@ -152,6 +161,76 @@ CREATE TRIGGER tenants_updated_at
 CREATE TRIGGER conversations_updated_at
     BEFORE UPDATE ON conversations
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- =============================================================================
+-- Grant table permissions to docintel_app
+-- =============================================================================
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO docintel_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO docintel_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO docintel_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO docintel_app;
+
+-- =============================================================================
+-- Row-Level Security (RLS)
+-- All tenant-scoped tables enforce isolation via SET LOCAL app.current_tenant
+-- FORCE ROW LEVEL SECURITY applies even to table owners (docintel superuser bypasses
+-- only if they are a PostgreSQL superuser AND the table was created by them,
+-- but docintel_app is never a superuser so RLS always applies to it)
+-- =============================================================================
+
+ALTER TABLE documents     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents     FORCE ROW LEVEL SECURITY;
+ALTER TABLE chunks        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chunks        FORCE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations FORCE ROW LEVEL SECURITY;
+ALTER TABLE messages      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE messages      FORCE ROW LEVEL SECURITY;
+ALTER TABLE query_log     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE query_log     FORCE ROW LEVEL SECURITY;
+
+-- Messages isolation is via conversation (JOIN), but add direct policy too
+-- For messages we check via the conversations table through the FK
+
+-- RLS policies: row is visible only when tenant_id matches the session variable
+-- current_setting returns NULL (not empty string) when not set — use coalesce
+CREATE POLICY tenant_isolation_documents ON documents
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (tenant_id = current_setting('app.current_tenant', true));
+
+CREATE POLICY tenant_isolation_chunks ON chunks
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (tenant_id = current_setting('app.current_tenant', true));
+
+CREATE POLICY tenant_isolation_conversations ON conversations
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (tenant_id = current_setting('app.current_tenant', true));
+
+-- Messages don't have tenant_id directly; isolate by JOIN to conversations
+CREATE POLICY tenant_isolation_messages ON messages
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (
+        EXISTS (
+            SELECT 1 FROM conversations c
+            WHERE c.id = messages.conversation_id
+              AND c.tenant_id = current_setting('app.current_tenant', true)
+        )
+    );
+
+CREATE POLICY tenant_isolation_query_log ON query_log
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (tenant_id = current_setting('app.current_tenant', true));
+
+-- tenants table: platform_admin sees all; others see their own tenant row only
+ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation_tenants ON tenants
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (
+        current_setting('app.current_role', true) = 'platform_admin'
+        OR id = current_setting('app.current_tenant', true)
+    );
 
 -- =============================================================================
 -- Seed Tenants

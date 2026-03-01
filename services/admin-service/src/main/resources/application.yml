@@ -27,6 +27,7 @@ server:
 # Qdrant Configuration
 qdrant:
   url: ${QDRANT_URL:http://localhost:6333}
+  embedding-dim: 768
 
 # Redis Configuration
 redis:
@@ -50,6 +51,12 @@ management:
 authentik:
   url: ${AUTHENTIK_URL:http://localhost:9090}
   token: ${AUTHENTIK_TOKEN:}
+
+# MinIO configuration for per-tenant bucket provisioning
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  access-key: ${MINIO_ACCESS_KEY:minioadmin}
+  secret-key: ${MINIO_SECRET_KEY:minioadmin}
 
 # Logging
 logging:

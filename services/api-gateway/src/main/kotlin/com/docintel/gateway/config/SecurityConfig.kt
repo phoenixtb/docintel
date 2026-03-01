@@ -15,35 +15,13 @@ import org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource
 class SecurityConfig {
 
     /**
-     * Development security configuration - allows all requests.
+     * Default security configuration — JWT validation active for ALL profiles including docker.
+     * Requires spring.security.oauth2.resourceserver.jwt.issuer-uri to be set.
+     * Apply to any profile other than "dev" (local IDE runs without Authentik).
      */
     @Bean
-    @Profile("!prod")
-    fun securityWebFilterChainDev(http: ServerHttpSecurity): SecurityWebFilterChain {
-        return http
-            .csrf { it.disable() }
-            .cors { it.configurationSource(corsConfigurationSource()) }
-            .authorizeExchange { auth ->
-                auth
-                    .pathMatchers("/actuator/**").permitAll()
-                    .pathMatchers("/health").permitAll()
-                    .anyExchange().permitAll()
-            }
-            .build()
-    }
-
-    /**
-     * Production security configuration - JWT validation via spring-boot-starter-oauth2-resource-server.
-     *
-     * Auto-configured by Spring via:
-     *   spring.security.oauth2.resourceserver.jwt.issuer-uri
-     *
-     * The starter auto-discovers JWKS endpoint, validates signatures, iss, exp, nbf.
-     * No manual JwtDecoder bean needed.
-     */
-    @Bean
-    @Profile("prod")
-    fun securityWebFilterChainProd(http: ServerHttpSecurity): SecurityWebFilterChain {
+    @Profile("!dev")
+    fun securityWebFilterChain(http: ServerHttpSecurity): SecurityWebFilterChain {
         return http
             .csrf { it.disable() }
             .cors { it.configurationSource(corsConfigurationSource()) }
@@ -52,12 +30,25 @@ class SecurityConfig {
             }
             .authorizeExchange { auth ->
                 auth
-                    // Public endpoints
                     .pathMatchers("/actuator/health").permitAll()
                     .pathMatchers("/actuator/info").permitAll()
                     .pathMatchers("/api/v1/health").permitAll()
-                    // All other endpoints require authentication
                     .anyExchange().authenticated()
+            }
+            .build()
+    }
+
+    /**
+     * Dev-only security — permitAll for local IDE runs without Authentik.
+     */
+    @Bean
+    @Profile("dev")
+    fun securityWebFilterChainDev(http: ServerHttpSecurity): SecurityWebFilterChain {
+        return http
+            .csrf { it.disable() }
+            .cors { it.configurationSource(corsConfigurationSource()) }
+            .authorizeExchange { auth ->
+                auth.anyExchange().permitAll()
             }
             .build()
     }

@@ -35,17 +35,7 @@ class TenantFilter : GlobalFilter, Ordered {
     }
 
     override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> {
-        val request = exchange.request
-        
-        // Check if already has tenant header (for dev mode or service-to-service calls)
-        val headerTenant = request.headers.getFirst(TENANT_HEADER)
-        
-        if (!headerTenant.isNullOrBlank()) {
-            // Header provided, pass through with existing Authorization header
-            return chain.filter(exchange)
-        }
-        
-        // Try to extract from JWT claims (production mode with Authentik)
+        // Always extract tenant from JWT — never trust client-provided X-Tenant-Id headers
         return ReactiveSecurityContextHolder.getContext()
             .map { securityContext ->
                 val authentication = securityContext.authentication

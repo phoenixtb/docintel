@@ -15,13 +15,15 @@ from sqlalchemy import (
     Text,
     create_engine,
     desc,
+    event,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
-
 from .config import get_settings as _get_settings
+from .context import _tenant_ctx, _role_ctx
 
 engine = create_engine(
     _get_settings().postgres_url,
@@ -30,6 +32,15 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
+@event.listens_for(engine, "begin")
+def _set_rls_on_begin(conn):
+    """Set PostgreSQL RLS session variables at the start of each transaction."""
+    tenant_id = _tenant_ctx.get()
+    role = _role_ctx.get()
+    conn.execute(text("SET LOCAL app.current_tenant = :tid"), {"tid": tenant_id})
+    conn.execute(text("SET LOCAL app.current_role = :role"), {"role": role})
 
 
 class Base(DeclarativeBase):
@@ -133,6 +144,7 @@ def add_message(
     conversation_id: str,
     role: str,
     content: str,
+    tenant_id: Optional[str] = None,
     sources: Optional[list[dict]] = None,
     metadata: Optional[dict] = None,
 ) -> dict:
@@ -147,8 +159,11 @@ def add_message(
         )
         db.add(msg)
 
-        # Update conversation's updated_at
-        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        # Enforce tenant ownership when tenant_id is provided
+        query = db.query(Conversation).filter(Conversation.id == conversation_id)
+        if tenant_id:
+            query = query.filter(Conversation.tenant_id == tenant_id)
+        conv = query.first()
         if conv:
             conv.updated_at = datetime.now(timezone.utc)
             # Auto-title from first user message

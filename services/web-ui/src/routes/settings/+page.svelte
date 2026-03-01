@@ -44,7 +44,7 @@
 
   async function loadDocuments() {
     docsLoading = true;
-    const data = await fetchJson('/api/v1/documents?page=0&size=100');
+    const data = await fetchJson(`/api/v1/documents?page=0&size=100`);
     documents = data?.content ?? data ?? [];
     docsLoading = false;
   }

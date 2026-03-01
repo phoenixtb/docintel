@@ -34,7 +34,7 @@ class DocumentController(
     @PostMapping(consumes = [MediaType.MULTIPART_FORM_DATA_VALUE])
     fun uploadDocument(
         @RequestParam("file") file: MultipartFile,
-        @RequestParam("tenant_id", defaultValue = "default") tenantId: String,
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
         @RequestParam("domain", defaultValue = "auto") domain: String,
         @RequestParam("metadata", required = false) metadataJson: String?
     ): ResponseEntity<DocumentResponse> {
@@ -76,7 +76,7 @@ class DocumentController(
     @GetMapping("/{id}")
     fun getDocument(
         @PathVariable id: UUID,
-        @RequestParam("tenant_id", defaultValue = "default") tenantId: String,
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
         @RequestParam("include_chunks", defaultValue = "false") includeChunks: Boolean
     ): ResponseEntity<DocumentDetailResponse> {
         val document = documentService.getDocument(id, tenantId, includeChunks)
@@ -90,7 +90,7 @@ class DocumentController(
      */
     @GetMapping
     fun listDocuments(
-        @RequestParam("tenant_id", defaultValue = "default") tenantId: String,
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
         @RequestParam("status", required = false) status: ProcessingStatus?,
         @PageableDefault(size = 20) pageable: Pageable
     ): ResponseEntity<Page<DocumentResponse>> {
@@ -104,7 +104,7 @@ class DocumentController(
     @DeleteMapping("/{id}")
     suspend fun deleteDocument(
         @PathVariable id: UUID,
-        @RequestParam("tenant_id", defaultValue = "default") tenantId: String
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String
     ): ResponseEntity<Void> {
         val deleted = documentService.deleteDocument(id, tenantId)
         
@@ -121,7 +121,7 @@ class DocumentController(
     @GetMapping("/{id}/chunks")
     fun getDocumentChunks(
         @PathVariable id: UUID,
-        @RequestParam("tenant_id", defaultValue = "default") tenantId: String
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String
     ): ResponseEntity<List<ChunkResponse>> {
         return try {
             val chunks = documentService.getDocumentChunks(id, tenantId)
@@ -137,7 +137,7 @@ class DocumentController(
     @PostMapping("/{id}/reprocess")
     suspend fun reprocessDocument(
         @PathVariable id: UUID,
-        @RequestParam("tenant_id", defaultValue = "default") tenantId: String,
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
         @RequestParam("domain", defaultValue = "auto") domain: String
     ): ResponseEntity<ProcessingResult> {
         val result = documentService.processDocument(id, tenantId, domain)
@@ -165,7 +165,7 @@ class DocumentController(
      */
     @DeleteMapping("/all")
     suspend fun deleteAllDocuments(
-        @RequestParam("tenant_id", defaultValue = "default") tenantId: String
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String
     ): ResponseEntity<Map<String, Any>> {
         val count = documentService.deleteAllDocuments(tenantId)
         return ResponseEntity.ok(mapOf("deleted" to count, "tenant_id" to tenantId))

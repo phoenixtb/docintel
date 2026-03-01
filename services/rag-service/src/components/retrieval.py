@@ -6,9 +6,15 @@ Wraps QdrantHybridRetriever / QdrantEmbeddingRetriever with ACL filtering.
 Builds tenant + role + domain Qdrant filters and delegates to the
 Haystack-native retrievers for hybrid dense+sparse (RRF) or dense-only search.
 
+Per-tenant isolation: each tenant's data lives in a separate Qdrant collection
+named `documents_{tenant_id}`. Retrievers are cached per tenant so collection
+initialisation only happens once per tenant per process lifetime.
+
 Pipeline position:
   [BM25SparseTextEmbedder] → SecureRetriever → [SentenceTransformersSimilarityRanker]
 """
+
+from threading import Lock
 
 from haystack import Document, component
 from haystack.dataclasses import SparseEmbedding
@@ -21,18 +27,39 @@ from qdrant_client import models
 from ..config import Settings, get_settings
 from ..stores import create_document_store
 
+# Module-level cache: tenant_id → (hybrid_retriever, dense_retriever)
+_retriever_cache: dict[str, tuple[QdrantHybridRetriever, QdrantEmbeddingRetriever]] = {}
+_cache_lock = Lock()
+
+
+def _get_tenant_retrievers(
+    tenant_id: str,
+    settings: Settings,
+    top_k: int,
+) -> tuple[QdrantHybridRetriever, QdrantEmbeddingRetriever]:
+    """Return cached retrievers for a tenant's collection, creating them on first access."""
+    cache_key = f"{tenant_id}:{top_k}"
+    with _cache_lock:
+        if cache_key not in _retriever_cache:
+            store = create_document_store(
+                settings,
+                collection=f"documents_{tenant_id}",
+            )
+            _retriever_cache[cache_key] = (
+                QdrantHybridRetriever(document_store=store, top_k=top_k),
+                QdrantEmbeddingRetriever(document_store=store, top_k=top_k),
+            )
+        return _retriever_cache[cache_key]
+
 
 @component
 class SecureRetriever:
     """
     Tenant-isolated, ACL-aware retriever.
 
-    Accepts pre-computed dense and sparse embeddings (produced by the service
-    layer, shared with the cache check step) and applies Qdrant pre-filters for:
-      - tenant isolation  (meta.tenant_id == tenant_id)
-      - role-based access (meta.allowed_roles  ANY user_roles)
-      - user-level access (meta.allowed_users  == user_id)
-      - domain routing    (meta.document_type  == domain)
+    Queries the per-tenant Qdrant collection `documents_{tenant_id}`.
+    No cross-tenant data can be returned — the collection itself is the isolation boundary.
+    Role-based and domain filters are applied on top for fine-grained access control.
     """
 
     def __init__(
@@ -41,34 +68,18 @@ class SecureRetriever:
         top_k: int | None = None,
         use_hybrid: bool | None = None,
     ):
-        cfg = settings or get_settings()
-        self._top_k = top_k if top_k is not None else cfg.rag_retriever_top_k
-        env_hybrid = cfg.rag_use_hybrid_search
+        self._settings = settings or get_settings()
+        self._top_k = top_k if top_k is not None else self._settings.rag_retriever_top_k
+        env_hybrid = self._settings.rag_use_hybrid_search
         self._use_hybrid = use_hybrid if use_hybrid is not None else env_hybrid
-
-        document_store = create_document_store(cfg)
-        self._hybrid_retriever = QdrantHybridRetriever(
-            document_store=document_store,
-            top_k=self._top_k,
-        )
-        self._dense_retriever = QdrantEmbeddingRetriever(
-            document_store=document_store,
-            top_k=self._top_k,
-        )
 
     def _build_acl_filter(
         self,
-        tenant_id: str,
         user_roles: list[str] | None,
         user_id: str | None,
         domain_filter: dict | None,
     ) -> models.Filter:
-        must: list[models.Condition] = [
-            models.FieldCondition(
-                key="meta.tenant_id",
-                match=models.MatchValue(value=tenant_id),
-            )
-        ]
+        must: list[models.Condition] = []
 
         if domain_filter:
             must.append(
@@ -94,7 +105,7 @@ class SecureRetriever:
                 )
             )
 
-        filt = models.Filter(must=must)
+        filt = models.Filter(must=must) if must else models.Filter()
         if should:
             filt.should = should
         return filt
@@ -109,16 +120,19 @@ class SecureRetriever:
         domain_filter: dict | None = None,
         query_sparse_embedding: SparseEmbedding | None = None,
     ) -> dict:
-        acl_filter = self._build_acl_filter(tenant_id, user_roles, user_id, domain_filter)
+        hybrid_retriever, dense_retriever = _get_tenant_retrievers(
+            tenant_id, self._settings, self._top_k
+        )
+        acl_filter = self._build_acl_filter(user_roles, user_id, domain_filter)
 
         if self._use_hybrid and query_sparse_embedding is not None:
-            result = self._hybrid_retriever.run(
+            result = hybrid_retriever.run(
                 query_embedding=query_embedding,
                 query_sparse_embedding=query_sparse_embedding,
                 filters=acl_filter,
             )
         else:
-            result = self._dense_retriever.run(
+            result = dense_retriever.run(
                 query_embedding=query_embedding,
                 filters=acl_filter,
             )

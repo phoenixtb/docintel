@@ -10,7 +10,8 @@ import org.springframework.transaction.annotation.Transactional
 class TenantManagementService(
     private val jdbcTemplate: JdbcTemplate,
     private val authentikService: AuthentikService,
-    private val cacheService: CacheService
+    private val cacheService: CacheService,
+    private val provisioningService: ProvisioningService,
 ) {
     private val log = LoggerFactory.getLogger(TenantManagementService::class.java)
 
@@ -24,6 +25,9 @@ class TenantManagementService(
             req.id, req.name, req.quotaDocuments, req.quotaQueriesPerDay
         )
         authentikService.createTenantGroup(req.id, "tenant_user")
+        // Provision per-tenant Qdrant collection and MinIO bucket
+        provisioningService.createQdrantCollection(req.id)
+        provisioningService.createMinioBucket(req.id)
         log.info("Created tenant ${req.id}")
         return TenantSummary(tenantId = req.id, name = req.name, documentCount = 0, queryCount = 0)
     }
@@ -60,6 +64,9 @@ class TenantManagementService(
 
         cacheService.clearTenantCache(tenantId)
         authentikService.deleteTenantGroup(tenantId)
+        // Deprovision per-tenant Qdrant collection and MinIO bucket
+        provisioningService.deleteQdrantCollection(tenantId)
+        provisioningService.deleteMinioBucket(tenantId)
 
         log.info("Deleted tenant $tenantId")
         return DeleteTenantResponse(success = affected > 0, tenantId = tenantId)

@@ -122,7 +122,9 @@
   async function loadVectorStats() {
     isLoadingStats = true;
     try {
-      const response = await fetch(`${API_BASE}/api/v1/vector-stats?tenant_id=default`);
+      const response = await fetch(`${API_BASE}/api/v1/vector-stats`, {
+        headers: { ...getAuthHeaders() },
+      });
       if (response.ok) {
         vectorStats = await response.json();
         console.log('Vector stats loaded:', vectorStats);
@@ -166,11 +168,11 @@
     try {
       const formData = new FormData();
       formData.append('file', selectedFile);
-      formData.append('tenant_id', 'default');
       formData.append('domain', selectedDomain);
 
       const response = await fetch(`${API_BASE}/api/v1/documents`, {
         method: 'POST',
+        headers: { ...getAuthHeaders() },
         body: formData,
       });
 
@@ -258,6 +260,7 @@
     try {
       const response = await fetch(`${API_BASE}/api/v1/documents/${id}`, {
         method: 'DELETE',
+        headers: { ...getAuthHeaders() },
       });
 
       if (!response.ok && response.status !== 204) {

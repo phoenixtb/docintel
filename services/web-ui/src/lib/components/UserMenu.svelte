@@ -10,7 +10,7 @@
     isTenantAdmin
   } from '$lib/auth';
   
-  type Theme = 'light' | 'dark' | 'system';
+  type Theme = 'light' | 'dark';
   
   let isOpen = $state(false);
   let currentTheme: Theme = $state('dark');
@@ -27,19 +27,12 @@
   });
   
   const themes: { value: Theme; label: string; icon: string }[] = [
+    { value: 'dark',  label: 'Dark',  icon: '🌙' },
     { value: 'light', label: 'Light', icon: '☀️' },
-    { value: 'dark', label: 'Dark', icon: '🌙' },
-    { value: 'system', label: 'System', icon: '💻' },
   ];
   
-  function getSystemTheme(): 'light' | 'dark' {
-    if (typeof window === 'undefined') return 'light';
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  }
-  
   function applyTheme(theme: Theme) {
-    const effectiveTheme = theme === 'system' ? getSystemTheme() : theme;
-    if (effectiveTheme === 'dark') {
+    if (theme === 'dark') {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
@@ -66,18 +59,10 @@
   onMount(() => {
     authState = getAuthState();
     
-    const saved = localStorage.getItem('theme') as Theme | null;
-    if (saved && ['light', 'dark', 'system'].includes(saved)) {
-      currentTheme = saved;
-    }
+    // Only 'light' explicitly switches away from dark. Everything else → dark.
+    const saved = localStorage.getItem('theme');
+    currentTheme = saved === 'light' ? 'light' : 'dark';
     applyTheme(currentTheme);
-    
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    const handleChange = () => {
-      if (currentTheme === 'system') applyTheme('system');
-    };
-    mediaQuery.addEventListener('change', handleChange);
-    return () => mediaQuery.removeEventListener('change', handleChange);
   });
 </script>
 

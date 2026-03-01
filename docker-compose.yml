@@ -21,29 +21,30 @@ services:
       - "8080:8080"
     environment:
       - SPRING_PROFILES_ACTIVE=docker
-      - REDIS_URL=redis://redis:6379
       - DOCUMENT_SERVICE_URL=http://document-service:8081
       - RAG_SERVICE_URL=http://rag-service:8000
       - ADMIN_SERVICE_URL=http://admin-service:8082
       - ANALYTICS_SERVICE_URL=http://analytics-service:8001
+      - AUTHENTIK_ISSUER_URI=http://authentik-server:9000/application/o/docintel/
+      - OPA_URL=http://opa:8181
+      - SPRING_DATA_REDIS_PASSWORD=redissecret
     depends_on:
       - redis
       - document-service
       - rag-service
       - analytics-service
+      - opa
     networks:
       - docintel-network
     profiles: ["app"]
 
   document-service:
     build: ./services/document-service
-    ports:
-      - "8081:8081"
     environment:
       - SPRING_PROFILES_ACTIVE=docker
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel
-      - SPRING_DATASOURCE_USERNAME=docintel
-      - SPRING_DATASOURCE_PASSWORD=docintel_secret
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://pgbouncer:5432/docintel
+      - SPRING_DATASOURCE_USERNAME=docintel_app
+      - SPRING_DATASOURCE_PASSWORD=docintel_app_secret
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
@@ -51,6 +52,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      pgbouncer:
+        condition: service_started
       minio:
         condition: service_started
     networks:
@@ -59,8 +62,6 @@ services:
 
   rag-service:
     build: ./services/rag-service
-    ports:
-      - "8000:8000"
     environment:
       - QDRANT_URL=http://qdrant:6333
       # Ollama runs natively on host (Metal on Apple Silicon, CUDA on Linux, vLLM in prod)
@@ -84,11 +85,13 @@ services:
       - LANGFUSE_HOST=http://langfuse-web:3000
       - LANGFUSE_PUBLIC_KEY=lf_pk_1234567890
       - LANGFUSE_SECRET_KEY=lf_sk_1234567890
-      # Database
-      - POSTGRES_URL=postgresql://docintel:docintel_secret@postgres:5432/docintel
+      # Database (via PgBouncer, non-superuser docintel_app for RLS enforcement)
+      - POSTGRES_URL=postgresql://docintel_app:docintel_app_secret@pgbouncer:5432/docintel
     depends_on:
       qdrant:
         condition: service_healthy
+      pgbouncer:
+        condition: service_started
     volumes:
       - huggingface-cache:/root/.cache/huggingface
     networks:
@@ -104,8 +107,6 @@ services:
 
   analytics-service:
     build: ./services/analytics-service
-    ports:
-      - "8001:8001"
     environment:
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=8123
@@ -121,21 +122,24 @@ services:
 
   admin-service:
     build: ./services/admin-service
-    ports:
-      - "8082:8082"
     environment:
       - SPRING_PROFILES_ACTIVE=docker
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel
-      - SPRING_DATASOURCE_USERNAME=docintel
-      - SPRING_DATASOURCE_PASSWORD=docintel_secret
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://pgbouncer:5432/docintel
+      - SPRING_DATASOURCE_USERNAME=docintel_app
+      - SPRING_DATASOURCE_PASSWORD=docintel_app_secret
       - QDRANT_URL=http://qdrant:6333
       - REDIS_URL=redis://redis:6379
       - AUTHENTIK_URL=http://authentik-server:9000
       - AUTHENTIK_TOKEN=${AUTHENTIK_TOKEN:-}
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
     depends_on:
       - postgres
+      - pgbouncer
       - qdrant
       - redis
+      - minio
     networks:
       - docintel-network
     profiles: ["app"]
@@ -163,6 +167,44 @@ services:
       resources:
         limits:
           memory: 256M
+
+  # ============================================================================
+  # Policy Engine (OPA — Open Policy Agent)
+  # ============================================================================
+  # Internal only — not exposed on host; only api-gateway reaches it
+  opa:
+    image: openpolicyagent/opa:0.70.0-static
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-level=info", "/policies"]
+    volumes:
+      - ./config/opa/policies:/policies:ro
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  # ============================================================================
+  # Connection Pooler (PgBouncer — transaction pool mode for RLS compatibility)
+  # ============================================================================
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.1-p0
+    environment:
+      # Connect to PostgreSQL as docintel_app (non-superuser, RLS enforced)
+      DATABASE_URL: "postgres://docintel_app:docintel_app_secret@postgres:5432/docintel"
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 20
+      SERVER_RESET_QUERY: ""
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 32M
 
   # ============================================================================
   # Data Layer (pinned versions - never use :latest)

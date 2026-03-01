@@ -1,19 +1,33 @@
 package com.docintel.gateway.config
 
 import org.springframework.beans.factory.annotation.Value
-import org.springframework.cloud.gateway.route.RouteLocator
-import org.springframework.cloud.gateway.route.builder.RouteLocatorBuilder
+import org.springframework.cloud.gateway.filter.ratelimit.KeyResolver
+import org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.context.annotation.Primary
+import org.springframework.web.reactive.function.client.WebClient
+import reactor.core.publisher.Mono
 
-/**
- * Programmatic route definitions.
- * 
- * Note: Routes are also defined in application.yml. 
- * This config is disabled to avoid duplicates - the YAML routes are sufficient.
- */
 @Configuration
 class GatewayConfig {
-    // Routes are defined in application.yml / application-docker.yml
-    // This class is kept for future programmatic route customization if needed
+
+    @Bean
+    fun opaWebClient(@Value("\${docintel.opa.url:http://opa:8181}") url: String): WebClient =
+        WebClient.builder().baseUrl(url).build()
+
+    @Bean
+    fun tenantRateLimitKeyResolver(): KeyResolver = KeyResolver { exchange ->
+        Mono.just(
+            exchange.request.headers.getFirst("X-Tenant-Id") ?: "unknown"
+        )
+    }
+
+    @Bean
+    @Primary
+    fun defaultRedisRateLimiter(): RedisRateLimiter = RedisRateLimiter(100, 150)
+
+    @Bean
+    fun queryRedisRateLimiter(): RedisRateLimiter = RedisRateLimiter(20, 30)
 }
+

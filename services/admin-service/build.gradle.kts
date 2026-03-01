@@ -31,6 +31,9 @@ dependencies {
     
     // WebClient for Authentik API calls
     implementation("org.springframework.boot:spring-boot-starter-webflux")
+
+    // MinIO (for per-tenant bucket provisioning)
+    implementation("io.minio:minio:8.5.14")
     
     // Kotlin
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")

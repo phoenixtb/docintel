@@ -7,6 +7,7 @@ are initialised in the lifespan and stored on app.state. Endpoints inject
 them via FastAPI Depends() from api/dependencies.py.
 """
 
+import asyncio
 import json
 import logging
 import uuid
@@ -14,12 +15,13 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..chunking import ChunkingConfig, ChunkingMethod, ChunkingService
 from ..config import Settings
+from ..context import _tenant_ctx, _role_ctx
 from ..datasets import DATASET_CONFIGS, DOMAIN_LABELS, get_dataset_loader, get_domain_classifier
 from ..pipelines import RAGService, delete_document_vectors, delete_tenant_vectors, index_chunks
 from ..tracing import LangfuseTracer
@@ -123,53 +125,20 @@ async def _ensure_ollama_models(settings: Settings) -> None:
 
 def _ensure_qdrant_ready(settings: Settings) -> None:
     """
-    Ensure the Qdrant documents collection is ready for sparse+dense hybrid search.
+    Verify Qdrant is reachable at startup.
 
-    Collection creation is intentionally delegated to QdrantDocumentStore
-    (via stores.create_document_store) so that both dense and sparse vector
-    configurations are set correctly. This function only:
-      - Verifies Qdrant is reachable
-      - Ensures payload indexes exist for fast filtering
-      - Migrates an existing dense-only collection if needed
+    Collections are now per-tenant (documents_{tenant_id}) and created lazily
+    on first index for each tenant, or eagerly by admin-service on tenant creation.
+    No single shared collection is created here.
     """
     from qdrant_client import QdrantClient
-    from qdrant_client.http import models
 
     client = QdrantClient(url=settings.qdrant_url)
-
-    # Warm the collection via QdrantDocumentStore so it is created correctly
-    # (dense + sparse vectors) the first time it is accessed.
-    from ..stores import create_document_store
     try:
-        create_document_store(settings)  # triggers collection creation if missing
-        logger.info("Qdrant '%s' collection ready", settings.qdrant_collection)
+        client.get_collections()
+        logger.info("Qdrant reachable at %s — per-tenant collections created on demand", settings.qdrant_url)
     except Exception as e:
-        # Collection exists but is dense-only (created by older code).
-        # Drop and recreate so sparse embeddings work correctly.
-        if "sparse" in str(e).lower():
-            logger.warning(
-                "Migrating '%s' collection to sparse+dense (dropping existing data)",
-                settings.qdrant_collection,
-            )
-            try:
-                client.delete_collection(settings.qdrant_collection)
-            except Exception:
-                pass
-            create_document_store(settings)
-            logger.info("Collection recreated with sparse embedding support")
-        else:
-            logger.error("Failed to initialize Qdrant collection: %s", e)
-
-    # Ensure payload indexes for filtering (idempotent — fails silently if exists)
-    for field in ("meta.tenant_id", "meta.document_type"):
-        try:
-            client.create_payload_index(
-                collection_name=settings.qdrant_collection,
-                field_name=field,
-                field_schema=models.PayloadSchemaType.KEYWORD,
-            )
-        except Exception:
-            pass
+        logger.error("Qdrant not reachable: %s", e)
 
 
 app = FastAPI(
@@ -178,6 +147,19 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def tenant_context_middleware(request: Request, call_next):
+    """Set tenant ContextVars from gateway-forwarded headers for every request."""
+    token_t = _tenant_ctx.set(request.headers.get("X-Tenant-Id", "default"))
+    token_r = _role_ctx.set(request.headers.get("X-User-Role", "tenant_user"))
+    try:
+        return await call_next(request)
+    finally:
+        _tenant_ctx.reset(token_t)
+        _role_ctx.reset(token_r)
+
 
 # Prometheus metrics — must be registered before first request (module level)
 try:
@@ -339,81 +321,46 @@ async def root():
 # =============================================================================
 
 @app.get("/vector-stats", response_model=VectorStatsResponse)
-async def get_vector_stats(settings: SettingsDep, tenant_id: Optional[str] = None):
+async def get_vector_stats(settings: SettingsDep, claims: JWTClaimsDep):
     from qdrant_client import QdrantClient
     from qdrant_client.http import models
 
+    tenant_id = claims["tenant_id"]
+    collection = f"documents_{tenant_id}"
     client = QdrantClient(url=settings.qdrant_url)
     collections: dict[str, int] = {}
-    total = 0
     tenant_stats: dict[str, int] = {}
 
     try:
-        for coll in client.get_collections().collections:
-            info = client.get_collection(coll.name)
-            count = info.points_count or 0
-            collections[coll.name] = count
-            total += count
+        # Per-tenant collection — no tenant_id filter needed; all vectors belong to this tenant
+        total_result = client.count(collection_name=collection, exact=False)
+        total = total_result.count
+        collections[collection] = total
 
-        if settings.qdrant_collection in collections:
-            for domain in ["technical", "hr_policy", "contracts", "general"]:
-                must_clauses = [
-                    models.FieldCondition(
-                        key="meta.document_type",
-                        match=models.MatchValue(value=domain),
-                    )
-                ]
-                if tenant_id:
-                    must_clauses.append(
+        for domain in ["technical", "hr_policy", "contracts", "general"]:
+            try:
+                result = client.count(
+                    collection_name=collection,
+                    count_filter=models.Filter(must=[
                         models.FieldCondition(
-                            key="meta.tenant_id",
-                            match=models.MatchValue(value=tenant_id),
-                        )
-                    )
-                try:
-                    result = client.count(
-                        collection_name=settings.qdrant_collection,
-                        count_filter=models.Filter(must=must_clauses),
-                    )
-                    if result.count > 0:
-                        tenant_stats[domain] = result.count
-                except Exception:
-                    pass
+                            key="meta.document_type",
+                            match=models.MatchValue(value=domain),
+                        ),
+                    ]),
+                )
+                if result.count > 0:
+                    tenant_stats[domain] = result.count
+            except Exception:
+                pass
     except Exception as e:
-        logger.error("Error getting vector stats: %s", e)
+        logger.warning("Error getting vector stats for tenant %s (collection may not exist): %s", tenant_id, e)
 
     return VectorStatsResponse(
-        total_vectors=total,
+        total_vectors=sum(collections.values()),
         collections=collections,
         tenant_stats=tenant_stats,
     )
 
-
-@app.get("/debug/sample-points")
-async def debug_sample_points(settings: SettingsDep, limit: int = 5):
-    from qdrant_client import QdrantClient
-
-    client = QdrantClient(url=settings.qdrant_url)
-    try:
-        result = client.scroll(
-            collection_name=settings.qdrant_collection,
-            limit=limit,
-            with_payload=True,
-            with_vectors=False,
-        )
-        points = []
-        for point in result[0]:
-            meta = (point.payload or {}).get("meta", {})
-            points.append({
-                "id": str(point.id),
-                "payload_keys": list((point.payload or {}).keys()),
-                "tenant_id": meta.get("tenant_id"),
-                "document_type": meta.get("document_type"),
-                "content_preview": ((point.payload or {}).get("content", "")[:100] + "..."),
-            })
-        return {"points": points, "total": len(points)}
-    except Exception as e:
-        return {"error": str(e)}
 
 
 # =============================================================================
@@ -425,15 +372,13 @@ async def query_documents(
     request: QueryRequest,
     rag_service: RAGServiceDep,
     claims: JWTClaimsDep,
+    settings: SettingsDep,
 ):
     """
     RAG query with tenant isolation and RBAC.
-
-    JWT claims (forwarded by API Gateway) are merged with request body values;
-    gateway-provided values take precedence so clients cannot escalate privileges.
+    Gateway claims always take precedence — clients cannot override tenant_id.
     """
-    # Gateway claims override request body — defence in depth
-    tenant_id = claims["tenant_id"] if claims["tenant_id"] != "default" else request.tenant_id
+    tenant_id = claims["tenant_id"]
     user_roles = claims["user_roles"] or request.user_roles
     user_id = claims["user_id"] or request.user_id
 
@@ -490,7 +435,7 @@ async def query_documents_stream(
 
     from ..pipelines.query import _build_section_label
 
-    tenant_id = claims["tenant_id"] if claims["tenant_id"] != "default" else request.tenant_id
+    tenant_id = claims["tenant_id"]
     user_roles = claims["user_roles"] or request.user_roles
     user_id = claims["user_id"] or request.user_id
 
@@ -644,8 +589,8 @@ async def query_documents_stream(
             if request.conversation_id:
                 try:
                     from ..db import add_message
-                    add_message(request.conversation_id, "user", request.question)
-                    add_message(request.conversation_id, "assistant", answer, sources=sources)
+                    add_message(request.conversation_id, "user", request.question, tenant_id=tenant_id)
+                    add_message(request.conversation_id, "assistant", answer, tenant_id=tenant_id, sources=sources)
                 except Exception as e:
                     logger.warning("Failed to persist streaming conversation: %s", e)
 
@@ -679,15 +624,18 @@ async def query_documents_stream(
 # =============================================================================
 
 @app.post("/index", response_model=IndexResponse)
-async def index_document(request: IndexRequest, settings: SettingsDep):
+async def index_document(request: IndexRequest, settings: SettingsDep, claims: JWTClaimsDep):
+    """Index document chunks into the tenant's Qdrant collection.
+    Tenant ID is always taken from gateway claims — request body tenant_id is ignored."""
     try:
+        tenant_id = claims["tenant_id"]
         chunks = [
             {"chunk_id": c.chunk_id, "content": c.content, "metadata": c.metadata}
             for c in request.chunks
         ]
         result = await index_chunks(
             chunks=chunks,
-            tenant_id=request.tenant_id,
+            tenant_id=tenant_id,
             document_id=request.document_id,
             settings=settings,
         )
@@ -703,8 +651,10 @@ async def index_document(request: IndexRequest, settings: SettingsDep):
 
 
 @app.post("/chunk", response_model=ChunkResponse)
-async def chunk_text(request: ChunkRequest):
+async def chunk_text(request: ChunkRequest, claims: JWTClaimsDep):
+    """Chunk document text. Tenant ID from gateway claims is authoritative."""
     try:
+        tenant_id = claims["tenant_id"]
         service = ChunkingService()
         method_map = {
             "recursive": ChunkingMethod.RECURSIVE,
@@ -719,7 +669,7 @@ async def chunk_text(request: ChunkRequest):
         chunks = service.chunk_document(
             text=request.text,
             document_id=request.document_id,
-            tenant_id=request.tenant_id,
+            tenant_id=tenant_id,
             filename=request.filename,
             config=config,
             extra_metadata=request.metadata,
@@ -924,26 +874,26 @@ class UpdateConversationRequest(BaseModel):
 
 
 @app.post("/conversations")
-async def create_conversation(request: CreateConversationRequest):
+async def create_conversation(request: CreateConversationRequest, claims: JWTClaimsDep):
     from ..db import create_conversation as _create
-    return _create(tenant_id=request.tenant_id, user_id=request.user_id, title=request.title)
+    tenant_id = claims["tenant_id"]
+    return _create(tenant_id=tenant_id, user_id=claims["user_id"] or request.user_id, title=request.title)
 
 
 @app.get("/conversations")
 async def list_conversations(
-    tenant_id: str = "default",
-    user_id: Optional[str] = None,
+    claims: JWTClaimsDep,
     limit: int = 50,
     offset: int = 0,
 ):
     from ..db import list_conversations as _list
-    return _list(tenant_id=tenant_id, user_id=user_id, limit=limit, offset=offset)
+    return _list(tenant_id=claims["tenant_id"], user_id=claims["user_id"], limit=limit, offset=offset)
 
 
 @app.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str, tenant_id: str = "default"):
+async def get_conversation(conversation_id: str, claims: JWTClaimsDep):
     from ..db import get_conversation as _get
-    conv = _get(conversation_id, tenant_id)
+    conv = _get(conversation_id, claims["tenant_id"])
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
@@ -953,18 +903,18 @@ async def get_conversation(conversation_id: str, tenant_id: str = "default"):
 async def update_conversation(
     conversation_id: str,
     request: UpdateConversationRequest,
-    tenant_id: str = "default",
+    claims: JWTClaimsDep,
 ):
     from ..db import update_conversation_title
-    conv = update_conversation_title(conversation_id, tenant_id, request.title)
+    conv = update_conversation_title(conversation_id, claims["tenant_id"], request.title)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
 
 
 @app.delete("/conversations/{conversation_id}")
-async def delete_conversation_endpoint(conversation_id: str, tenant_id: str = "default"):
+async def delete_conversation_endpoint(conversation_id: str, claims: JWTClaimsDep):
     from ..db import delete_conversation
-    if not delete_conversation(conversation_id, tenant_id):
+    if not delete_conversation(conversation_id, claims["tenant_id"]):
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"status": "deleted"}
