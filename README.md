@@ -66,19 +66,20 @@ This will:
 ### 2. Start the Application
 
 ```bash
-./scripts/start.sh           # With authentication (Authentik)
-./scripts/start.sh --no-auth # Without authentication (dev mode)
+./scripts/start.sh           # Start with authentication (Zitadel)
+./scripts/start.sh --build   # Rebuild images before starting
 ```
 
-Starts infrastructure, Authentik (if enabled), and all application services.
+Starts infrastructure, Zitadel, and all application services. Authentication is always required — it is the mechanism for tenant identification.
 
 ### 3. Stop / Cleanup
 
 ```bash
-./scripts/stop.sh             # Stop containers (preserves state, fast restart)
-./scripts/cleanup.sh          # Stop and remove containers
-./scripts/cleanup.sh --volumes # Also delete all data (DB, vectors, etc.)
-./scripts/cleanup.sh --all    # Delete everything including Ollama models
+./scripts/stop.sh              # Stop containers (preserves state, fast restart)
+./scripts/cleanup.sh           # Stop and remove containers
+./scripts/cleanup.sh --data    # Also wipe all named data volumes (DB, vectors, cache, etc.) — preserves Docker images and Ollama models
+./scripts/cleanup.sh --volumes # Same as --data
+./scripts/cleanup.sh --all     # Delete everything including Ollama models
 ```
 
 ### Credentials
@@ -86,7 +87,7 @@ Starts infrastructure, Authentik (if enabled), and all application services.
 | Service | URL | User | Password |
 |---------|-----|------|----------|
 | Web UI | http://localhost:3001 | demo-admin | DocIntel@123 |
-| Authentik Admin | http://localhost:9090/if/admin/ | akadmin | DocIntel@123 |
+| Zitadel Admin | http://localhost:9090 | akadmin | DocIntel@123 |
 | Langfuse | http://localhost:3000 | admin@docintel.local | admin123 |
 | MinIO Console | http://localhost:9001 | minioadmin | minioadmin |
 
@@ -105,8 +106,8 @@ Services with `build:` directives (web-ui, api-gateway, document-service, rag-se
 ./scripts/start.sh --build
 
 # Rebuild a single service (faster)
-docker compose --profile app build web-ui
-docker compose --profile app up -d web-ui
+docker compose build web-ui
+docker compose up -d web-ui
 ```
 
 `stop.sh` / `start.sh` without `--build` reuses existing images — fast restarts, but won't reflect code changes.
@@ -133,15 +134,15 @@ docker compose logs -f web-ui
 docker compose logs -f rag-service
 
 # Rebuild and restart one service
-docker compose --profile app build <service> && docker compose --profile app up -d <service>
+docker compose build <service> && docker compose up -d <service>
 
 # Shell into a running container
 docker exec -it docintel-rag-service-1 bash
 ```
 
-### Authentik (Identity Provider)
+### Zitadel (Identity Provider)
 
-OAuth2/OIDC configuration is fully automated via blueprint at `config/authentik/blueprints/docintel-setup.yaml`. On `start.sh`, the blueprint auto-provisions:
+OAuth2/OIDC configuration is fully automated via blueprint at `config/zitadel/blueprints/docintel-setup.yaml`. On `start.sh`, the blueprint auto-provisions:
 - OAuth2 provider (public client, PKCE)
 - DocIntel application
 - Tenant groups and demo users
@@ -149,7 +150,7 @@ OAuth2/OIDC configuration is fully automated via blueprint at `config/authentik/
 
 To re-apply the blueprint manually:
 ```bash
-docker exec docintel-authentik-worker-1 ak apply_blueprint /blueprints/custom/docintel-setup.yaml
+docker exec docintel-zitadel-worker-1 ak apply_blueprint /blueprints/custom/docintel-setup.yaml
 ```
 
 ### GPU Usage (Mac M3 / Apple Silicon)
@@ -162,23 +163,76 @@ docker exec docintel-authentik-worker-1 ak apply_blueprint /blueprints/custom/do
 
 ```
 config/
-├── authentik/
-│   ├── blueprints/    # Authentik provisioning YAML
+├── zitadel/
+│   ├── blueprints/    # Zitadel provisioning YAML
 │   └── media/         # Login page logo + favicon
+├── defaults.env       # Model defaults — single source of truth (scripts + tests)
+├── opa/policies/      # OPA authorization policies
 ├── postgres/          # DB init scripts
 └── qdrant/            # Collection init scripts
 
 scripts/
 ├── setup.sh           # One-time: pull images + models
-├── start.sh           # Start all services (--build, --no-auth)
+├── start.sh           # Start all services (--build)
 ├── stop.sh            # Stop containers (preserves state)
-├── cleanup.sh         # Remove containers (--volumes, --all)
+├── cleanup.sh         # Remove containers (--data, --volumes, --all)
 ├── logs.sh            # View logs (debug mode: rag + api-gateway)
 ├── build.sh           # Interactive build selector
 ├── docintel.sh        # Interactive CLI (setup, start, stop, logs, etc.)
-└── setup-authentik.sh # Verify blueprint applied (called by start.sh)
+└── setup-zitadel.sh # Verify blueprint applied (called by start.sh)
 ```
 
+## Configuration
+
+### Model Defaults — `config/defaults.env`
+
+All model names are defined once in `config/defaults.env` and referenced everywhere else:
+
+```bash
+DEFAULT_LLM_MODEL=qwen3.5:4b      # Chat generation / streaming
+DEFAULT_FALLBACK_MODEL=phi3:mini   # Fallback if preferred model unavailable
+DEFAULT_EMBED_MODEL=nomic-embed-text  # Dense vector embeddings
+```
+
+- **Scripts** (`setup.sh`, `start.sh`, `cleanup.sh`) source this file automatically.
+- **Tests** (`tests/conftest.py`, `test_components.py`) parse it at import time.
+- **RAG service** reads `OLLAMA_LLM_MODEL` from Docker Compose (which defaults to `DEFAULT_LLM_MODEL`).
+
+To change the default model globally, edit `config/defaults.env` and restart the stack.
+
+### Dynamic Model Selection (per-tenant)
+
+`tenant_admin` and `platform_admin` can change the active LLM from the UI without restarting. The resolution order at query time is:
+
+| Priority | Source | Who controls |
+|----------|--------|-------------|
+| 1 (highest) | `platform_settings.llm_model` (PostgreSQL) | `platform_admin` |
+| 2 | `tenants.settings->>'llm_model'` (PostgreSQL) | `tenant_admin` |
+| 3 (fallback) | `OLLAMA_LLM_MODEL` env var | `config/defaults.env` |
+
+**Tenant admin:** Settings → Model tab → select from available Ollama models → confirm cache invalidation warning.
+
+**Platform admin:** Admin → Model tab → global override or "Tenant Choice" → confirm cache invalidation for all tenants.
+
+When "Tenant Choice" is active (platform model = null), each tenant uses its own preference. When the platform admin reverts from a specific model back to "Tenant Choice", all tenant caches are cleared and each tenant falls back to its own stored preference (or the env default if none is set).
+
+The resolved model is cached in-process for 60 seconds per tenant to avoid a database round-trip on every query.
+
+### Environment Variables
+
+Copy `.env.example` to `.env` and adjust as needed:
+
+```bash
+cp .env.example .env
+```
+
+Key variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OLLAMA_LLM_MODEL` | `qwen3.5:4b` | Default LLM (overridden by DB at runtime) |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model |
+| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama host |
 ## Project Structure
 
 ```
@@ -203,8 +257,8 @@ docintel/
 |-----------|------------|---------|
 | Web UI | SvelteKit + oidc-client-ts | MIT / Apache 2.0 |
 | API Gateway | Kotlin / Spring Cloud Gateway | Apache 2.0 |
-| Identity Provider | Authentik | MIT |
-| LLM | Qwen3-4B via Ollama | Apache 2.0 |
+| Identity Provider | Zitadel | MIT |
+| LLM | Qwen3.5-4B via Ollama (configurable per-tenant) | Apache 2.0 |
 | Embeddings | nomic-embed-text | Apache 2.0 |
 | RAG Framework | Haystack 2.x | Apache 2.0 |
 | Vector DB | Qdrant | Apache 2.0 |
@@ -219,7 +273,7 @@ docintel/
 |---------|-----|-------------|
 | Web UI | http://localhost:3001 | Chat interface |
 | API Gateway | http://localhost:8080 | REST + SSE API |
-| Authentik | http://localhost:9090 | Identity provider |
+| Zitadel | http://localhost:9090 | Identity provider |
 | Langfuse | http://localhost:3000 | Observability UI |
 | Qdrant | http://localhost:6333 | Vector DB dashboard |
 | MinIO Console | http://localhost:9001 | Object storage UI |

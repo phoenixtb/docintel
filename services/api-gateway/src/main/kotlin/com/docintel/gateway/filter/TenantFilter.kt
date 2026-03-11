@@ -1,5 +1,6 @@
 package com.docintel.gateway.filter
 
+import org.slf4j.LoggerFactory
 import org.springframework.cloud.gateway.filter.GatewayFilterChain
 import org.springframework.cloud.gateway.filter.GlobalFilter
 import org.springframework.core.Ordered
@@ -21,6 +22,8 @@ import reactor.core.publisher.Mono
  */
 @Component
 class TenantFilter : GlobalFilter, Ordered {
+
+    private val log = LoggerFactory.getLogger(javaClass)
 
     companion object {
         const val TENANT_HEADER = "X-Tenant-Id"
@@ -53,7 +56,10 @@ class TenantFilter : GlobalFilter, Ordered {
                     JwtClaimData(DEFAULT_TENANT, "", "", "", DEFAULT_ROLE)
                 }
             }
-            .defaultIfEmpty(JwtClaimData(DEFAULT_TENANT, "", "", "", DEFAULT_ROLE))
+            .switchIfEmpty(Mono.fromCallable {
+                log.warn("No JWT security context found — defaulting to tenant=default (path={}). Check that this path is in permitAll().", exchange.request.uri.path)
+                JwtClaimData(DEFAULT_TENANT, "", "", "", DEFAULT_ROLE)
+            })
             .flatMap { claims ->
                 continueWithClaims(exchange, chain, claims)
             }

@@ -7,8 +7,9 @@
 #   - Run ./scripts/setup.sh for first-time setup
 #
 # Usage:
-#   Infrastructure only: docker compose up -d
-#   With app services:   docker compose --profile app up -d
+#   Full stack (default):       docker compose up -d
+#
+# Auth is always-on. Zitadel (AGPL v3.0) is a core service that starts with the stack.
 
 services:
   # ============================================================================
@@ -23,61 +24,76 @@ services:
       - SPRING_PROFILES_ACTIVE=docker
       - DOCUMENT_SERVICE_URL=http://document-service:8081
       - RAG_SERVICE_URL=http://rag-service:8000
+      - INGESTION_SERVICE_URL=http://ingestion-service:8001
       - ADMIN_SERVICE_URL=http://admin-service:8082
       - ANALYTICS_SERVICE_URL=http://analytics-service:8001
-      - AUTHENTIK_ISSUER_URI=http://authentik-server:9000/application/o/docintel/
+      - ZITADEL_JWK_SET_URI=http://zitadel-api:8080/oauth/v2/keys
       - OPA_URL=http://opa:8181
       - SPRING_DATA_REDIS_PASSWORD=redissecret
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001}
     depends_on:
-      - redis
-      - document-service
-      - rag-service
-      - analytics-service
-      - opa
+      redis:
+        condition: service_healthy
+      document-service:
+        condition: service_started
+      rag-service:
+        condition: service_healthy
+      ingestion-service:
+        condition: service_started
+      analytics-service:
+        condition: service_started
+      opa:
+        condition: service_started
+      zitadel-proxy:
+        condition: service_started
     networks:
       - docintel-network
-    profiles: ["app"]
 
   document-service:
     build: ./services/document-service
     environment:
       - SPRING_PROFILES_ACTIVE=docker
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://pgbouncer:5432/docintel
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel?user=docintel_app&password=docintel_app_secret
       - SPRING_DATASOURCE_USERNAME=docintel_app
       - SPRING_DATASOURCE_PASSWORD=docintel_app_secret
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - RAG_SERVICE_URL=http://rag-service:8000
+      - INGESTION_SERVICE_URL=http://ingestion-service:8001
     depends_on:
       postgres:
         condition: service_healthy
-      pgbouncer:
-        condition: service_started
       minio:
+        condition: service_started
+      ingestion-service:
         condition: service_started
     networks:
       - docintel-network
-    profiles: ["app"]
 
   rag-service:
-    build: ./services/rag-service
+    build:
+      context: .
+      dockerfile: services/rag-service/Dockerfile
     environment:
       - QDRANT_URL=http://qdrant:6333
       # Ollama runs natively on host (Metal on Apple Silicon, CUDA on Linux, vLLM in prod)
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       # LLM — chat generation and streaming
-      - OLLAMA_LLM_MODEL=qwen3:8b
+      - OLLAMA_LLM_MODEL=qwen3.5:4b
       - OLLAMA_LLM_FALLBACK=phi3:mini
       # Embeddings — dense vectors via Ollama (GPU/Metal, no Docker model download)
       - OLLAMA_EMBED_MODEL=nomic-embed-text
       - OLLAMA_EMBED_DIM=768
-      # Reranker — cross-encoder, CPU-local (no Ollama reranker API in Haystack)
-      - RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+      # Reranker — Infinity server (GPU/CPU via ONNX, decoupled from app process)
+      - INFINITY_URL=http://infinity:7997
+      - INFINITY_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
       # RAG Pipeline Configuration
       - RAG_RETRIEVER_TOP_K=50
       - RAG_RERANKER_TOP_K=10
       - RAG_DEFAULT_TOP_K=5
+      # Domain router — rag-service reads RAG_DOMAIN_ROUTER_MODEL (field: rag_domain_router_model)
+      - RAG_DOMAIN_ROUTER_MODEL=${DEFAULT_DOMAIN_CLASSIFIER_MODEL:-MoritzLaurer/deberta-v3-base-zeroshot-v1.1-all-33}
       # Document Service (for sample dataset record creation)
       - DOCUMENT_SERVICE_URL=http://document-service:8081
       - ANALYTICS_SERVICE_URL=http://analytics-service:8001
@@ -85,88 +101,169 @@ services:
       - LANGFUSE_HOST=http://langfuse-web:3000
       - LANGFUSE_PUBLIC_KEY=lf_pk_1234567890
       - LANGFUSE_SECRET_KEY=lf_sk_1234567890
-      # Database (via PgBouncer, non-superuser docintel_app for RLS enforcement)
-      - POSTGRES_URL=postgresql://docintel_app:docintel_app_secret@pgbouncer:5432/docintel
+      # Disable Haystack's outbound telemetry ping (also avoids ~/.config write at startup)
+      - HAYSTACK_TELEMETRY_ENABLED=false
+      - POSTGRES_URL=postgresql://docintel_app:docintel_app_secret@postgres:5432/docintel
     depends_on:
       qdrant:
         condition: service_healthy
-      pgbouncer:
+      postgres:
+        condition: service_healthy
+      infinity:
         condition: service_started
-    volumes:
-      - huggingface-cache:/root/.cache/huggingface
     networks:
       - docintel-network
     # Allow container to reach host's Ollama (works on macOS by default, needed for Linux)
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    profiles: ["app"]
     deploy:
       resources:
         reservations:
           memory: 4G
 
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: services/ingestion-service/Dockerfile
+    environment:
+      - MINIO_URL=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - QDRANT_URL=http://qdrant:6333
+      # Ollama runs natively on host
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+      - DATABASE_URL=postgresql://docintel_app:docintel_app_secret@postgres:5432/docintel
+      - DOCUMENT_SERVICE_URL=http://document-service:8081
+      - DOCLING_ARTIFACTS_PATH=/app/docling-cache
+      - DOCLING_DO_OCR=${DOCLING_DO_OCR:-true}
+      - DOCLING_DO_TABLE_STRUCTURE=${DOCLING_DO_TABLE_STRUCTURE:-true}
+      - DOCLING_MAX_WORKERS=${DOCLING_MAX_WORKERS:-2}
+      - HAYSTACK_TELEMETRY_ENABLED=false
+      # DOMAIN_CLASSIFIER_MODEL is consumed by docintel-common inside the container image;
+      # ingestion-service config has no top-level field for it (no extra env var needed here)
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    volumes:
+      - docling-cache:/app/docling-cache
+      - huggingface-cache:/root/.cache/huggingface
+    networks:
+      - docintel-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          memory: 4G
+
+  infinity:
+    # Dev (Apple Silicon / CPU): michaelf34/infinity:0.0.77  + --engine optimum (ONNX Runtime)
+    # Prod (NVIDIA GPU):         michaelf34/infinity:0.0.77-trt-onnx + --engine tensorrt
+    image: ${INFINITY_IMAGE:-michaelf34/infinity:0.0.77}
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    command: >
+      v2
+      --model-id cross-encoder/ms-marco-MiniLM-L-6-v2
+      --port 7997
+      --engine ${INFINITY_ENGINE:-optimum}
+    ports:
+      - "7997:7997"
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+    networks:
+      - docintel-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:7997/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          memory: 1G
+
   analytics-service:
-    build: ./services/analytics-service
+    build: ./services/analytics-service-py
     environment:
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=8123
       - CLICKHOUSE_USER=clickhouse
       - CLICKHOUSE_PASSWORD=clickhouse
       - CLICKHOUSE_DATABASE=docintel_analytics
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001}
     depends_on:
       clickhouse:
         condition: service_healthy
     networks:
       - docintel-network
-    profiles: ["app"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   admin-service:
     build: ./services/admin-service
     environment:
       - SPRING_PROFILES_ACTIVE=docker
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://pgbouncer:5432/docintel
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel?user=docintel_app&password=docintel_app_secret
       - SPRING_DATASOURCE_USERNAME=docintel_app
       - SPRING_DATASOURCE_PASSWORD=docintel_app_secret
+      # DDL user (schema owner) — used by Flyway to create the schema history table
+      - FLYWAY_DDL_USERNAME=docintel
+      - FLYWAY_DDL_PASSWORD=docintel_secret
       - QDRANT_URL=http://qdrant:6333
       - REDIS_URL=redis://redis:6379
-      - AUTHENTIK_URL=http://authentik-server:9000
-      - AUTHENTIK_TOKEN=${AUTHENTIK_TOKEN:-}
+      - ZITADEL_URL=http://zitadel-api:8080
+      - ZITADEL_SERVICE_ACCOUNT_PAT=${ZITADEL_SERVICE_ACCOUNT_PAT:-}
+      - ZITADEL_PROJECT_ID=${ZITADEL_PROJECT_ID:-}
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
     depends_on:
-      - postgres
-      - pgbouncer
-      - qdrant
-      - redis
-      - minio
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     networks:
       - docintel-network
-    profiles: ["app"]
 
-  # Web UI - SvelteKit chat interface
+  # Web UI - Static SPA served by nginx
   web-ui:
     build: ./services/web-ui
     ports:
       - "3001:3001"
     environment:
+      # Runtime env vars injected into /env-config.js by docker-entrypoint.sh
       - PUBLIC_API_URL=http://localhost:8080
-      - PUBLIC_APP_NAME=DocIntel
-      - NODE_ENV=production
-      - PORT=3001
-      # Auth configuration (set PUBLIC_AUTH_ENABLED=true to require login)
-      - PUBLIC_AUTH_ENABLED=${PUBLIC_AUTH_ENABLED:-false}
-      - PUBLIC_AUTHENTIK_ISSUER=http://localhost:9090/application/o/docintel
-      - PUBLIC_AUTHENTIK_CLIENT_ID=docintel
+      - PUBLIC_ZITADEL_ISSUER=http://localhost:9090
+      - PUBLIC_ZITADEL_CLIENT_ID=${ZITADEL_CLIENT_ID:-}
     depends_on:
-      - api-gateway
+      api-gateway:
+        condition: service_started
     networks:
       - docintel-network
-    profiles: ["app"]
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 64M
 
   # ============================================================================
   # Policy Engine (OPA — Open Policy Agent)
@@ -174,7 +271,7 @@ services:
   # Internal only — not exposed on host; only api-gateway reaches it
   opa:
     image: openpolicyagent/opa:0.70.0-static
-    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-level=info", "/policies"]
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-level=info", "--watch", "/policies"]
     volumes:
       - ./config/opa/policies:/policies:ro
     networks:
@@ -185,26 +282,14 @@ services:
           memory: 64M
 
   # ============================================================================
-  # Connection Pooler (PgBouncer — transaction pool mode for RLS compatibility)
+  # Connection Pooler — PgBouncer removed
   # ============================================================================
-  pgbouncer:
-    image: edoburu/pgbouncer:v1.25.1-p0
-    environment:
-      # Connect to PostgreSQL as docintel_app (non-superuser, RLS enforced)
-      DATABASE_URL: "postgres://docintel_app:docintel_app_secret@postgres:5432/docintel"
-      POOL_MODE: transaction
-      MAX_CLIENT_CONN: 200
-      DEFAULT_POOL_SIZE: 20
-      SERVER_RESET_QUERY: ""
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - docintel-network
-    deploy:
-      resources:
-        limits:
-          memory: 32M
+  # PgBouncer in transaction-pool mode is incompatible with session-level SET
+  # statements used for PostgreSQL RLS (app.current_tenant / app.user_role).
+  # All services connect directly to PostgreSQL via HikariCP (Kotlin) or
+  # SQLAlchemy (Python), which provide adequate connection pooling for current
+  # scale. Re-introduce PgBouncer in session-pool mode or upgrade to
+  # Supavisor/pgcat when horizontal scaling demands it.
 
   # ============================================================================
   # Data Layer (pinned versions - never use :latest)
@@ -438,74 +523,246 @@ services:
       - docintel-network
 
   # ============================================================================
-  # Identity Provider (Authentik - MIT License)
+  # Identity Provider (Zitadel - AGPL v3.0, self-hosted, no modification)
   # ============================================================================
-  # Admin UI: http://localhost:9090/if/admin/
-  # Uses shared postgres (authentik database) and redis
-  # First-time setup: ./scripts/setup-authentik.sh
-  
-  authentik-server:
-    image: ghcr.io/goauthentik/server:2025.12.1
-    command: server
-    environment: &authentik-env
-      # Uses shared postgres with separate 'authentik' database
-      AUTHENTIK_POSTGRESQL__HOST: postgres
-      AUTHENTIK_POSTGRESQL__USER: docintel
-      AUTHENTIK_POSTGRESQL__NAME: authentik
-      AUTHENTIK_POSTGRESQL__PASSWORD: docintel_secret
-      # Uses shared redis (separate DB index)
-      AUTHENTIK_REDIS__HOST: redis
-      AUTHENTIK_REDIS__PORT: 6379
-      AUTHENTIK_REDIS__PASSWORD: redissecret
-      AUTHENTIK_REDIS__DB: 1
-      # Security
-      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-docintel-authentik-secret-change-in-prod}
-      # Bootstrap admin credentials (created on first run)
-      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}
-      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_ADMIN_EMAIL:-admin@docintel.local}
-      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-docintel-api-token-change-in-prod}
-      # Disable outbound requests for privacy
-      AUTHENTIK_DISABLE_UPDATE_CHECK: "true"
-      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
-      AUTHENTIK_AVATARS: "none"
-    volumes:
-      - ./config/authentik/blueprints:/blueprints/custom:ro
-      - ./config/authentik/media:/web/dist/custom:ro
+  # Zitadel UI:  http://localhost:9090
+  # First-time setup: ./scripts/setup-zitadel.sh (called by start.sh)
+  #
+  # Three-container setup (mirrors official Zitadel deploy/compose):
+  #   zitadel-proxy  — Traefik routes /ui/v2/login* → zitadel-login, rest → zitadel-api
+  #   zitadel-api    — Go binary: OIDC/OAuth2 server + management REST API
+  #   zitadel-login  — Next.js login UI (Login v2)
+
+  zitadel-proxy:
+    image: traefik:v3.6.8
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=docintel-network
+      - --entrypoints.web.address=:80
+      - --ping=true
+      - --ping.entrypoint=web
     ports:
-      - "9090:9000"   # Authentik HTTP (9000 used by MinIO)
-      - "9443:9443"   # Authentik HTTPS
+      - "9090:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
-      postgres:
+      zitadel-api:
         condition: service_healthy
-      redis:
+      zitadel-login:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - docintel-network
-    profiles: ["auth"]
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 64M
 
-  authentik-worker:
-    image: ghcr.io/goauthentik/server:2025.12.1
-    command: worker
+  zitadel-api:
+    image: ghcr.io/zitadel/zitadel:v4.12.1
+    command: start-from-init --masterkey "${ZITADEL_MASTERKEY:-MasterkeyNeedsToHave32Characters}"
     environment:
-      <<: *authentik-env
+      ZITADEL_EXTERNALDOMAIN: localhost
+      ZITADEL_EXTERNALPORT: "9090"
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_TLS_ENABLED: "false"
+
+      ZITADEL_DATABASE_POSTGRES_HOST: postgres
+      ZITADEL_DATABASE_POSTGRES_PORT: 5432
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: docintel
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: docintel_secret
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel_app
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${ZITADEL_DB_PASSWORD:-zitadel_app_secret}
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+
+      # Bootstrap: admin machine account + PAT (for setup-zitadel.sh)
+      # Machine user is created with IAM_OWNER role on first init; PAT is written to file.
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: docintel-setup
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: DocIntel Setup Account
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+      ZITADEL_FIRSTINSTANCE_PATPATH: /zitadel/bootstrap/admin.pat
+      # Zitadel admin UI human account (for console access at localhost:9090)
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: DocIntel
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: ${ZITADEL_ADMIN_USERNAME:-zitadel-admin}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ZITADEL_ADMIN_PASSWORD:-DocIntel@zitadel2024!}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
+      ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /zitadel/bootstrap/login-client.pat
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Login Client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+
+      # Login v2 (required for zitadel-login Next.js UI)
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "true"
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_BASEURI: http://localhost:9090/ui/v2/login/
+      ZITADEL_OIDC_DEFAULTLOGINURLV2: http://localhost:9090/ui/v2/login/login?authRequest=
+      ZITADEL_OIDC_DEFAULTLOGOUTURLV2: http://localhost:9090/ui/v2/login/logout?post_logout_redirect=
+
+      ZITADEL_LOGSTORE_ACCESS_STDOUT_ENABLED: "true"
+      ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE: "none"
     volumes:
-      - ./config/authentik/blueprints:/blueprints/custom:ro
+      - ./config/zitadel/bootstrap:/zitadel/bootstrap:rw
+    healthcheck:
+      test: ["CMD", "/app/zitadel", "ready"]
+      interval: 10s
+      timeout: 30s
+      retries: 12
+      start_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     networks:
       - docintel-network
-    profiles: ["auth"]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=docintel-network
+      - traefik.http.services.zitadel-api.loadbalancer.server.port=8080
+      - traefik.http.services.zitadel-api.loadbalancer.server.scheme=h2c
+      - "traefik.http.routers.zitadel-api.rule=Host(`localhost`) && !PathPrefix(`/ui/v2/login`) && !Path(`/`)"
+      - traefik.http.routers.zitadel-api.entrypoints=web
+      - traefik.http.routers.zitadel-api.service=zitadel-api
+      - traefik.http.routers.zitadel-api.priority=100
     deploy:
       resources:
         limits:
           memory: 512M
+
+  zitadel-login:
+    image: ghcr.io/zitadel/zitadel-login:v4.12.1
+    environment:
+      ZITADEL_API_URL: http://zitadel-api:8080
+      NEXT_PUBLIC_BASE_PATH: /ui/v2/login
+      ZITADEL_SERVICE_USER_TOKEN_FILE: /zitadel/bootstrap/login-client.pat
+      CUSTOM_REQUEST_HEADERS: "Host:localhost,X-Forwarded-Proto:http"
+      LOGIN_OTEL_SERVICE_NAME: zitadel-login
+      LOGIN_OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      LOGIN_OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    volumes:
+      - ./config/zitadel/bootstrap:/zitadel/bootstrap:ro
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "node /app/healthcheck.mjs http://localhost:3000/ui/v2/login/healthy"]
+      interval: 10s
+      timeout: 30s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      zitadel-api:
+        condition: service_healthy
+    networks:
+      - docintel-network
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=docintel-network
+      - traefik.http.services.zitadel-login.loadbalancer.server.port=3000
+      - traefik.http.middlewares.zitadel-root-rewrite.replacepath.path=/ui/v2/login/
+      - "traefik.http.routers.zitadel-root.rule=Host(`localhost`) && Path(`/`)"
+      - traefik.http.routers.zitadel-root.entrypoints=web
+      - traefik.http.routers.zitadel-root.middlewares=zitadel-root-rewrite
+      - traefik.http.routers.zitadel-root.service=zitadel-login
+      - traefik.http.routers.zitadel-root.priority=400
+      - "traefik.http.routers.zitadel-login.rule=Host(`localhost`) && PathPrefix(`/ui/v2/login`)"
+      - traefik.http.routers.zitadel-login.entrypoints=web
+      - traefik.http.routers.zitadel-login.service=zitadel-login
+      - traefik.http.routers.zitadel-login.priority=250
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ============================================================================
+  # Observability — Exporters (expose infra metrics to Prometheus)
+  # ============================================================================
+  # Redis has no native Prometheus endpoint — needs a sidecar exporter
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0-alpine
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+      - REDIS_PASSWORD=redissecret
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+
+  # PostgreSQL has no native Prometheus endpoint — needs a sidecar exporter
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    environment:
+      - DATA_SOURCE_NAME=postgresql://docintel:docintel_secret@postgres:5432/docintel?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+
+  # ============================================================================
+  # Observability — Prometheus (scraper) + Grafana (dashboards)
+  # ============================================================================
+  # Flow: services expose /metrics → Prometheus scrapes every 15s → Grafana queries Prometheus
+  # Grafana UI:    http://localhost:3002  (admin / admin)
+  # Prometheus UI: http://localhost:9091  (raw PromQL — for debugging only)
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./config/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    networks:
+      - docintel-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9090/-/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/00-overview.json
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks:
+      - docintel-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
 networks:
   docintel-network:
@@ -519,3 +776,6 @@ volumes:
   clickhouse-data:
   clickhouse-logs:
   huggingface-cache:
+  docling-cache:
+  prometheus-data:
+  grafana-data:

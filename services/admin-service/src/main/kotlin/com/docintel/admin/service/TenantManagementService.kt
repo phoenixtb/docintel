@@ -9,7 +9,7 @@ import org.springframework.transaction.annotation.Transactional
 @Service
 class TenantManagementService(
     private val jdbcTemplate: JdbcTemplate,
-    private val authentikService: AuthentikService,
+    private val zitadelService: ZitadelService,
     private val cacheService: CacheService,
     private val provisioningService: ProvisioningService,
 ) {
@@ -24,12 +24,15 @@ class TenantManagementService(
             """.trimIndent(),
             req.id, req.name, req.quotaDocuments, req.quotaQueriesPerDay
         )
-        authentikService.createTenantGroup(req.id, "tenant_user")
+        zitadelService.createTenantGroups(req.id)
         // Provision per-tenant Qdrant collection and MinIO bucket
         provisioningService.createQdrantCollection(req.id)
         provisioningService.createMinioBucket(req.id)
         log.info("Created tenant ${req.id}")
-        return TenantSummary(tenantId = req.id, name = req.name, documentCount = 0, queryCount = 0)
+        return TenantSummary(
+            tenantId = req.id, name = req.name, documentCount = 0, queryCount = 0,
+            quotaDocuments = req.quotaDocuments, quotaQueriesPerDay = req.quotaQueriesPerDay
+        )
     }
 
     @Transactional
@@ -63,7 +66,7 @@ class TenantManagementService(
         val affected = jdbcTemplate.update("DELETE FROM tenants WHERE id = ?", tenantId)
 
         cacheService.clearTenantCache(tenantId)
-        authentikService.deleteTenantGroup(tenantId)
+        zitadelService.deleteTenantGroup(tenantId)
         // Deprovision per-tenant Qdrant collection and MinIO bucket
         provisioningService.deleteQdrantCollection(tenantId)
         provisioningService.deleteMinioBucket(tenantId)
@@ -73,13 +76,13 @@ class TenantManagementService(
     }
 
     fun getTenantUsers(tenantId: String): List<TenantUser> {
-        return authentikService.getUsersByTenant(tenantId)
+        return zitadelService.getUsersByTenant(tenantId)
     }
 
     fun updateUserRole(tenantId: String, userId: String, req: UpdateUserRoleRequest): Boolean {
         val allowedRoles = setOf("platform_admin", "tenant_admin", "tenant_user")
         if (req.role !in allowedRoles) return false
-        authentikService.updateUserRole(userId, tenantId, req.role)
+        zitadelService.updateUserRole(userId, tenantId, req.role)
         return true
     }
 
@@ -87,7 +90,7 @@ class TenantManagementService(
         return try {
             jdbcTemplate.queryForObject(
                 """
-                SELECT t.id, t.name,
+                SELECT t.id, t.name, t.quota_documents, t.quota_queries_per_day,
                        COALESCE(d.doc_count, 0) as doc_count,
                        COALESCE(q.query_count, 0) as query_count
                 FROM tenants t
@@ -95,7 +98,14 @@ class TenantManagementService(
                 LEFT JOIN (SELECT tenant_id, COUNT(*) as query_count FROM query_log GROUP BY tenant_id) q ON t.id = q.tenant_id
                 WHERE t.id = ?
                 """.trimIndent(),
-                { rs, _ -> TenantSummary(rs.getString("id"), rs.getString("name"), rs.getInt("doc_count"), rs.getLong("query_count")) },
+                { rs, _ -> TenantSummary(
+                    tenantId = rs.getString("id"),
+                    name = rs.getString("name"),
+                    documentCount = rs.getInt("doc_count"),
+                    queryCount = rs.getLong("query_count"),
+                    quotaDocuments = rs.getInt("quota_documents"),
+                    quotaQueriesPerDay = rs.getInt("quota_queries_per_day")
+                ) },
                 tenantId
             )
         } catch (e: Exception) {

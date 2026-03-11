@@ -14,9 +14,10 @@ Endpoints:
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import Settings, get_settings
@@ -45,10 +46,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -109,22 +114,41 @@ async def ingest_feedback_event(event: FeedbackEvent):
 # Analytics
 # =============================================================================
 
+def _resolve_tenant(request: Request, query_tenant_id: str | None) -> str | None:
+    """
+    Resolve tenant_id from the trusted X-Tenant-Id header (set by the gateway).
+    Falls back to the query parameter only if the header is absent (e.g. direct
+    internal calls from rag-service / admin-service that set tenant_id in the body).
+    Never trusts raw query strings from untrusted clients.
+    """
+    header_tenant = request.headers.get("X-Tenant-Id")
+    if header_tenant and header_tenant not in ("", "default"):
+        return header_tenant
+    return query_tenant_id
+
+
 @app.get("/analytics/feedback/summary")
-async def feedback_summary(tenant_id: str | None = None):
-    """Aggregate like/dislike counts. Useful for admin dashboards."""
+async def feedback_summary(
+    request: Request,
+    tenant_id: str | None = None,
+):
+    """Aggregate like/dislike counts. Tenant scoped via X-Tenant-Id header."""
+    effective_tenant = _resolve_tenant(request, tenant_id)
     settings = _settings()
     db = settings.clickhouse_database
-    where = f"WHERE tenant_id = '{tenant_id}'" if tenant_id else ""
     try:
         client = get_client(settings)
-        result = client.query(f"""
-            SELECT
-                countIf(liked = true)  AS liked,
-                countIf(liked = false) AS disliked,
-                count()                AS total
-            FROM {db}.feedback_events
-            {where}
-        """)
+        if effective_tenant:
+            result = client.query(
+                f"SELECT countIf(liked = true), countIf(liked = false), count()"
+                f" FROM {db}.feedback_events WHERE tenant_id = {{tenant_id:String}}",
+                parameters={"tenant_id": effective_tenant},
+            )
+        else:
+            result = client.query(
+                f"SELECT countIf(liked = true), countIf(liked = false), count()"
+                f" FROM {db}.feedback_events"
+            )
         row = result.first_row
         return {"liked": row[0], "disliked": row[1], "total": row[2]}
     except Exception as e:
@@ -133,21 +157,27 @@ async def feedback_summary(tenant_id: str | None = None):
 
 
 @app.get("/analytics/queries/summary")
-async def queries_summary(tenant_id: str | None = None):
+async def queries_summary(
+    request: Request,
+    tenant_id: str | None = None,
+):
     """Aggregate query stats: avg latency, cache hit rate, query count."""
+    effective_tenant = _resolve_tenant(request, tenant_id)
     settings = _settings()
     db = settings.clickhouse_database
-    where = f"WHERE tenant_id = '{tenant_id}'" if tenant_id else ""
     try:
         client = get_client(settings)
-        result = client.query(f"""
-            SELECT
-                count()                       AS total_queries,
-                avg(latency_ms)               AS avg_latency_ms,
-                countIf(cache_hit) / count()  AS cache_hit_rate
-            FROM {db}.query_events
-            {where}
-        """)
+        if effective_tenant:
+            result = client.query(
+                f"SELECT count(), avg(latency_ms), countIf(cache_hit) / count()"
+                f" FROM {db}.query_events WHERE tenant_id = {{tenant_id:String}}",
+                parameters={"tenant_id": effective_tenant},
+            )
+        else:
+            result = client.query(
+                f"SELECT count(), avg(latency_ms), countIf(cache_hit) / count()"
+                f" FROM {db}.query_events"
+            )
         row = result.first_row
         return {
             "total_queries": row[0],

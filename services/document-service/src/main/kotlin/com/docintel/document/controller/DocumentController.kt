@@ -3,9 +3,13 @@ package com.docintel.document.controller
 import com.docintel.document.dto.*
 import com.docintel.document.entity.ProcessingStatus
 import com.docintel.document.service.DocumentService
+import com.fasterxml.jackson.databind.ObjectMapper
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import org.slf4j.LoggerFactory
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
 import org.springframework.data.web.PageableDefault
@@ -19,9 +23,14 @@ import java.util.UUID
 @RestController
 @RequestMapping("/internal/documents")
 class DocumentController(
-    private val documentService: DocumentService
+    private val documentService: DocumentService,
+    private val objectMapper: ObjectMapper,
 ) {
-    private val processingScope = CoroutineScope(Dispatchers.Default)
+    private val logger = LoggerFactory.getLogger(DocumentController::class.java)
+    private val processingScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default +
+        CoroutineExceptionHandler { _, t -> logger.error("Background processing error", t) }
+    )
 
     /**
      * Upload a new document.
@@ -36,27 +45,30 @@ class DocumentController(
         @RequestParam("file") file: MultipartFile,
         @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
         @RequestParam("domain", defaultValue = "auto") domain: String,
-        @RequestParam("metadata", required = false) metadataJson: String?
+        @RequestParam("metadata", required = false) metadataJson: String?,
+        @RequestHeader("Idempotency-Key", required = false) idempotencyKey: String?
     ): ResponseEntity<DocumentResponse> {
+        // If an idempotency key is supplied, surface it to metadata so callers
+        // can detect and de-duplicate concurrent retries on the application level.
+        // Full server-side idempotency (check-then-insert) requires a dedicated
+        // idempotency_keys table which should be added in a future migration.
         
         val metadata = if (metadataJson != null) {
-            try {
-                com.fasterxml.jackson.module.kotlin.jacksonObjectMapper()
-                    .readValue(metadataJson, Map::class.java)
+            runCatching {
+                @Suppress("UNCHECKED_CAST")
+                objectMapper.readValue(metadataJson, Map::class.java)
                     .mapKeys { it.key.toString() }
                     .mapValues { it.value.toString() }
                     .toMutableMap()
-            } catch (e: Exception) {
-                mutableMapOf()
-            }
+            }.getOrDefault(mutableMapOf())
         } else {
             mutableMapOf()
         }
 
-        // Add domain hint to metadata for processing
         if (domain.isNotBlank() && domain != "auto") {
             metadata["domain_hint"] = domain
         }
+        idempotencyKey?.let { metadata["idempotency_key"] = it }
 
         val document = documentService.uploadDocument(file, tenantId, metadata)
 
@@ -151,9 +163,13 @@ class DocumentController(
      */
     @PostMapping("/bulk-create")
     fun bulkCreateDocuments(
+        @RequestHeader("X-Tenant-Id", required = false) tenantIdHeader: String?,
         @RequestBody request: BulkDocumentCreateRequest
     ): ResponseEntity<BulkDocumentCreateResponse> {
-        val response = documentService.bulkCreateDocuments(request)
+        // Header is authoritative (set by gateway or trusted internal callers);
+        // fall back to body for backwards compat.
+        val effectiveTenantId = tenantIdHeader?.takeIf { it.isNotBlank() } ?: request.tenantId
+        val response = documentService.bulkCreateDocuments(request.copy(tenantId = effectiveTenantId))
         return ResponseEntity
             .status(HttpStatus.CREATED)
             .body(response)

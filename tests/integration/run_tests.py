@@ -6,15 +6,21 @@ Loads query suites from queries.yaml, calls the RAG streaming API for each,
 and writes a structured JSON report + human-readable Markdown summary.
 
 Usage:
-    python run_tests.py                          # use defaults from queries.yaml
-    python run_tests.py --url http://localhost:8000 --rag-path /query/stream
-    python run_tests.py --suite "HR Policies"   # run a single suite
+    python run_tests.py                                   # defaults from queries.yaml (acquires token)
+    python run_tests.py --username betaadmin --password Betaadmin@123   # different tenant
+    python run_tests.py --no-auth --url http://localhost:8000 --rag-path /query/stream  # direct, no auth
+    python run_tests.py --suite "HR Policies"
     python run_tests.py --out reports/my_run.json
-    python run_tests.py --no-cache              # force use_cache=false (default)
+    python run_tests.py --no-cache
+
+Env vars:
+    DOCINTEL_TEST_USER   override username without exposing in shell history
+    DOCINTEL_TEST_PASS   override password
 """
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -26,6 +32,46 @@ import yaml
 SCRIPT_DIR = Path(__file__).parent
 DEFAULT_CONFIG = SCRIPT_DIR / "queries.yaml"
 REPORTS_DIR = SCRIPT_DIR / "reports"
+
+
+# =============================================================================
+# Token acquisition (OIDC Resource Owner Password Credentials grant)
+# =============================================================================
+
+def acquire_token(auth_cfg: dict, username: str | None, password: str | None) -> str | None:
+    """Acquire a Bearer token via ROPC grant. Returns None if auth is skipped."""
+    username = username or os.environ.get("DOCINTEL_TEST_USER") or auth_cfg.get("username", "")
+    password = password or os.environ.get("DOCINTEL_TEST_PASS") or auth_cfg.get("password", "")
+
+    if not username:
+        return None  # auth not configured — caller decides whether to abort
+
+    token_url = auth_cfg["token_url"]
+    client_id = auth_cfg["client_id"]
+    scopes    = auth_cfg.get("scopes", "openid email profile tenant role")
+
+    print(f"Acquiring token for '{username}' from {token_url} …")
+    try:
+        resp = httpx.post(
+            token_url,
+            data={
+                "grant_type": "password",
+                "client_id":  client_id,
+                "username":   username,
+                "password":   password,
+                "scope":      scopes,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        token = resp.json().get("access_token")
+        if not token:
+            raise ValueError(f"No access_token in response: {resp.text[:200]}")
+        print(f"Token acquired (expires_in={resp.json().get('expires_in')}s)\n")
+        return token
+    except Exception as exc:
+        print(f"ERROR: Failed to acquire token — {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 # =============================================================================
@@ -41,6 +87,7 @@ def call_streaming(
     use_reranking: bool,
     use_cache: bool,
     timeout: int,
+    bearer_token: str | None = None,
 ) -> dict:
     """Call the RAG streaming endpoint, collect all SSE events and return a result dict."""
     payload = {
@@ -55,6 +102,8 @@ def call_streaming(
         "Accept": "text/event-stream",
         "X-Tenant-Id": tenant_id,
     }
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
 
     answer = ""
     thinking = ""
@@ -230,6 +279,9 @@ def main() -> int:
     parser.add_argument("--suite", help="Run only this suite name")
     parser.add_argument("--out", help="Output file prefix (no extension); default: reports/TIMESTAMP")
     parser.add_argument("--no-cache", dest="no_cache", action="store_true", help="Force use_cache=false")
+    parser.add_argument("--username", help="OIDC username (overrides config/DOCINTEL_TEST_USER env)")
+    parser.add_argument("--password", help="OIDC password (overrides config/DOCINTEL_TEST_PASS env)")
+    parser.add_argument("--no-auth", dest="no_auth", action="store_true", help="Skip token acquisition (direct RAG service)")
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -247,6 +299,12 @@ def main() -> int:
     use_reranking = run_cfg.get("use_reranking", True)
     timeout   = run_cfg.get("timeout_seconds", 120)
     min_answer_length = run_cfg.get("min_answer_length", 5)
+
+    # Token acquisition — skipped if --no-auth or no auth config present
+    bearer_token: str | None = None
+    auth_cfg = run_cfg.get("auth", {})
+    if not args.no_auth and auth_cfg:
+        bearer_token = acquire_token(auth_cfg, args.username, args.password)
 
     suites = cfg["suites"]
     if args.suite:
@@ -267,6 +325,8 @@ def main() -> int:
             "tenant_id": tenant_id,
             "use_cache": use_cache,
             "use_reranking": use_reranking,
+            "authenticated": bearer_token is not None,
+            "auth_user": (args.username or os.environ.get("DOCINTEL_TEST_USER") or auth_cfg.get("username", "")) if auth_cfg else "",
         },
         "suites": [],
         "summary": {"total": 0, "passed": 0, "failed": 0},
@@ -302,6 +362,7 @@ def main() -> int:
                 use_reranking=use_reranking,
                 use_cache=use_cache,
                 timeout=timeout,
+                bearer_token=bearer_token,
             )
             ev = evaluate(result, expect_kw, min_answer_length=min_answer_length)
 

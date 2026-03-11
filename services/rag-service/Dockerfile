@@ -12,16 +12,24 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy shared lib first (path dep resolved at install time)
+COPY lib/docintel-common/ /app/lib/docintel-common/
+
 # Copy project files
-COPY pyproject.toml README.md ./
-COPY src/ ./src/
+COPY services/rag-service/pyproject.toml services/rag-service/README.md ./
+COPY services/rag-service/src/ ./src/
 
 # Install Python dependencies
 RUN pip install --no-cache-dir pip --upgrade && \
+    pip install --no-cache-dir /app/lib/docintel-common/ && \
     pip install --no-cache-dir .
 
-# Pre-download models (optional, speeds up first request)
-# RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('nomic-ai/nomic-embed-text-v1.5', trust_remote_code=True)"
+# Non-root user for security.
+# -m creates the home directory (/home/appuser) so Haystack telemetry and other
+# libraries that write to ~/.config/ don't fail with PermissionError at startup.
+RUN useradd -r -u 1001 -g root -m appuser
+ENV HOME=/home/appuser
+USER 1001
 
 # Expose port
 EXPOSE 8000

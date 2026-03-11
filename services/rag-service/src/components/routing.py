@@ -8,9 +8,8 @@ Pipeline flow:
   Query → TransformersZeroShotTextRouter → DomainFilterBuilder → SecureRetriever
 """
 
+from docintel_common.domain import DOMAIN_LABELS
 from haystack import component
-
-from ..prompts import DOMAIN_LABELS
 
 
 @component

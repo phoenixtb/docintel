@@ -29,26 +29,26 @@ NC='\033[0m'
 ACTIONS=(
     "setup"
     "start"
-    "start-no-auth"
     "stop"
     "build"
     "status"
     "logs"
     "cleanup"
+    "cleanup-data"
     "cleanup-all"
     "quit"
 )
 
 LABELS=(
-    "Setup             First-time setup (pull images + models)"
-    "Start             Start all services with authentication"
-    "Start (no auth)   Start services without authentication (dev mode)"
-    "Stop              Stop all services (preserves containers)"
-    "Build             Rebuild services (interactive selector)"
-    "Status            Show running containers and health"
-    "Logs              Follow service logs"
-    "Cleanup           Stop and remove containers"
-    "Cleanup (full)    Remove containers, volumes, and models"
+    "Setup              First-time setup (pull images + models)"
+    "Start              Start all services"
+    "Stop               Stop all services (preserves containers)"
+    "Build              Rebuild services (interactive selector)"
+    "Status             Show running containers and health"
+    "Logs               Follow service logs"
+    "Cleanup            Stop and remove containers"
+    "Cleanup (data)     Wipe all data volumes (keeps images + models)"
+    "Cleanup (full)     Remove containers, volumes, and models"
     "Quit"
 )
 
@@ -139,9 +139,6 @@ case "$action" in
     start)
         exec "$SCRIPT_DIR/start.sh"
         ;;
-    start-no-auth)
-        exec "$SCRIPT_DIR/start.sh" --no-auth
-        ;;
     stop)
         exec "$SCRIPT_DIR/stop.sh"
         ;;
@@ -159,6 +156,9 @@ case "$action" in
         ;;
     cleanup)
         exec "$SCRIPT_DIR/cleanup.sh"
+        ;;
+    cleanup-data)
+        exec "$SCRIPT_DIR/cleanup.sh" --data
         ;;
     cleanup-all)
         exec "$SCRIPT_DIR/cleanup.sh" --all

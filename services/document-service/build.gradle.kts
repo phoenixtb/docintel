@@ -4,6 +4,7 @@ plugins {
     kotlin("plugin.jpa") version "1.9.25"
     id("org.springframework.boot") version "3.4.1"
     id("io.spring.dependency-management") version "1.1.7"
+    jacoco
 }
 
 group = "com.docintel"
@@ -31,10 +32,6 @@ dependencies {
     
     // MinIO (S3-compatible storage)
     implementation("io.minio:minio:8.5.14")
-    
-    // Document Processing
-    implementation("org.apache.tika:tika-core:2.9.2")
-    implementation("org.apache.tika:tika-parsers-standard-package:2.9.2")
     
     // Kotlin
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
@@ -81,4 +78,13 @@ allOpen {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    finalizedBy(tasks.jacocoTestReport)
+}
+
+tasks.jacocoTestReport {
+    dependsOn(tasks.test)
+    reports {
+        xml.required = true
+        html.required = true
+    }
 }

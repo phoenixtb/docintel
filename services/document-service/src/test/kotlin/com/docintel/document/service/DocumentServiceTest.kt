@@ -39,10 +39,7 @@ class DocumentServiceTest {
     private lateinit var storageService: StorageService
 
     @MockK
-    private lateinit var textExtractionService: TextExtractionService
-
-    @MockK
-    private lateinit var ragServiceClient: RagServiceClient
+    private lateinit var ingestionServiceClient: IngestionServiceClient
 
     private lateinit var documentService: DocumentService
 
@@ -55,8 +52,7 @@ class DocumentServiceTest {
             documentRepository,
             chunkRepository,
             storageService,
-            textExtractionService,
-            ragServiceClient
+            ingestionServiceClient
         )
     }
 
@@ -195,7 +191,7 @@ class DocumentServiceTest {
         val document = createTestDocument()
         
         every { documentRepository.findByIdAndTenantId(testDocumentId, testTenantId) } returns document
-        coEvery { ragServiceClient.deleteDocumentVectors(testTenantId, testDocumentId) } returns true
+        coEvery { ingestionServiceClient.deleteDocumentVectors(testTenantId, testDocumentId) } returns true
         every { chunkRepository.deleteByDocumentId(testDocumentId) } returns 3L
         every { storageService.deleteDocumentFiles(testTenantId, testDocumentId) } just Runs
         every { documentRepository.delete(document) } just Runs

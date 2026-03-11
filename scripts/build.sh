@@ -21,6 +21,7 @@ SERVICES=(
   "web-ui"
   "api-gateway"
   "document-service"
+  "ingestion-service"
   "rag-service"
   "admin-service"
   "analytics-service"
@@ -30,9 +31,10 @@ DESCRIPTIONS=(
   "SvelteKit chat interface"
   "Spring Cloud Gateway"
   "Document management (Kotlin)"
-  "RAG pipeline (Python/Haystack)"
+  "Docling parse + embed + index (Python)"
+  "RAG query/retrieval (Python/Haystack)"
   "Admin operations (Kotlin)"
-  "Analytics + ClickHouse ingestion (Kotlin)"
+  "Analytics + ClickHouse ingestion (Python)"
 )
 
 # Colors
@@ -53,14 +55,14 @@ if [[ "$1" == "--all" ]]; then
     echo ""
     for i in "${!SERVICES[@]}"; do
         echo -e "${BLUE}[${i+1}/${#SERVICES[@]}]${NC} Building ${BOLD}${SERVICES[$i]}${NC}..."
-        docker compose --profile app build "${SERVICES[$i]}" 2>&1 | tail -1
+        docker compose build "${SERVICES[$i]}"
     done
     echo ""
     echo -e "${GREEN}All services built.${NC}"
     echo ""
     read -p "Restart services? (y/N): " restart
     if [[ "$restart" =~ ^[Yy]$ ]]; then
-        docker compose --profile app up -d
+        docker compose up -d
         echo -e "${GREEN}Services restarted.${NC}"
     fi
     exit 0
@@ -195,7 +197,7 @@ failed=()
 for i in "${!to_build[@]}"; do
     svc="${to_build[$i]}"
     echo -e "${BLUE}[$(($i + 1))/${#to_build[@]}]${NC} Building ${BOLD}${svc}${NC}..."
-    if docker compose --profile app build "$svc" 2>&1 | tail -1; then
+    if docker compose build "$svc"; then
         echo -e "  ${GREEN}Done${NC}"
     else
         echo -e "  ${RED}Failed${NC}"
@@ -216,7 +218,7 @@ if [[ "$restart" =~ ^[Yy]$ ]]; then
     echo ""
     for svc in "${to_build[@]}"; do
         echo -e "Restarting ${BOLD}${svc}${NC}..."
-        docker compose --profile app up -d "$svc" 2>&1 | grep -E "Started|Recreated" || true
+        docker compose up -d "$svc" 2>&1 | grep -E "Started|Recreated" || true
     done
     echo ""
     echo -e "${GREEN}Done.${NC}"

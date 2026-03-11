@@ -10,8 +10,7 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          # Authentik OIDC issuer URI (internal docker network uses port 9000)
-          issuer-uri: ${AUTHENTIK_ISSUER_URI:http://authentik-server:9000/application/o/docintel/}
+          jwk-set-uri: ${ZITADEL_JWK_SET_URI:http://zitadel-api:8080/oauth/v2/keys}
 
   cloud:
     gateway:

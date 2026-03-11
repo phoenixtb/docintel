@@ -6,6 +6,7 @@ All components follow Haystack 2.x @component API.
 from .cache import SemanticCacheChecker, SemanticCacheWriter
 from .embedders import BM25SparseDocumentEmbedder, BM25SparseTextEmbedder
 from .generation import LiteLLMStreamingGenerator
+from .model_resolver import TenantModelResolver
 from .observability import CostTracker
 from .prompt import PromptBuilder
 from .query_transform import QueryExpander
@@ -21,6 +22,8 @@ __all__ = [
     "BM25SparseTextEmbedder",
     # Generation
     "LiteLLMStreamingGenerator",
+    # Model resolution
+    "TenantModelResolver",
     # Observability
     "CostTracker",
     # Prompt

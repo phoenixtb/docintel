@@ -1,0 +1,66 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Start only the infrastructure services (no Ollama — use a mock/stub in tests)
+      - name: Start infrastructure
+        run: |
+          docker compose up -d postgres redis qdrant minio clickhouse
+          # Wait for postgres to be ready
+          docker compose exec -T postgres pg_isready -U docintel -t 30
+
+      - name: Build and start app services
+        env:
+          CORS_ALLOWED_ORIGINS: "http://localhost:3001"
+          ZITADEL_SERVICE_ACCOUNT_PAT: "ci-test-token"
+          ZITADEL_MASTERKEY: "CITestMasterkeyNeeds32Characters"
+        run: |
+          docker compose build --parallel
+          docker compose up -d
+
+      - name: Wait for services
+        run: |
+          for svc in "localhost:8080/health" "localhost:8000/health" "localhost:8081/actuator/health" "localhost:8082/actuator/health"; do
+            echo "Waiting for $svc..."
+            for i in $(seq 1 30); do
+              curl -sf "http://$svc" && break
+              sleep 5
+            done
+          done
+
+      - name: Install test dependencies
+        run: pip install httpx pytest pytest-asyncio
+
+      - name: Run integration tests
+        env:
+          GATEWAY_URL: http://localhost:8080
+          ZITADEL_URL: http://localhost:9090
+        run: |
+          python -m pytest tests/integration/run_tests.py -v --timeout=120
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs --tail=100
+
+      - name: Teardown
+        if: always()
+        run: docker compose down -v

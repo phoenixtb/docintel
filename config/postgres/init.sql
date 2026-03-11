@@ -4,8 +4,8 @@
 -- Create Langfuse database (separate from main app)
 CREATE DATABASE langfuse;
 
--- Create Authentik database (identity provider)
-CREATE DATABASE authentik;
+-- Create Zitadel database (identity provider — Zitadel manages its own schema)
+CREATE DATABASE zitadel;
 
 -- Enable extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -31,6 +31,25 @@ CREATE TABLE tenants (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- =============================================================================
+-- Platform Settings Table
+-- =============================================================================
+-- Key-value store for platform-wide configuration.
+-- llm_model = null (JSON null) means "Tenant Choice" — each tenant uses its own preference.
+-- llm_model = "qwen3.5:4b" overrides all tenants unconditionally.
+CREATE TABLE platform_settings (
+    key        VARCHAR(128) PRIMARY KEY,
+    value      JSONB        NOT NULL DEFAULT 'null',
+    updated_at TIMESTAMPTZ  DEFAULT NOW()
+);
+
+-- Seed: null = "Tenant Choice" (no global override)
+INSERT INTO platform_settings (key, value) VALUES ('llm_model', 'null');
+
+-- platform_settings is not tenant-scoped — only the superuser (docintel) and
+-- admin-service (connecting as docintel_app with platform_admin role) may write it.
+GRANT SELECT, INSERT, UPDATE ON platform_settings TO docintel_app;
 
 -- =============================================================================
 -- Documents Table
@@ -192,25 +211,35 @@ ALTER TABLE query_log     FORCE ROW LEVEL SECURITY;
 -- Messages isolation is via conversation (JOIN), but add direct policy too
 -- For messages we check via the conversations table through the FK
 
--- RLS policies: row is visible only when tenant_id matches the session variable
--- current_setting returns NULL (not empty string) when not set — use coalesce
+-- RLS policies: platform_admin sees all rows; others are scoped to their tenant.
+-- current_setting(..., true) returns NULL when not set — safe for boolean short-circuit.
 CREATE POLICY tenant_isolation_documents ON documents
     AS PERMISSIVE FOR ALL TO docintel_app
-    USING (tenant_id = current_setting('app.current_tenant', true));
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
 
 CREATE POLICY tenant_isolation_chunks ON chunks
     AS PERMISSIVE FOR ALL TO docintel_app
-    USING (tenant_id = current_setting('app.current_tenant', true));
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
 
 CREATE POLICY tenant_isolation_conversations ON conversations
     AS PERMISSIVE FOR ALL TO docintel_app
-    USING (tenant_id = current_setting('app.current_tenant', true));
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
 
 -- Messages don't have tenant_id directly; isolate by JOIN to conversations
 CREATE POLICY tenant_isolation_messages ON messages
     AS PERMISSIVE FOR ALL TO docintel_app
     USING (
-        EXISTS (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR EXISTS (
             SELECT 1 FROM conversations c
             WHERE c.id = messages.conversation_id
               AND c.tenant_id = current_setting('app.current_tenant', true)
@@ -219,7 +248,10 @@ CREATE POLICY tenant_isolation_messages ON messages
 
 CREATE POLICY tenant_isolation_query_log ON query_log
     AS PERMISSIVE FOR ALL TO docintel_app
-    USING (tenant_id = current_setting('app.current_tenant', true));
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
 
 -- tenants table: platform_admin sees all; others see their own tenant row only
 ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
@@ -228,7 +260,7 @@ ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_tenants ON tenants
     AS PERMISSIVE FOR ALL TO docintel_app
     USING (
-        current_setting('app.current_role', true) = 'platform_admin'
+        current_setting('app.user_role', true) = 'platform_admin'
         OR id = current_setting('app.current_tenant', true)
     );
 

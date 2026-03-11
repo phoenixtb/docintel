@@ -8,6 +8,13 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Load model defaults (single source of truth)
+# shellcheck source=../config/defaults.env
+source "$PROJECT_DIR/config/defaults.env"
+
 echo "================================================"
 echo "DocIntel Cleanup"
 echo "================================================"
@@ -15,6 +22,7 @@ echo ""
 
 REMOVE_MODELS=false
 REMOVE_VOLUMES=false
+DATA_ONLY=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -22,6 +30,10 @@ while [[ $# -gt 0 ]]; do
         --all)
             REMOVE_MODELS=true
             REMOVE_VOLUMES=true
+            shift
+            ;;
+        --data)
+            DATA_ONLY=true
             shift
             ;;
         --models)
@@ -36,6 +48,8 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: ./cleanup.sh [OPTIONS]"
             echo ""
             echo "Options:"
+            echo "  --data      Wipe all data volumes only (Qdrant, Postgres, Redis, MinIO)"
+            echo "              Keeps Docker images and Ollama models intact."
             echo "  --all       Remove containers, volumes, AND Ollama models"
             echo "  --models    Remove only Ollama models"
             echo "  --volumes   Remove containers AND Docker volumes (data loss!)"
@@ -58,8 +72,44 @@ done
 
 echo "Stopping and removing Docker containers (all profiles)..."
 # Must specify all profiles to stop all containers
-docker compose --profile app --profile auth down 2>/dev/null || true
+docker compose down 2>/dev/null || true
 echo "Containers removed."
+
+# =============================================================================
+# Wipe Data Volumes Only (--data)
+# =============================================================================
+
+if [ "$DATA_ONLY" = true ]; then
+    echo ""
+    echo "WARNING: This will delete all application data (Qdrant, PostgreSQL, Redis, MinIO, ClickHouse)."
+    echo "Docker images and Ollama models are preserved."
+    read -p "Are you sure? (y/N): " confirm
+
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        echo "Removing data volumes..."
+        for vol in qdrant-data postgres-data redis-data minio-data clickhouse-data clickhouse-logs huggingface-cache docling-cache; do
+            docker volume rm "docintel_${vol}" 2>/dev/null && echo "  removed docintel_${vol}" || echo "  skipped docintel_${vol} (not found)"
+        done
+        echo "Data volumes removed."
+    else
+        echo "Skipped."
+    fi
+
+    echo ""
+    echo "================================================"
+    echo "Cleanup Complete"
+    echo "================================================"
+    echo ""
+    echo "  [x] Docker containers removed"
+    echo "  [x] Data volumes wiped"
+    echo "  [ ] Docker images preserved"
+    echo "  [ ] Ollama models preserved"
+    echo ""
+    echo "Commands:"
+    echo "  ./scripts/start.sh    # Start fresh"
+    echo ""
+    exit 0
+fi
 
 if [ "$REMOVE_VOLUMES" = true ]; then
     echo ""
@@ -68,7 +118,7 @@ if [ "$REMOVE_VOLUMES" = true ]; then
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         echo "Removing Docker volumes..."
-        docker compose --profile app --profile auth down -v 2>/dev/null || true
+        docker compose down -v 2>/dev/null || true
         
         # Also remove any orphaned volumes with docintel prefix
         docker volume ls -q | grep -E "^docintel" | xargs -r docker volume rm 2>/dev/null || true
@@ -98,7 +148,7 @@ if [ "$REMOVE_MODELS" = true ]; then
     echo "This will free up approximately 8-10GB of disk space."
     echo ""
     
-    MODELS=("qwen3:8b" "phi3:mini" "nomic-embed-text")
+    MODELS=("$DEFAULT_LLM_MODEL" "$DEFAULT_FALLBACK_MODEL" "$DEFAULT_EMBED_MODEL")
     
     # Check if Ollama is available
     if ! command -v ollama &> /dev/null; then
@@ -154,6 +204,7 @@ if [ "$REMOVE_MODELS" = false ] && command -v ollama &> /dev/null; then
 fi
 
 echo "Commands:"
-echo "  ./scripts/start.sh    # Start fresh (will recreate containers)"
-echo "  ./scripts/setup.sh    # Re-pull images if needed"
+echo "  ./scripts/start.sh            # Start fresh (will recreate containers)"
+echo "  ./scripts/cleanup.sh --data   # Wipe data only (keeps images + models)"
+echo "  ./scripts/setup.sh            # Re-pull images if needed"
 echo ""

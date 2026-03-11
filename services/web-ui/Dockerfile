@@ -1,35 +1,23 @@
-# Build stage
-FROM node:22-alpine AS builder
+# Build stage — compile SvelteKit static output
+FROM node:22-alpine AS build
 
 WORKDIR /app
 
-# Copy package files
 COPY package.json ./
-
-# Install dependencies (use install instead of ci since no lock file)
 RUN npm install
 
-# Copy source
 COPY . .
-
-# Build the app
 RUN npm run build
 
-# Production stage
-FROM node:22-alpine
+# Production stage — lightweight nginx to serve the static SPA
+FROM nginx:alpine
 
-WORKDIR /app
-
-# Copy built app and production dependencies
-COPY --from=builder /app/build ./build
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/node_modules ./node_modules
-
-# Set environment
-ENV NODE_ENV=production
-ENV PORT=3001
-ENV HOST=0.0.0.0
+COPY --from=build /app/build /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
 EXPOSE 3001
 
-CMD ["node", "build"]
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]

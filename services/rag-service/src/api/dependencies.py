@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Annotated
 
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 from ..config import Settings
 from ..pipelines.query import RAGService
@@ -35,7 +35,7 @@ def get_tracer(request: Request) -> LangfuseTracer:
 
 
 # ---------------------------------------------------------------------------
-# RBAC: extract tenant_id and user_roles from JWT (forwarded by API Gateway)
+# JWT claim extraction
 # ---------------------------------------------------------------------------
 
 def _decode_jwt_payload(token: str) -> dict:
@@ -44,10 +44,8 @@ def _decode_jwt_payload(token: str) -> dict:
         parts = token.split(".")
         if len(parts) != 3:
             return {}
-        # Add padding if needed
         payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        decoded = base64.urlsafe_b64decode(payload)
-        return json.loads(decoded)
+        return json.loads(base64.urlsafe_b64decode(payload))
     except Exception:
         return {}
 
@@ -56,43 +54,55 @@ def extract_jwt_claims(
     authorization: Annotated[str | None, Header()] = None,
     x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-Id")] = None,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
-    x_user_roles: Annotated[str | None, Header(alias="X-User-Roles")] = None,
 ) -> dict:
     """
-    Extract tenant_id, user_id, user_roles from forwarded headers.
+    Extract tenant_id, user_id, user_roles from the forwarded JWT.
 
-    The API Gateway validates the JWT and forwards claims as headers:
-      X-Tenant-Id   → tenant_id
-      X-User-Id     → user_id
-      X-User-Roles  → comma-separated role list (e.g. "tenant_user,tenant_admin")
+    The API Gateway validates the JWT signature and forwards:
+      - The raw Authorization header (for claim extraction)
+      - X-Tenant-Id, X-User-Id, X-User-Role headers (extracted from JWT)
 
-    Falls back to decoding the raw Authorization Bearer token when gateway
-    headers are absent (useful for direct dev calls to the RAG service).
+    Defense-in-depth: reject any request that did not come through the gateway
+    (i.e., has neither a JWT nor the gateway-injected X-User-Id header).
+
+    Authentik claim layout (from docintel-setup.yaml scope mappings):
+      sub        → user UUID
+      tenant_id  → from 'tenant' scope mapping  (top-level claim)
+      role       → from 'role'   scope mapping  (top-level, singular string)
     """
-    claims: dict = {}
+    claims: dict = {"tenant_id": "default", "user_id": None, "user_roles": []}
 
-    # Prefer explicit forwarded headers (set by API Gateway after JWT validation)
-    if x_tenant_id:
-        claims["tenant_id"] = x_tenant_id
+    # Primary: decode the JWT — authoritative source for all identity claims
+    if authorization and authorization.startswith("Bearer "):
+        payload = _decode_jwt_payload(authorization.removeprefix("Bearer "))
+        if payload:
+            tenant_id = payload.get("tenant_id")
+            if not tenant_id:
+                nested = payload.get("tenant", {})
+                tenant_id = nested.get("tenant_id") if isinstance(nested, dict) else None
+            if tenant_id:
+                claims["tenant_id"] = tenant_id
+
+            claims["user_id"] = payload.get("sub")
+
+            role = payload.get("role")
+            if role:
+                claims["user_roles"] = [role] if isinstance(role, str) else list(role)
+
+            return claims
+
+    # Fallback: gateway-forwarded headers (direct service calls in integration tests/dev)
     if x_user_id:
         claims["user_id"] = x_user_id
-    if x_user_roles:
-        claims["user_roles"] = [r.strip() for r in x_user_roles.split(",") if r.strip()]
+        if x_tenant_id:
+            claims["tenant_id"] = x_tenant_id
+        return claims
 
-    # Dev fallback: decode raw JWT if forwarded headers missing
-    if authorization and authorization.startswith("Bearer ") and not claims:
-        payload = _decode_jwt_payload(authorization.removeprefix("Bearer "))
-        claims.setdefault("tenant_id", payload.get("tenant_id", "default"))
-        claims.setdefault("user_id", payload.get("sub"))
-        raw_roles = payload.get("roles", payload.get("realm_access", {}).get("roles", []))
-        claims.setdefault("user_roles", raw_roles if isinstance(raw_roles, list) else [])
-
-    # Ensure defaults
-    claims.setdefault("tenant_id", "default")
-    claims.setdefault("user_id", None)
-    claims.setdefault("user_roles", [])
-
-    return claims
+    # No JWT and no gateway headers — reject. This request bypassed the gateway.
+    raise HTTPException(
+        status_code=403,
+        detail="Missing authentication credentials. All requests must pass through the API Gateway.",
+    )
 
 
 # Type aliases for DI

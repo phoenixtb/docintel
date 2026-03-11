@@ -40,7 +40,7 @@ def _set_rls_on_begin(conn):
     tenant_id = _tenant_ctx.get()
     role = _role_ctx.get()
     conn.execute(text("SET LOCAL app.current_tenant = :tid"), {"tid": tenant_id})
-    conn.execute(text("SET LOCAL app.current_role = :role"), {"role": role})
+    conn.execute(text("SET LOCAL app.user_role = :role"), {"role": role})
 
 
 class Base(DeclarativeBase):

@@ -27,19 +27,26 @@ spring:
           filters:
             - RewritePath=/api/v1/query/stream, /query/stream
 
-        - id: rag-service-classify
-          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+        - id: ingestion-service-ingest
+          uri: ${INGESTION_SERVICE_URL:http://localhost:8001}
           predicates:
-            - Path=/api/v1/classify-domain
+            - Path=/api/v1/ingest, /api/v1/ingest/**
           filters:
-            - RewritePath=/api/v1/classify-domain, /classify-domain
+            - RewritePath=/api/v1/ingest(?<segment>/?.*), /ingest${segment}
 
-        - id: rag-service-sample-datasets
+        - id: ingestion-service-sample-datasets
+          uri: ${INGESTION_SERVICE_URL:http://localhost:8001}
+          predicates:
+            - Path=/api/v1/sample-datasets, /api/v1/sample-datasets/**
+          filters:
+            - RewritePath=/api/v1/sample-datasets(?<segment>/?.*), /ingest/dataset${segment}
+
+        - id: rag-service-conversations
           uri: ${RAG_SERVICE_URL:http://localhost:8000}
           predicates:
-            - Path=/api/v1/sample-datasets/**
+            - Path=/api/v1/conversations, /api/v1/conversations/**
           filters:
-            - RewritePath=/api/v1/sample-datasets(?<segment>.*), /sample-datasets${segment}
+            - RewritePath=/api/v1/conversations(?<segment>/?.*), /conversations${segment}
 
         - id: rag-service-vector-stats
           uri: ${RAG_SERVICE_URL:http://localhost:8000}
@@ -76,22 +83,12 @@ spring:
           filters:
             - RewritePath=/api/v1/tenants(?<segment>/?.*), /internal/tenants${segment}
 
-      # Global CORS configuration
-      globalcors:
-        cors-configurations:
-          '[/**]':
-            allowed-origins: "*"
-            allowed-methods:
-              - GET
-              - POST
-              - PUT
-              - DELETE
-              - OPTIONS
-            allowed-headers: "*"
-            exposed-headers:
-              - X-RateLimit-Limit
-              - X-RateLimit-Remaining
-              - Retry-After
+
+docintel:
+  cors:
+    allowed-origins: "${CORS_ALLOWED_ORIGINS:http://localhost:3001}"
+  opa:
+    url: "${OPA_URL:http://opa:8181}"
 
 server:
   port: 8080
@@ -108,6 +105,20 @@ management:
   health:
     redis:
       enabled: false
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      opa:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        register-health-indicator: true
+        record-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+          - org.springframework.web.reactive.function.client.WebClientRequestException
 
 # Logging
 logging:

@@ -18,8 +18,7 @@ echo "================================================"
 echo ""
 echo "Stopping all containers (keeping them for fast restart)..."
 
-# Stop all containers from all profiles
-docker compose --profile app --profile auth stop
+docker compose stop
 
 echo ""
 echo "Done! All containers stopped."

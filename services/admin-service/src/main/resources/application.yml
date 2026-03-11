@@ -8,13 +8,8 @@ spring:
     password: ${SPRING_DATASOURCE_PASSWORD:docint_secret}
     driver-class-name: org.postgresql.Driver
 
-  jpa:
-    hibernate:
-      ddl-auto: update
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.PostgreSQLDialect
-    open-in-view: false
+  flyway:
+    enabled: false  # Managed programmatically in TenantDataSourceConfig
 
   data:
     redis:
@@ -29,10 +24,6 @@ qdrant:
   url: ${QDRANT_URL:http://localhost:6333}
   embedding-dim: 768
 
-# Redis Configuration
-redis:
-  host: ${REDIS_HOST:localhost}
-  port: ${REDIS_PORT:6379}
 
 # Actuator Configuration
 management:
@@ -47,10 +38,11 @@ management:
     redis:
       enabled: false
 
-# Authentik API for tenant/user management
-authentik:
-  url: ${AUTHENTIK_URL:http://localhost:9090}
-  token: ${AUTHENTIK_TOKEN:}
+# Zitadel API for tenant/user management (AGPL v3.0 — self-hosted)
+zitadel:
+  url: ${ZITADEL_URL:http://localhost:9090}
+  pat: ${ZITADEL_SERVICE_ACCOUNT_PAT:}
+  project-id: ${ZITADEL_PROJECT_ID:}
 
 # MinIO configuration for per-tenant bucket provisioning
 minio:

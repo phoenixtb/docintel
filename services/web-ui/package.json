@@ -13,9 +13,7 @@
     "test:headed": "playwright test --headed"
   },
   "dependencies": {
-    "@ai-sdk/svelte": "^1.0.0",
     "@types/dompurify": "^3.0.5",
-    "ai": "^4.0.0",
     "dompurify": "^3.3.1",
     "marked": "^17.0.3",
     "oidc-client-ts": "^3.4.1",
@@ -23,7 +21,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.42.0",
-    "@sveltejs/adapter-node": "^5.0.0",
+    "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
     "autoprefixer": "^10.4.0",

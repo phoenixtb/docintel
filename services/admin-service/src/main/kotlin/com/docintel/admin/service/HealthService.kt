@@ -4,6 +4,7 @@ import com.docintel.admin.dto.ComponentHealth
 import com.docintel.admin.dto.HealthStatus
 import com.docintel.admin.dto.SystemHealth
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.data.redis.core.StringRedisTemplate
 import org.springframework.stereotype.Service
 import java.net.HttpURLConnection
 import java.net.URI
@@ -12,15 +13,10 @@ import javax.sql.DataSource
 @Service
 class HealthService(
     private val dataSource: DataSource,
-    
+    private val redisTemplate: StringRedisTemplate,
+
     @Value("\${qdrant.url:http://localhost:6333}")
     private val qdrantUrl: String,
-    
-    @Value("\${redis.host:localhost}")
-    private val redisHost: String,
-    
-    @Value("\${redis.port:6379}")
-    private val redisPort: Int
 ) {
     fun checkSystemHealth(): SystemHealth {
         val components = mutableMapOf<String, ComponentHealth>()
@@ -111,26 +107,13 @@ class HealthService(
     }
 
     private fun checkRedis(): ComponentHealth {
-        // Simplified Redis check - in production use RedisTemplate
         return try {
             val start = System.currentTimeMillis()
-            java.net.Socket(redisHost, redisPort).use { socket ->
-                socket.getOutputStream().write("PING\r\n".toByteArray())
-                val response = ByteArray(7)
-                socket.getInputStream().read(response)
-            }
+            redisTemplate.execute { conn -> conn.ping() }
             val latency = System.currentTimeMillis() - start
-            ComponentHealth(
-                name = "Redis",
-                status = HealthStatus.UP,
-                latencyMs = latency
-            )
+            ComponentHealth(name = "Redis", status = HealthStatus.UP, latencyMs = latency)
         } catch (e: Exception) {
-            ComponentHealth(
-                name = "Redis",
-                status = HealthStatus.DOWN,
-                message = e.message
-            )
+            ComponentHealth(name = "Redis", status = HealthStatus.DOWN, message = e.message)
         }
     }
 }

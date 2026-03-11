@@ -5,36 +5,29 @@ import java.sql.Connection
 import javax.sql.DataSource
 
 /**
- * DataSource wrapper that enforces PostgreSQL RLS by setting the session variable
- * app.current_tenant at the start of each transaction.
+ * DataSource wrapper that enforces PostgreSQL RLS by setting tenant session variables
+ * at connection acquisition time (not at transaction start).
  *
- * Works with PgBouncer in transaction pool mode because SET LOCAL applies only
- * for the duration of the current transaction — the variable is automatically
- * cleared when the transaction ends and the connection is returned to the pool.
+ * Why SET (session-level) at getConnection() instead of SET LOCAL in setAutoCommit():
+ *   - Hibernate 6.x uses lazy connection acquisition — by the time setAutoCommit(false)
+ *     fires the JDBC transaction may already be past the point where SET LOCAL would bind.
+ *   - HikariCP always calls our getConnection() wrapper before handing out a connection,
+ *     so the variable is always refreshed for the current request/tenant context.
+ *   - SET (session-level) is safe because every connection checkout overwrites the value
+ *     with the correct tenant from TenantContextHolder.
  */
 class TenantAwareDataSource(delegate: DataSource) : DelegatingDataSource(delegate) {
 
-    override fun getConnection(): Connection = TenantConnection(super.getConnection())
+    override fun getConnection(): Connection =
+        super.getConnection().also { applyTenantContext(it) }
 
     override fun getConnection(username: String, password: String): Connection =
-        TenantConnection(super.getConnection(username, password))
-}
+        super.getConnection(username, password).also { applyTenantContext(it) }
 
-/**
- * Connection wrapper that injects SET LOCAL app.current_tenant when a transaction starts
- * (i.e., when setAutoCommit(false) is called by Spring's transaction manager).
- */
-class TenantConnection(private val delegate: Connection) : Connection by delegate {
-
-    override fun setAutoCommit(autoCommit: Boolean) {
-        delegate.setAutoCommit(autoCommit)
-        if (!autoCommit) {
-            val tenant = TenantContextHolder.getTenantId().replace("'", "''")
-            val role   = TenantContextHolder.getUserRole().replace("'", "''")
-            delegate.createStatement().use { stmt ->
-                stmt.execute("SET LOCAL app.current_tenant = '$tenant'")
-                stmt.execute("SET LOCAL app.current_role = '$role'")
-            }
-        }
+    private fun applyTenantContext(conn: Connection) {
+        // Use PreparedStatement to safely bind session variables —
+        // avoids injection via special characters in tenant/role values.
+        conn.prepareStatement("SELECT set_config('app.current_tenant', ?, false)").use { it.setString(1, TenantContextHolder.getTenantId()); it.execute() }
+        conn.prepareStatement("SELECT set_config('app.user_role', ?, false)").use { it.setString(1, TenantContextHolder.getUserRole()); it.execute() }
     }
 }

@@ -33,9 +33,9 @@ if [[ "$1" == "clear" ]]; then
     TARGET="${2:-}"
     if [[ -n "$TARGET" ]]; then
         echo -e "${YELLOW}Clearing logs for: ${BOLD}$TARGET${NC}"
-        docker compose --profile app --profile auth stop "$TARGET" 2>/dev/null
-        docker compose --profile app --profile auth rm -f "$TARGET" 2>/dev/null
-        docker compose --profile app --profile auth up -d "$TARGET" 2>/dev/null
+        docker compose stop "$TARGET" 2>/dev/null
+        docker compose rm -f "$TARGET" 2>/dev/null
+        docker compose up -d "$TARGET" 2>/dev/null
         echo -e "${GREEN}Done. Logs cleared (container recreated).${NC}"
     else
         echo -e "${YELLOW}Clearing logs for all app services...${NC}"
@@ -43,7 +43,7 @@ if [[ "$1" == "clear" ]]; then
         for svc in "${SERVICES[@]}"; do
             docker rm -f "$(docker compose ps -q "$svc" 2>/dev/null)" 2>/dev/null || true
         done
-        docker compose --profile app up -d 2>/dev/null
+        docker compose up -d 2>/dev/null
         echo -e "${GREEN}Done. Logs cleared (containers recreated).${NC}"
     fi
     exit 0
@@ -54,7 +54,7 @@ if [[ "$1" == "debug" ]]; then
     echo -e "${BOLD}Debug mode: rag-service + api-gateway (query path)${NC}"
     echo -e "${DIM}Ctrl+C to exit${NC}"
     echo ""
-    docker compose --profile app logs -f rag-service api-gateway 2>/dev/null || {
+    docker compose logs -f rag-service api-gateway 2>/dev/null || {
         echo -e "${RED}Services not running. Start with ./scripts/start.sh${NC}"
         exit 1
     }
@@ -62,7 +62,7 @@ if [[ "$1" == "debug" ]]; then
 fi
 
 if [[ -n "$1" ]]; then
-    docker compose --profile app --profile auth logs -f "$1" 2>/dev/null || {
+    docker compose logs -f "$1" 2>/dev/null || {
         echo -e "${RED}Service '$1' not found or not running.${NC}"
         echo "Valid: rag-service, api-gateway, document-service, web-ui, admin-service, analytics-service"
         exit 1
@@ -160,9 +160,9 @@ echo -e "${DIM}Ctrl+C to exit${NC}"
 echo ""
 
 if [[ "$choice" == "debug" ]]; then
-    docker compose --profile app logs -f rag-service api-gateway
+    docker compose logs -f rag-service api-gateway
 elif [[ "$choice" == "all" ]]; then
-    docker compose --profile app --profile auth logs -f
+    docker compose logs -f
 elif [[ "$choice" == "clear" ]]; then
     echo -e "${YELLOW}Recreating all app containers (clears log buffers)...${NC}"
     SERVICES=(rag-service api-gateway document-service web-ui admin-service analytics-service)
@@ -170,8 +170,8 @@ elif [[ "$choice" == "clear" ]]; then
         cid=$(docker compose ps -q "$svc" 2>/dev/null || true)
         [[ -n "$cid" ]] && docker rm -f "$cid" 2>/dev/null || true
     done
-    docker compose --profile app up -d
+    docker compose up -d
     echo -e "${GREEN}Done.${NC}"
 else
-    docker compose --profile app logs -f "$choice"
+    docker compose logs -f "$choice"
 fi

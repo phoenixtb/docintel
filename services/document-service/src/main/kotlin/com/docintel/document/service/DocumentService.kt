@@ -6,10 +6,9 @@ import com.docintel.document.entity.Document
 import com.docintel.document.entity.ProcessingStatus
 import com.docintel.document.repository.ChunkRepository
 import com.docintel.document.repository.DocumentRepository
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.Page
+import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Pageable
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -21,8 +20,7 @@ class DocumentService(
     private val documentRepository: DocumentRepository,
     private val chunkRepository: ChunkRepository,
     private val storageService: StorageService,
-    private val textExtractionService: TextExtractionService,
-    private val ragServiceClient: RagServiceClient
+    private val ingestionServiceClient: IngestionServiceClient
 ) {
     private val logger = LoggerFactory.getLogger(DocumentService::class.java)
 
@@ -37,10 +35,8 @@ class DocumentService(
     ): DocumentResponse {
         val documentId = UUID.randomUUID()
         
-        // Store file in MinIO
         val filePath = storageService.storeFile(file, tenantId, documentId)
         
-        // Create document record
         val document = Document(
             id = documentId,
             tenantId = tenantId,
@@ -58,139 +54,65 @@ class DocumentService(
     }
 
     /**
-     * Process a document: extract text, classify domain, chunk, and index.
-     * This is called asynchronously after upload.
+     * Trigger ingestion for a document.
      *
-     * @param domainHint: Domain hint from upload
-     *   - "auto" or empty: Use zero-shot classification
-     *   - other: Use specified domain directly
+     * NOT annotated @Transactional because the function suspends inside triggerIngestion
+     * (WebClient HTTP call), which would cause the Spring ThreadLocal transaction context
+     * to be lost when the coroutine resumes on a different thread. Instead, DB writes are
+     * performed in small, non-suspend @Transactional helper methods.
+     *
+     * @param domainHint: "auto" for zero-shot classification, or a specific domain name.
      */
-    @Transactional
     suspend fun processDocument(
         documentId: UUID,
         tenantId: String,
         domainHint: String = "auto"
     ): ProcessingResult {
-        val document = documentRepository.findByIdAndTenantId(documentId, tenantId)
+        val doc = fetchDocumentForIngestion(documentId, tenantId)
             ?: throw IllegalArgumentException("Document not found: $documentId")
 
-        try {
-            // Update status to processing
-            document.status = ProcessingStatus.PROCESSING
-            documentRepository.save(document)
+        markDocumentProcessing(documentId, tenantId)
 
-            // Extract text from file
-            val fileStream = storageService.getFile(document.filePath)
-            val extraction = withContext(Dispatchers.IO) {
-                textExtractionService.extractText(fileStream, document.filename)
-            }
-
-            if (extraction.text.isBlank()) {
-                throw IllegalStateException("No text extracted from document")
-            }
-
-            logger.info("Extracted ${extraction.text.length} characters from ${document.filename}")
-
-            // Determine domain - either use hint or auto-classify
-            val domain = if (domainHint.isBlank() || domainHint == "auto") {
-                try {
-                    val classifyResult = ragServiceClient.classifyDomain(extraction.text)
-                    logger.info("Auto-classified ${document.filename} as ${classifyResult.domain} (confidence: ${classifyResult.confidence})")
-                    classifyResult.domain
-                } catch (e: Exception) {
-                    logger.warn("Domain classification failed, using 'general': ${e.message}")
-                    "general"
-                }
-            } else {
-                domainHint
-            }
-
-            // Build metadata with domain + Tika extraction metadata (page count, etc.)
-            val metadataWithDomain = document.metadata.toMutableMap()
-            metadataWithDomain["domain"] = domain
-            metadataWithDomain["document_type"] = domain
-            extraction.metadata.forEach { (k, v) ->
-                metadataWithDomain[k] = v
-            }
-
-            // Send to RAG service for chunking
-            val chunkResponse = ragServiceClient.chunkText(
-                text = extraction.text,
+        return try {
+            ingestionServiceClient.triggerIngestion(
                 documentId = documentId,
                 tenantId = tenantId,
-                filename = document.filename,
-                metadata = metadataWithDomain.mapValues { it.value as Any }
+                bucket = "docintel-$tenantId",
+                objectPath = doc.filePath,
+                filename = doc.filename,
+                domainHint = if (domainHint.isBlank()) "auto" else domainHint,
+                metadata = doc.metadata.toMap()
             )
-
-            logger.info("Created ${chunkResponse.chunkCount} chunks for ${document.filename}")
-
-            // Save chunks to database
-            val chunks = chunkResponse.chunks.mapIndexed { index, chunk ->
-                Chunk(
-                    id = UUID.fromString(chunk.chunkId),
-                    documentId = documentId,
-                    tenantId = tenantId,
-                    content = chunk.content,
-                    chunkIndex = index,
-                    startChar = chunk.startChar,
-                    endChar = chunk.endChar,
-                    tokenCount = chunk.tokenCount,
-                    metadata = chunk.metadata + mapOf(
-                        "filename" to document.filename,
-                        "document_type" to domain,
-                        "domain" to domain
-                    )
-                )
-            }
-            chunkRepository.saveAll(chunks)
-
-            // Send chunks to RAG service for embedding
-            val chunkData = chunks.map { chunk ->
-                ChunkData(
-                    chunkId = chunk.id.toString(),
-                    content = chunk.content,
-                    metadata = chunk.metadata + mapOf(
-                        "chunk_index" to chunk.chunkIndex,
-                        "filename" to document.filename,
-                        "domain" to domain,
-                        "document_type" to domain
-                    )
-                )
-            }
-
-            val indexResponse = ragServiceClient.indexChunks(
-                chunks = chunkData,
-                documentId = documentId,
-                tenantId = tenantId
+            logger.info(
+                "Ingestion triggered for document {} (tenant={}, file={})",
+                documentId, tenantId, doc.filename
             )
-
-            logger.info("Indexed ${indexResponse.embeddedCount} chunks for ${document.filename}")
-
-            // Update document status
-            document.status = ProcessingStatus.COMPLETED
-            document.chunkCount = chunks.size
-            documentRepository.save(document)
-
-            return ProcessingResult(
-                documentId = documentId,
-                chunkCount = chunks.size,
-                status = ProcessingStatus.COMPLETED
-            )
+            ProcessingResult(documentId = documentId, chunkCount = 0, status = ProcessingStatus.PROCESSING)
 
         } catch (e: Exception) {
-            logger.error("Failed to process document $documentId: ${e.message}", e)
-            
-            document.status = ProcessingStatus.FAILED
-            document.errorMessage = e.message
-            documentRepository.save(document)
-
-            return ProcessingResult(
-                documentId = documentId,
-                chunkCount = 0,
-                status = ProcessingStatus.FAILED,
-                errorMessage = e.message
-            )
+            logger.error("Failed to trigger ingestion for document {}: {}", documentId, e.message, e)
+            markDocumentFailed(documentId, tenantId, e.message)
+            ProcessingResult(documentId = documentId, chunkCount = 0, status = ProcessingStatus.FAILED, errorMessage = e.message)
         }
+    }
+
+    @Transactional(readOnly = true)
+    fun fetchDocumentForIngestion(documentId: UUID, tenantId: String): Document? =
+        documentRepository.findByIdAndTenantId(documentId, tenantId)
+
+    @Transactional
+    fun markDocumentProcessing(documentId: UUID, tenantId: String) {
+        val doc = documentRepository.findByIdAndTenantId(documentId, tenantId) ?: return
+        doc.status = ProcessingStatus.PROCESSING
+        documentRepository.save(doc)
+    }
+
+    @Transactional
+    fun markDocumentFailed(documentId: UUID, tenantId: String, message: String?) {
+        val doc = documentRepository.findByIdAndTenantId(documentId, tenantId) ?: return
+        doc.status = ProcessingStatus.FAILED
+        doc.errorMessage = message
+        documentRepository.save(doc)
     }
 
     /**
@@ -227,49 +149,55 @@ class DocumentService(
 
     /**
      * Delete a document and all associated data.
+     *
+     * NOT annotated @Transactional — see processDocument for the rationale.
+     * DB deletions happen in a separate @Transactional helper after the HTTP call.
      */
-    @Transactional
     suspend fun deleteDocument(id: UUID, tenantId: String): Boolean {
-        val document = documentRepository.findByIdAndTenantId(id, tenantId) ?: return false
+        val exists = documentExistsForTenant(id, tenantId)
+        if (!exists) return false
 
-        // Delete vectors from RAG service
-        try {
-            ragServiceClient.deleteDocumentVectors(tenantId, id)
-        } catch (e: Exception) {
-            logger.warn("Failed to delete vectors for document $id: ${e.message}")
+        // Delete vectors first — prevents orphan vector/PG state mismatch.
+        val vectorsDeleted = ingestionServiceClient.deleteDocumentVectors(tenantId, id)
+        if (!vectorsDeleted) {
+            throw IllegalStateException(
+                "Failed to delete vectors for document $id in Qdrant. " +
+                "Aborting deletion to prevent orphan vector/PG state mismatch."
+            )
         }
 
-        // Delete chunks from database
-        chunkRepository.deleteByDocumentId(id)
+        deleteDocumentRecords(id, tenantId)
+        return true
+    }
 
-        // Delete file from storage
+    @Transactional(readOnly = true)
+    fun documentExistsForTenant(id: UUID, tenantId: String): Boolean =
+        documentRepository.findByIdAndTenantId(id, tenantId) != null
+
+    @Transactional
+    fun deleteDocumentRecords(id: UUID, tenantId: String) {
+        chunkRepository.deleteByDocumentId(id)
         try {
             storageService.deleteDocumentFiles(tenantId, id)
         } catch (e: Exception) {
-            logger.warn("Failed to delete files for document $id: ${e.message}")
+            logger.warn("Failed to delete files for document $id (non-fatal): ${e.message}")
         }
-
-        // Delete document record
-        documentRepository.delete(document)
-
-        return true
+        documentRepository.findByIdAndTenantId(id, tenantId)?.let { documentRepository.delete(it) }
     }
 
     /**
      * Get chunks for a document.
      */
     fun getDocumentChunks(documentId: UUID, tenantId: String): List<ChunkResponse> {
-        val document = documentRepository.findByIdAndTenantId(documentId, tenantId)
+        documentRepository.findByIdAndTenantId(documentId, tenantId)
             ?: throw IllegalArgumentException("Document not found")
-        
+
         return chunkRepository.findByDocumentIdOrderByChunkIndex(documentId)
             .map { it.toResponse() }
     }
 
     /**
      * Bulk create document records (for sample datasets).
-     * Creates document records in PostgreSQL without file upload.
-     * The actual content is already indexed in Qdrant by the RAG service.
      */
     @Transactional
     fun bulkCreateDocuments(request: BulkDocumentCreateRequest): BulkDocumentCreateResponse {
@@ -282,6 +210,7 @@ class DocumentService(
             metadata["domain"] = item.domain
             metadata["document_type"] = item.domain
             metadata["source"] = "sample_dataset"
+            item.content?.let { metadata["content_preview"] = it.take(500) }
             
             val document = Document(
                 id = documentId,
@@ -289,8 +218,8 @@ class DocumentService(
                 filename = item.filename,
                 contentType = "text/plain",
                 fileSize = item.content?.length?.toLong() ?: 0L,
-                filePath = "",  // No file stored for sample datasets
-                status = ProcessingStatus.COMPLETED,  // Already indexed in Qdrant
+                filePath = "",
+                status = ProcessingStatus.COMPLETED,
                 chunkCount = item.chunkCount,
                 metadata = metadata
             )
@@ -308,40 +237,46 @@ class DocumentService(
     }
 
     /**
-     * Delete all documents for a tenant.
-     * Removes vectors, chunks, files, and document records.
+     * Delete all documents for a tenant in pages.
+     *
+     * NOT annotated @Transactional — see processDocument for the rationale.
+     * Each batch delete is performed in its own @Transactional helper.
      */
-    @Transactional
     suspend fun deleteAllDocuments(tenantId: String): Int {
-        val documents = documentRepository.findByTenantId(tenantId)
-        if (documents.isEmpty()) return 0
-
-        // Delete all vectors for the tenant in one call
         try {
-            ragServiceClient.deleteTenantVectors(tenantId)
+            ingestionServiceClient.deleteTenantVectors(tenantId)
         } catch (e: Exception) {
             logger.warn("Failed to delete vectors for tenant $tenantId: ${e.message}")
         }
 
-        // Delete all chunks for the tenant
-        for (doc in documents) {
-            chunkRepository.deleteByDocumentId(doc.id)
-        }
+        val deleted = deleteTenantDocumentBatches(tenantId)
+        logger.info("Deleted $deleted documents for tenant $tenantId")
+        return deleted
+    }
 
-        // Delete all files for the tenant
-        for (doc in documents) {
-            try {
-                storageService.deleteDocumentFiles(tenantId, doc.id)
-            } catch (e: Exception) {
-                // Non-fatal: sample datasets have no files
+    @Transactional
+    fun deleteTenantDocumentBatches(tenantId: String): Int {
+        val pageSize = 200
+        var deleted = 0
+        var page = 0
+
+        while (true) {
+            val documents = documentRepository.findByTenantId(
+                tenantId, PageRequest.of(page, pageSize)
+            ).content
+            if (documents.isEmpty()) break
+
+            for (doc in documents) {
+                chunkRepository.deleteByDocumentId(doc.id)
+                try {
+                    storageService.deleteDocumentFiles(tenantId, doc.id)
+                } catch (_: Exception) { }
             }
+            documentRepository.deleteAll(documents)
+            deleted += documents.size
+            page++
         }
-
-        // Delete all document records
-        documentRepository.deleteAll(documents)
-
-        logger.info("Deleted ${documents.size} documents for tenant $tenantId")
-        return documents.size
+        return deleted
     }
 
     // Extension functions for mapping

@@ -16,6 +16,7 @@ Pipeline position:
 
 from threading import Lock
 
+from cachetools import LRUCache
 from haystack import Document, component
 from haystack.dataclasses import SparseEmbedding
 from haystack_integrations.components.retrievers.qdrant import (
@@ -27,8 +28,8 @@ from qdrant_client import models
 from ..config import Settings, get_settings
 from ..stores import create_document_store
 
-# Module-level cache: tenant_id → (hybrid_retriever, dense_retriever)
-_retriever_cache: dict[str, tuple[QdrantHybridRetriever, QdrantEmbeddingRetriever]] = {}
+# LRU cache with a 100-tenant cap to prevent unbounded memory growth.
+_retriever_cache: LRUCache = LRUCache(maxsize=100)
 _cache_lock = Lock()
 
 
@@ -89,25 +90,33 @@ class SecureRetriever:
                 )
             )
 
-        should: list[models.Condition] = []
+        # should = OR logic: a document is accessible if ANY condition is true.
+        # "No allowed_roles" means the document is open to all tenant members —
+        # this covers sample datasets and documents indexed without explicit ACL.
+        _acl_field = models.PayloadField(key="meta.allowed_roles")
+        acl_should: list[models.Condition] = [
+            models.IsNullCondition(is_null=_acl_field),
+            models.IsEmptyCondition(is_empty=_acl_field),
+        ]
         if user_roles:
-            should.append(
+            acl_should.append(
                 models.FieldCondition(
                     key="meta.allowed_roles",
                     match=models.MatchAny(any=user_roles),
                 )
             )
         if user_id:
-            should.append(
+            acl_should.append(
                 models.FieldCondition(
                     key="meta.allowed_users",
                     match=models.MatchValue(value=user_id),
                 )
             )
 
-        filt = models.Filter(must=must) if must else models.Filter()
-        if should:
-            filt.should = should
+        # Nest ACL as a must condition so it is enforced even when a domain
+        # must filter is also present (Qdrant's should is optional alongside must).
+        must.append(models.Filter(should=acl_should))
+        filt = models.Filter(must=must)
         return filt
 
     @component.output_types(documents=list[Document])

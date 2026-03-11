@@ -2522,7 +2522,7 @@ Targets:
 
 ### Implementation Plan
 
-**1. Authentik Configuration**
+**1. Zitadel Configuration**
 - Add `platform-admin` group with custom claim `role: platform_admin`
 - Add `tenant-admin` role as a group attribute
 - Update scope mapping to include `role` claim in JWT
@@ -2556,11 +2556,11 @@ Targets:
 - Audit log: Query history across tenants
 - System config: Cache policies, rate limits per tenant
 
-**6. Authentik Blueprint Updates**
+**6. Zitadel Blueprint Updates**
 - Add `platform-admin` group to `docintel-setup.yaml`
 - Add role claim to scope mapping expression
 - Configure `akadmin` as platform admin
-- Add role-based authorization flow (optional: separate admin app in Authentik)
+- Add role-based authorization flow (optional: separate admin app in Zitadel)
 
 ### Key Design Principles
 - **JWT is the source of truth** — tenant_id and role come from the token, never from client input
@@ -2569,7 +2569,7 @@ Targets:
 - **Audit everything** — All admin operations logged with actor identity
 
 ### Dependencies
-- Authentik OAuth2 setup (done)
+- Zitadel OAuth2 setup (done)
 - oidc-client-ts integration (done)  
 - Admin service endpoints (done)
 - Admin UI page (done)

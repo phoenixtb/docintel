@@ -8,22 +8,22 @@ them via FastAPI Depends() from api/dependencies.py.
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..chunking import ChunkingConfig, ChunkingMethod, ChunkingService
+from ..components.model_resolver import TenantModelResolver
 from ..config import Settings
 from ..context import _tenant_ctx, _role_ctx
-from ..datasets import DATASET_CONFIGS, DOMAIN_LABELS, get_dataset_loader, get_domain_classifier
-from ..pipelines import RAGService, delete_document_vectors, delete_tenant_vectors, index_chunks
+from ..pipelines import RAGService
 from ..tracing import LangfuseTracer
 from .dependencies import JWTClaimsDep, RAGServiceDep, SettingsDep, TracerDep
 
@@ -59,6 +59,25 @@ async def _emit_query_event(
         logger.debug("Query telemetry emit failed (non-fatal): %s", e)
 
 
+def _fire_and_forget(coro) -> asyncio.Task:
+    """Create a task and attach an error-logging callback so exceptions are never silently dropped."""
+    task = asyncio.create_task(coro)
+
+    def _on_done(t: asyncio.Task):
+        if not t.cancelled() and t.exception():
+            logger.warning("Background task raised an exception: %s", t.exception())
+
+    task.add_done_callback(_on_done)
+    return task
+
+
+async def _run_db(fn: Callable):
+    """Run a synchronous DB call in the default executor, preserving contextvars for RLS."""
+    ctx = contextvars.copy_context()
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, ctx.run, fn)
+
+
 # =============================================================================
 # Lifespan
 # =============================================================================
@@ -87,6 +106,17 @@ async def lifespan(app: FastAPI):
     # RAGService (warm-up happens lazily on first query to avoid blocking startup)
     rag_service = RAGService(settings)
     app.state.rag_service = rag_service
+
+    # Model resolver — resolves effective LLM per tenant from PostgreSQL (60s TTL cache)
+    app.state.model_resolver = TenantModelResolver(
+        postgres_url=settings.postgres_url,
+        default_model=settings.ollama_llm_model,
+    )
+
+    # LLM concurrency gate — configurable via LLM_CONCURRENCY_LIMIT env var.
+    # Ollama (serial GPU): 2-4. OpenAI/Anthropic API: 20-50+. vLLM: gpu_count * 4.
+    app.state.llm_semaphore = asyncio.Semaphore(settings.llm_concurrency_limit)
+    logger.info("LLM concurrency limit: %d", settings.llm_concurrency_limit)
 
     yield
 
@@ -151,25 +181,59 @@ app = FastAPI(
 
 @app.middleware("http")
 async def tenant_context_middleware(request: Request, call_next):
-    """Set tenant ContextVars from gateway-forwarded headers for every request."""
-    token_t = _tenant_ctx.set(request.headers.get("X-Tenant-Id", "default"))
+    """Set tenant ContextVars and request-correlation logging context for every request."""
+    request_id = request.headers.get("X-Request-Id", str(uuid.uuid4()))
+    tenant_id  = request.headers.get("X-Tenant-Id", "default")
+    user_id    = request.headers.get("X-User-Id", "")
+
+    token_t = _tenant_ctx.set(tenant_id)
     token_r = _role_ctx.set(request.headers.get("X-User-Role", "tenant_user"))
+
+    # Inject correlation fields into the logging context via LogRecord factory
+    old_factory = logging.getLogRecordFactory()
+
+    def _record_factory(*args, **kwargs):
+        record = old_factory(*args, **kwargs)
+        record.request_id = request_id
+        record.tenant_id  = tenant_id
+        record.user_id    = user_id
+        return record
+
+    logging.setLogRecordFactory(_record_factory)
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        return response
     finally:
         _tenant_ctx.reset(token_t)
         _role_ctx.reset(token_r)
+        logging.setLogRecordFactory(old_factory)
 
 
 # Prometheus metrics — must be registered before first request (module level)
 try:
+    from prometheus_client import Counter, Gauge, Histogram
     from prometheus_fastapi_instrumentator import Instrumentator
+
     Instrumentator(
         should_group_status_codes=True,
         excluded_handlers=["/health", "/metrics"],
     ).instrument(app).expose(app, endpoint="/metrics")
+
+    # Custom RAG metrics
+    RAG_QUERY_LATENCY = Histogram(
+        "rag_query_latency_seconds",
+        "End-to-end RAG query latency",
+        ["tenant", "cache_hit"],
+        buckets=[0.1, 0.5, 1, 2, 5, 10, 30],
+    )
+    RAG_CACHE_HITS = Counter("rag_cache_hit_total", "Semantic cache hits", ["tenant"])
+    RAG_CACHE_MISSES = Counter("rag_cache_miss_total", "Semantic cache misses", ["tenant"])
+    RAG_LLM_QUEUE_WAITING = Gauge("rag_llm_queue_waiting", "Current semaphore waiters")
+    RAG_CHUNKS_INDEXED = Counter("rag_indexing_chunks_total", "Total chunks indexed", ["tenant"])
+    _METRICS_ENABLED = True
 except ImportError:
-    pass
+    _METRICS_ENABLED = False
 
 
 # =============================================================================
@@ -198,42 +262,6 @@ class QueryResponse(BaseModel):
     model_used: str
 
 
-class ChunkData(BaseModel):
-    chunk_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    content: str
-    metadata: dict = Field(default_factory=dict)
-
-
-class IndexRequest(BaseModel):
-    document_id: str
-    tenant_id: str = Field(default="default")
-    chunks: list[ChunkData]
-
-
-class IndexResponse(BaseModel):
-    status: str
-    document_id: str
-    embedded_count: int
-    collection: str
-
-
-class ChunkRequest(BaseModel):
-    text: str
-    document_id: str
-    tenant_id: str = Field(default="default")
-    filename: str = "unknown.txt"
-    method: str = Field(default="recursive")
-    chunk_size: int = Field(default=400, ge=100, le=2000)
-    chunk_overlap: int = Field(default=0, ge=0, le=200)
-    metadata: dict = Field(default_factory=dict)
-
-
-class ChunkResponse(BaseModel):
-    document_id: str
-    chunk_count: int
-    chunks: list[dict]
-
-
 class HealthResponse(BaseModel):
     status: str
     qdrant: str
@@ -241,39 +269,21 @@ class HealthResponse(BaseModel):
     version: str = "0.1.0"
 
 
+class ModelInfo(BaseModel):
+    name: str
+    size: Optional[int] = None
+    modified_at: Optional[str] = None
+
+
+class ModelListResponse(BaseModel):
+    models: list[ModelInfo]
+    default_model: str
+
+
 class VectorStatsResponse(BaseModel):
     total_vectors: int
     collections: dict[str, int]
     tenant_stats: dict[str, int] = Field(default_factory=dict)
-
-
-class ClassifyDomainRequest(BaseModel):
-    content: str = Field(..., min_length=10, max_length=50000)
-
-
-class ClassifyDomainResponse(BaseModel):
-    domain: str
-    confidence: float
-    all_scores: dict[str, float]
-
-
-class LoadSampleDatasetsRequest(BaseModel):
-    datasets: list[str] = Field(..., min_length=1)
-    samples_per_dataset: int = Field(default=100, ge=1, le=100000)
-    tenant_id: str = Field(default="default")
-
-
-class LoadedDatasetInfo(BaseModel):
-    dataset: str
-    domain: str
-    documents_loaded: int
-    documents_indexed: int
-
-
-class LoadSampleDatasetsResponse(BaseModel):
-    loaded: list[LoadedDatasetInfo]
-    total_documents: int
-    total_indexed: int
 
 
 # =============================================================================
@@ -314,6 +324,36 @@ async def root():
         "docs": "/docs",
         "health": "/health",
     }
+
+
+# =============================================================================
+# Model list (for dynamic model selection UI)
+# =============================================================================
+
+@app.get("/models", response_model=ModelListResponse)
+async def list_models(settings: SettingsDep):
+    """
+    List all Ollama models available on the host.
+    Used by the UI to populate the model selection dropdown.
+    """
+    models: list[ModelInfo] = []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{settings.ollama_base_url}/api/tags")
+            if r.status_code == 200:
+                for m in r.json().get("models", []):
+                    models.append(ModelInfo(
+                        name=m.get("name", ""),
+                        size=m.get("size"),
+                        modified_at=m.get("modified_at"),
+                    ))
+    except Exception as exc:
+        logger.warning("Failed to fetch Ollama model list: %s", exc)
+
+    return ModelListResponse(
+        models=models,
+        default_model=settings.ollama_llm_model,
+    )
 
 
 # =============================================================================
@@ -383,7 +423,7 @@ async def query_documents(
     user_id = claims["user_id"] or request.user_id
 
     try:
-        result = rag_service.query(
+        result = await rag_service.query(
             question=request.question,
             tenant_id=tenant_id,
             user_roles=user_roles or None,
@@ -393,7 +433,7 @@ async def query_documents(
             conversation_id=request.conversation_id,
             min_score=request.min_score,
         )
-        asyncio.create_task(_emit_query_event(
+        _fire_and_forget(_emit_query_event(
             query_id=str(uuid.uuid4()),
             tenant_id=tenant_id,
             user_id=user_id or "",
@@ -422,6 +462,7 @@ async def query_documents_stream(
     rag_service: RAGServiceDep,
     claims: JWTClaimsDep,
     settings: SettingsDep,
+    http_request: Request,
 ):
     """
     RAG query with streaming SSE response.
@@ -439,6 +480,13 @@ async def query_documents_stream(
     user_roles = claims["user_roles"] or request.user_roles
     user_id = claims["user_id"] or request.user_id
 
+    llm_semaphore: asyncio.Semaphore = http_request.app.state.llm_semaphore
+    model_resolver: TenantModelResolver = http_request.app.state.model_resolver
+
+    # Resolve the effective LLM model for this tenant before entering the generator.
+    # This keeps the async DB lookup outside the sync generator closure.
+    effective_model = await model_resolver.resolve(tenant_id)
+
     async def generate():
         try:
             # Ensure RAGService is warmed up (embedders available)
@@ -448,11 +496,31 @@ async def query_documents_stream(
             query_id = str(uuid.uuid4())
             yield f"data: {json.dumps({'metadata': {'query_id': query_id, 'cache_hit': False}})}\n\n"
 
-            # Embed
-            embed_result = rag_service._dense_embedder.run(text=request.question)
+            # Embed — run sync calls in executor so they don't block the event loop
+            loop = asyncio.get_running_loop()
+            embed_result = await loop.run_in_executor(
+                None, lambda: rag_service._dense_embedder.run(text=request.question)
+            )
             query_embedding = embed_result["embedding"]
-            sparse_result = rag_service._sparse_embedder.run(text=request.question)
+            sparse_result = await loop.run_in_executor(
+                None, lambda: rag_service._sparse_embedder.run(text=request.question)
+            )
             query_sparse_embedding = sparse_result.get("sparse_embedding")
+
+            # ── Semantic cache check ─────────────────────────────────────────
+            if request.use_cache and rag_service._cache_checker:
+                cache_result = await loop.run_in_executor(
+                    None,
+                    lambda: rag_service._cache_checker.run(  # type: ignore[union-attr]
+                        query_embedding=query_embedding,
+                        tenant_id=tenant_id,
+                    ),
+                )
+                if cache_result["cache_hit"]:
+                    yield f"data: {json.dumps({'metadata': {'query_id': query_id, 'cache_hit': True}})}\n\n"
+                    yield f"data: {json.dumps({'token': cache_result['cached_response']})}\n\n"
+                    yield f"data: {json.dumps({'sources': cache_result.get('cached_sources', []), 'done': True})}\n\n"
+                    return
 
             # ── Query Routing (Pattern 1 from production-rag-concepts) ──────
             # If the caller didn't specify a domain, auto-classify the query
@@ -467,9 +535,11 @@ async def query_documents_stream(
                 routed_domain = request.document_type
             else:
                 try:
-                    from ..datasets import get_domain_classifier
+                    from docintel_common.domain import get_domain_classifier
                     clf = get_domain_classifier()
-                    result = clf.classify(request.question)
+                    result = await loop.run_in_executor(
+                        None, lambda: clf.classify(request.question)
+                    )
                     if result.confidence >= ROUTING_CONFIDENCE_THRESHOLD:
                         routed_domain = result.domain
                         logger.info(
@@ -491,16 +561,36 @@ async def query_documents_stream(
             # Re-emit metadata with routing info so the UI can show which domain was used
             yield f"data: {json.dumps({'routing': {'domain': routed_domain, 'explicit': bool(request.document_type and request.document_type != 'all')}})}\n\n"
 
-            retrieval_result = rag_service._pipeline.get_component("retriever").run(  # type: ignore[union-attr]
-                query_embedding=query_embedding,
-                query_sparse_embedding=query_sparse_embedding,
-                tenant_id=tenant_id,
-                user_roles=user_roles or None,
-                user_id=user_id,
-                domain_filter=domain_filter,
+            retrieval_result = await loop.run_in_executor(
+                None,
+                lambda: rag_service._pipeline.get_component("retriever").run(  # type: ignore[union-attr]
+                    query_embedding=query_embedding,
+                    query_sparse_embedding=query_sparse_embedding,
+                    tenant_id=tenant_id,
+                    user_roles=user_roles or None,
+                    user_id=user_id,
+                    domain_filter=domain_filter,
+                ),
             )
+
+            # ── Rerank (same as /query endpoint) ────────────────────────────
+            # Streaming path MUST rerank to match /query quality.
             top_k = request.top_k or settings.rag_default_top_k
-            documents = retrieval_result["documents"][:top_k]
+            if request.use_reranking:
+                try:
+                    rerank_result = await loop.run_in_executor(
+                        None,
+                        lambda: rag_service._pipeline.get_component("reranker").run(  # type: ignore[union-attr]
+                            query=request.question,
+                            documents=retrieval_result["documents"],
+                        ),
+                    )
+                    documents = rerank_result["documents"][:top_k]
+                except Exception as _re:
+                    logger.warning("Reranker failed in streaming path (falling back to retrieval order): %s", _re)
+                    documents = retrieval_result["documents"][:top_k]
+            else:
+                documents = retrieval_result["documents"][:top_k]
 
             logger.info(
                 "Retrieved %d documents (domain_filter=%s)",
@@ -508,8 +598,26 @@ async def query_documents_stream(
             )
 
             if not documents:
-                from ..prompts import NO_DOCUMENTS_RESPONSE
-                yield f"data: {json.dumps({'token': NO_DOCUMENTS_RESPONSE})}\n\n"
+                from ..prompts import NO_DOCUMENTS_RESPONSE, NO_RELEVANT_DOCUMENTS_RESPONSE
+                from qdrant_client import QdrantClient as _QC
+                try:
+                    _qc = _QC(url=settings.qdrant_url)
+                    _count = _qc.count(collection_name=f"documents_{tenant_id}", exact=False).count
+                    response_text = (
+                        NO_RELEVANT_DOCUMENTS_RESPONSE.format(query=request.question)
+                        if _count > 0
+                        else NO_DOCUMENTS_RESPONSE
+                    )
+                except Exception:
+                    response_text = NO_DOCUMENTS_RESPONSE
+                if request.conversation_id:
+                    try:
+                        from ..db import add_message
+                        add_message(request.conversation_id, "user", request.question, tenant_id=tenant_id)
+                        add_message(request.conversation_id, "assistant", response_text, tenant_id=tenant_id, sources=[])
+                    except Exception as _e:
+                        logger.warning("Failed to persist no-docs conversation: %s", _e)
+                yield f"data: {json.dumps({'token': response_text})}\n\n"
                 yield f"data: {json.dumps({'sources': [], 'done': True})}\n\n"
                 return
 
@@ -517,26 +625,29 @@ async def query_documents_stream(
             prompt_result = rag_service._pipeline.get_component("prompt_builder").run(
                 documents=documents, query=request.question
             )
-            messages: list[ChatMessage] = prompt_result["messages"]
+            messages = prompt_result["messages"]
 
             # Stream LLM via Haystack's OllamaChatGenerator.
             # ollama-haystack ≥6.1 maps message.thinking → chunk.reasoning.reasoning_text
             # and message.content → chunk.content, giving clean separation without
             # any custom parsing or direct Ollama API calls.
-            queue: asyncio.Queue = asyncio.Queue()
+            queue: asyncio.Queue = asyncio.Queue(maxsize=200)
 
             full_thinking = ""
             full_answer = ""
 
-            async def streaming_callback(chunk):
-                # chunk.reasoning is ReasoningContent during thinking phase; None otherwise.
-                if chunk.reasoning and chunk.reasoning.reasoning_text:
-                    queue.put_nowait(("thinking", chunk.reasoning.reasoning_text))
+            # OllamaChatGenerator calls the streaming_callback SYNCHRONOUSLY inside
+            # its HTTP response loop. An async def would return a coroutine object
+            # that gets immediately discarded — the body would never execute.
+            def streaming_callback(chunk):
+                reasoning = getattr(chunk, "reasoning", None)
+                if reasoning and getattr(reasoning, "reasoning_text", None):
+                    queue.put_nowait(("thinking", reasoning.reasoning_text))
                 elif chunk.content:
                     queue.put_nowait(("answer", chunk.content))
 
             llm = OllamaChatGenerator(
-                model=settings.ollama_llm_model,
+                model=effective_model,
                 url=settings.ollama_base_url,
                 think=True,
                 generation_kwargs={
@@ -546,27 +657,41 @@ async def query_documents_stream(
                 streaming_callback=streaming_callback,
             )
 
+            # Notify the client if it will have to wait for an LLM slot.
+            if llm_semaphore.locked():
+                yield f"data: {json.dumps({'queued': True, 'message': 'Processing your request — a moment please...'})}\n\n"
+
             async def run_llm():
-                try:
-                    await llm.run_async(messages=messages)
-                except Exception as e:
-                    logger.error("Streaming LLM failed: %s", e)
-                finally:
-                    queue.put_nowait(None)
+                async with llm_semaphore:
+                    try:
+                        # run_in_executor so the sync Ollama HTTP stream doesn't block the event loop.
+                        await loop.run_in_executor(None, lambda: llm.run(messages=messages))
+                    except asyncio.CancelledError:
+                        logger.info("LLM task cancelled (client disconnected)")
+                    except Exception as e:
+                        logger.error("Streaming LLM failed: %s", e)
+                    finally:
+                        queue.put_nowait(None)
 
             task = asyncio.create_task(run_llm())
 
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                kind, text = item
-                if kind == "thinking":
-                    full_thinking += text
-                    yield f"data: {json.dumps({'thinking_token': text})}\n\n"
-                else:
-                    full_answer += text
-                    yield f"data: {json.dumps({'token': text})}\n\n"
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    kind, text = item
+                    if kind == "thinking":
+                        full_thinking += text
+                        yield f"data: {json.dumps({'thinking_token': text})}\n\n"
+                    else:
+                        full_answer += text
+                        yield f"data: {json.dumps({'token': text})}\n\n"
+            except GeneratorExit:
+                # Client disconnected — cancel the LLM task to free Ollama
+                task.cancel()
+                logger.info("Client disconnected mid-stream, LLM task cancelled")
+                return
 
             await task
 
@@ -586,6 +711,19 @@ async def query_documents_stream(
                     "domain": doc.meta.get("document_type") or doc.meta.get("domain") or "",
                 })
 
+            # ── Semantic cache write (fire-and-forget, errors are non-fatal) ──
+            if request.use_cache and rag_service._cache_writer and answer:
+                _fire_and_forget(asyncio.wrap_future(loop.run_in_executor(
+                    None,
+                    lambda: rag_service._cache_writer.run(  # type: ignore[union-attr]
+                        query=request.question,
+                        query_embedding=query_embedding,
+                        response=answer,
+                        sources=sources,
+                        tenant_id=tenant_id,
+                    ),
+                )))
+
             if request.conversation_id:
                 try:
                     from ..db import add_message
@@ -595,12 +733,12 @@ async def query_documents_stream(
                     logger.warning("Failed to persist streaming conversation: %s", e)
 
             # Fire-and-forget query telemetry to analytics-service.
-            asyncio.create_task(_emit_query_event(
+            _fire_and_forget(_emit_query_event(
                 query_id=query_id,
                 tenant_id=tenant_id,
                 user_id=user_id or "",
                 latency_ms=0,
-                model_used=settings.ollama_llm_model,
+                model_used=effective_model,
                 cache_hit=False,
                 source_count=len(sources),
                 analytics_url=settings.analytics_service_url,
@@ -617,246 +755,6 @@ async def query_documents_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
-
-
-# =============================================================================
-# Indexing endpoints
-# =============================================================================
-
-@app.post("/index", response_model=IndexResponse)
-async def index_document(request: IndexRequest, settings: SettingsDep, claims: JWTClaimsDep):
-    """Index document chunks into the tenant's Qdrant collection.
-    Tenant ID is always taken from gateway claims — request body tenant_id is ignored."""
-    try:
-        tenant_id = claims["tenant_id"]
-        chunks = [
-            {"chunk_id": c.chunk_id, "content": c.content, "metadata": c.metadata}
-            for c in request.chunks
-        ]
-        result = await index_chunks(
-            chunks=chunks,
-            tenant_id=tenant_id,
-            document_id=request.document_id,
-            settings=settings,
-        )
-        return IndexResponse(
-            status="indexed",
-            document_id=request.document_id,
-            embedded_count=result["embedded_count"],
-            collection=result["collection"],
-        )
-    except Exception as e:
-        logger.exception("Indexing failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/chunk", response_model=ChunkResponse)
-async def chunk_text(request: ChunkRequest, claims: JWTClaimsDep):
-    """Chunk document text. Tenant ID from gateway claims is authoritative."""
-    try:
-        tenant_id = claims["tenant_id"]
-        service = ChunkingService()
-        method_map = {
-            "recursive": ChunkingMethod.RECURSIVE,
-            "semantic": ChunkingMethod.SEMANTIC,
-            "token": ChunkingMethod.TOKEN,
-        }
-        config = ChunkingConfig(
-            method=method_map.get(request.method, ChunkingMethod.RECURSIVE),
-            chunk_size=request.chunk_size,
-            chunk_overlap=request.chunk_overlap,
-        )
-        chunks = service.chunk_document(
-            text=request.text,
-            document_id=request.document_id,
-            tenant_id=tenant_id,
-            filename=request.filename,
-            config=config,
-            extra_metadata=request.metadata,
-        )
-        return ChunkResponse(
-            document_id=request.document_id,
-            chunk_count=len(chunks),
-            chunks=[
-                {
-                    "chunk_id": str(uuid.uuid4()),
-                    "content": chunk.content,
-                    "start_char": chunk.start_char,
-                    "end_char": chunk.end_char,
-                    "token_count": chunk.token_count,
-                    "metadata": chunk.metadata,
-                }
-                for chunk in chunks
-            ],
-        )
-    except Exception as e:
-        logger.exception("Chunking failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/index/{tenant_id}/{document_id}")
-async def delete_document(tenant_id: str, document_id: str, settings: SettingsDep):
-    try:
-        return await delete_document_vectors(document_id=document_id, tenant_id=tenant_id, settings=settings)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/index/{tenant_id}")
-async def delete_tenant(tenant_id: str, settings: SettingsDep):
-    try:
-        return await delete_tenant_vectors(tenant_id=tenant_id, settings=settings)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# =============================================================================
-# Domain classification
-# =============================================================================
-
-@app.post("/classify-domain", response_model=ClassifyDomainResponse)
-async def classify_domain(request: ClassifyDomainRequest):
-    try:
-        classifier = get_domain_classifier()
-        result = classifier.classify(request.content)
-        return ClassifyDomainResponse(
-            domain=result.domain,
-            confidence=result.confidence,
-            all_scores=result.all_scores,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Classification failed: {str(e)}")
-
-
-# =============================================================================
-# Sample datasets
-# =============================================================================
-
-@app.get("/sample-datasets")
-async def list_sample_datasets():
-    return {
-        "available_datasets": [
-            {
-                "key": key,
-                "name": cfg["name"],
-                "domain": cfg["domain"],
-                "description": f"Sample {cfg['domain']} documents",
-            }
-            for key, cfg in DATASET_CONFIGS.items()
-        ],
-        "domains": DOMAIN_LABELS,
-    }
-
-
-@app.post("/sample-datasets/load", response_model=LoadSampleDatasetsResponse)
-async def load_sample_datasets(
-    request: LoadSampleDatasetsRequest,
-    settings: SettingsDep,
-    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-Id"),
-):
-    tenant_id = x_tenant_id or request.tenant_id
-    loader = get_dataset_loader()
-    chunking_service = ChunkingService()
-
-    loaded_info: list[LoadedDatasetInfo] = []
-    total_documents = 0
-    total_indexed = 0
-    documents_to_create: list[dict] = []
-
-    for dataset_key in request.datasets:
-        if dataset_key not in DATASET_CONFIGS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown dataset: {dataset_key}. Valid: {list(DATASET_CONFIGS.keys())}",
-            )
-        try:
-            documents = loader.load_dataset(
-                dataset_key=dataset_key,
-                samples=request.samples_per_dataset,
-                tenant_id=tenant_id,
-            )
-            documents_indexed = 0
-
-            for idx, doc in enumerate(documents):
-                doc_id = f"{dataset_key}_{idx}_{uuid.uuid4().hex[:8]}"
-                filename = f"{dataset_key}_sample_{idx}.txt"
-                chunks = chunking_service.chunk_document(
-                    text=doc.content,
-                    document_id=doc_id,
-                    tenant_id=tenant_id,
-                    filename=filename,
-                    extra_metadata={
-                        "domain": doc.domain,
-                        "document_type": doc.domain,
-                        "source_dataset": doc.source_dataset,
-                        **doc.metadata,
-                    },
-                )
-                if chunks:
-                    await index_chunks(
-                        chunks=[
-                            {"chunk_id": str(uuid.uuid4()), "content": c.content, "metadata": c.metadata}
-                            for c in chunks
-                        ],
-                        tenant_id=tenant_id,
-                        document_id=doc_id,
-                        settings=settings,
-                    )
-                    documents_indexed += 1
-                    documents_to_create.append({
-                        "filename": filename,
-                        "domain": doc.domain,
-                        "chunkCount": len(chunks),
-                        "metadata": {"source_dataset": doc.source_dataset, "sample_index": str(idx)},
-                        "content": doc.content[:500],
-                    })
-
-            loaded_info.append(LoadedDatasetInfo(
-                dataset=dataset_key,
-                domain=DATASET_CONFIGS[dataset_key]["domain"],
-                documents_loaded=len(documents),
-                documents_indexed=documents_indexed,
-            ))
-            total_documents += len(documents)
-            total_indexed += documents_indexed
-
-        except Exception as e:
-            logger.error("Error loading dataset %s: %s", dataset_key, e)
-            loaded_info.append(LoadedDatasetInfo(
-                dataset=dataset_key,
-                domain=DATASET_CONFIGS[dataset_key].get("domain", "unknown"),
-                documents_loaded=0,
-                documents_indexed=0,
-            ))
-
-    if documents_to_create:
-        await _create_document_records(tenant_id, documents_to_create, settings)
-
-    return LoadSampleDatasetsResponse(
-        loaded=loaded_info,
-        total_documents=total_documents,
-        total_indexed=total_indexed,
-    )
-
-
-async def _create_document_records(tenant_id: str, documents: list[dict], settings: Settings) -> None:
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{settings.document_service_url}/internal/documents/bulk-create",
-                json={"tenantId": tenant_id, "documents": documents},
-            )
-            if response.status_code == 201:
-                result = response.json()
-                logger.info("Created %s document records for tenant %s", result.get("created", 0), tenant_id)
-            else:
-                logger.warning(
-                    "Failed to create document records: %s - %s",
-                    response.status_code,
-                    response.text[:200],
-                )
-    except Exception as e:
-        logger.warning("Could not create document records in PostgreSQL: %s", e)
 
 
 # =============================================================================
@@ -877,7 +775,9 @@ class UpdateConversationRequest(BaseModel):
 async def create_conversation(request: CreateConversationRequest, claims: JWTClaimsDep):
     from ..db import create_conversation as _create
     tenant_id = claims["tenant_id"]
-    return _create(tenant_id=tenant_id, user_id=claims["user_id"] or request.user_id, title=request.title)
+    return await _run_db(
+        lambda: _create(tenant_id=tenant_id, user_id=claims["user_id"] or request.user_id, title=request.title)
+    )
 
 
 @app.get("/conversations")
@@ -887,13 +787,15 @@ async def list_conversations(
     offset: int = 0,
 ):
     from ..db import list_conversations as _list
-    return _list(tenant_id=claims["tenant_id"], user_id=claims["user_id"], limit=limit, offset=offset)
+    return await _run_db(
+        lambda: _list(tenant_id=claims["tenant_id"], user_id=claims["user_id"], limit=limit, offset=offset)
+    )
 
 
 @app.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str, claims: JWTClaimsDep):
     from ..db import get_conversation as _get
-    conv = _get(conversation_id, claims["tenant_id"])
+    conv = await _run_db(lambda: _get(conversation_id, claims["tenant_id"]))
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
@@ -906,7 +808,7 @@ async def update_conversation(
     claims: JWTClaimsDep,
 ):
     from ..db import update_conversation_title
-    conv = update_conversation_title(conversation_id, claims["tenant_id"], request.title)
+    conv = await _run_db(lambda: update_conversation_title(conversation_id, claims["tenant_id"], request.title))
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
@@ -915,6 +817,7 @@ async def update_conversation(
 @app.delete("/conversations/{conversation_id}")
 async def delete_conversation_endpoint(conversation_id: str, claims: JWTClaimsDep):
     from ..db import delete_conversation
-    if not delete_conversation(conversation_id, claims["tenant_id"]):
+    deleted = await _run_db(lambda: delete_conversation(conversation_id, claims["tenant_id"]))
+    if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"status": "deleted"}

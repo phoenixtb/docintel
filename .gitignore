@@ -30,6 +30,11 @@ build/
 # Docker
 *.log
 
+# Zitadel bootstrap PAT files (contain secrets — never commit)
+config/zitadel/bootstrap/*.pat
+# Generated branding assets (re-created by setup-zitadel.sh — commit if you want them in VCS)
+# config/zitadel/branding/*.png
+
 # Data (don't commit local data)
 data/
 *.db

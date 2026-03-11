@@ -5,6 +5,13 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Load model defaults (single source of truth)
+# shellcheck source=../config/defaults.env
+source "$PROJECT_DIR/config/defaults.env"
+
 echo "================================================"
 echo "DocIntel Setup"
 echo "================================================"
@@ -100,7 +107,7 @@ echo "Pulling Docker Images"
 echo "================================================"
 
 # Pull all images without starting containers
-docker compose --profile app --profile auth pull
+docker compose pull
 
 echo "Docker images pulled."
 
@@ -116,7 +123,7 @@ echo "This will download ~8-10GB of models. Please wait..."
 echo ""
 
 # List of required models
-MODELS=("qwen3:8b" "phi3:mini" "nomic-embed-text")
+MODELS=("$DEFAULT_LLM_MODEL" "$DEFAULT_FALLBACK_MODEL" "$DEFAULT_EMBED_MODEL")
 
 for model in "${MODELS[@]}"; do
     echo "Pulling ${model}..."
@@ -148,8 +155,7 @@ echo ""
 echo "Docker images pulled and ready."
 echo ""
 echo "Next step - Start the application:"
-echo "  ./scripts/start.sh           # Start all services (with authentication)"
-echo "  ./scripts/start.sh --no-auth # Start without authentication (dev mode)"
+echo "  ./scripts/start.sh           # Start all services"
 echo ""
 echo "Other commands:"
 echo "  ./scripts/stop.sh            # Stop application services"

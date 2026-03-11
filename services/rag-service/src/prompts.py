@@ -118,11 +118,6 @@ Alternative search terms:"""
 # Domain Classification Labels
 # =============================================================================
 
-DOMAIN_LABELS = ["hr_policy", "technical", "contracts", "general"]
-
-DOMAIN_DESCRIPTIONS = {
-    "hr_policy": "Human resources policies, employee handbooks, leave policies, benefits",
-    "technical": "Technical documentation, API references, system architecture, code docs",
-    "contracts": "Legal contracts, agreements, terms of service, NDAs",
-    "general": "General information, company info, miscellaneous documents",
-}
+# Single source of truth lives in docintel_common; re-exported here for
+# backwards-compatibility with any local imports that reference ..prompts.
+from docintel_common.domain import DOMAIN_DESCRIPTIONS, DOMAIN_LABELS  # noqa: F401

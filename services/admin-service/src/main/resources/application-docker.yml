@@ -1,9 +1,17 @@
 # Docker profile configuration
 spring:
   datasource:
-    url: jdbc:postgresql://postgres:5432/docint
-    username: docint
-    password: docint_secret
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://postgres:5432/docintel?user=docintel_app&password=docintel_app_secret}
+    username: ${SPRING_DATASOURCE_USERNAME:docintel_app}
+    password: ${SPRING_DATASOURCE_PASSWORD:docintel_app_secret}
+
+  flyway:
+    enabled: false  # configured programmatically in TenantDataSourceConfig
+
+flyway:
+  ddl:
+    username: ${FLYWAY_DDL_USERNAME:${spring.datasource.username}}
+    password: ${FLYWAY_DDL_PASSWORD:${spring.datasource.password}}
 
   data:
     redis:
@@ -13,13 +21,11 @@ spring:
 qdrant:
   url: http://qdrant:6333
 
-redis:
-  host: redis
-  port: 6379
 
-authentik:
-  url: ${AUTHENTIK_URL:http://authentik-server:9000}
-  token: ${AUTHENTIK_TOKEN:}
+zitadel:
+  url: ${ZITADEL_URL:http://zitadel-api:8080}
+  pat: ${ZITADEL_SERVICE_ACCOUNT_PAT:}
+  project-id: ${ZITADEL_PROJECT_ID:}
 
 logging:
   level:

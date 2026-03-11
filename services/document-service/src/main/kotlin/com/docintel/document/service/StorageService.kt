@@ -13,6 +13,19 @@ class StorageService(private val minioClient: MinioClient) {
 
     private val log = LoggerFactory.getLogger(javaClass)
 
+    companion object {
+        private val ALLOWED_EXTENSIONS = setOf("pdf", "docx", "doc", "txt", "csv", "md", "rtf", "odt")
+
+        fun validateFileExtension(filename: String?) {
+            val ext = filename?.substringAfterLast('.', "")?.lowercase() ?: ""
+            if (ext !in ALLOWED_EXTENSIONS) {
+                throw IllegalArgumentException(
+                    "File type '.$ext' is not allowed. Supported: ${ALLOWED_EXTENSIONS.joinToString(", ") { ".$it" }}"
+                )
+            }
+        }
+    }
+
     private fun bucketFor(tenantId: String): String = "docintel-$tenantId"
 
     private fun ensureBucket(tenantId: String) {
@@ -29,6 +42,7 @@ class StorageService(private val minioClient: MinioClient) {
     }
 
     fun storeFile(file: MultipartFile, tenantId: String, documentId: UUID): String {
+        validateFileExtension(file.originalFilename)
         ensureBucket(tenantId)
         val extension = file.originalFilename?.substringAfterLast('.', "bin") ?: "bin"
         val objectName = "$documentId/original.$extension"

@@ -7,6 +7,26 @@ Unit tests for individual RAG components.
 
 import pytest
 import sys
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Load model defaults from config/defaults.env (single source of truth)
+# ---------------------------------------------------------------------------
+def _load_defaults_env() -> dict[str, str]:
+    defaults_path = Path(__file__).parents[3] / "config" / "defaults.env"
+    result: dict[str, str] = {}
+    if defaults_path.exists():
+        for line in defaults_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                result[key.strip()] = val.strip()
+    return result
+
+_DEFAULTS = _load_defaults_env()
+DEFAULT_LITELLM_MODEL = f"ollama/{_DEFAULTS.get('DEFAULT_LLM_MODEL', 'qwen3.5:4b')}"
+DEFAULT_LITELLM_FALLBACK = f"ollama/{_DEFAULTS.get('DEFAULT_FALLBACK_MODEL', 'phi3:mini')}"
 
 
 # Avoid importing haystack at module level to prevent recursion issues
@@ -273,19 +293,19 @@ class TestLiteLLMGenerator:
         """Generator initializes with model config."""
         from src.components.llm import LiteLLMGenerator
         generator = LiteLLMGenerator(
-            model="ollama/qwen3:4b",
+            model=DEFAULT_LITELLM_MODEL,
             temperature=0.7,
             max_tokens=500,
         )
         
-        assert generator.model == "ollama/qwen3:4b"
+        assert generator.model == DEFAULT_LITELLM_MODEL
         assert generator.temperature == 0.7
         assert generator.max_tokens == 500
 
     def test_generator_run(self):
         """Generator produces response from prompt."""
         from src.components.llm import LiteLLMGenerator
-        generator = LiteLLMGenerator(model="ollama/qwen3:4b")
+        generator = LiteLLMGenerator(model=DEFAULT_LITELLM_MODEL)
         
         try:
             result = generator.run(prompt="Say 'hello' and nothing else.")
@@ -302,7 +322,7 @@ class TestLiteLLMGenerator:
         from src.components.llm import LiteLLMGenerator
         generator = LiteLLMGenerator(
             model="ollama/nonexistent-model",
-            fallbacks=["ollama/qwen3:4b", "ollama/phi3:mini"],
+            fallbacks=[DEFAULT_LITELLM_MODEL, DEFAULT_LITELLM_FALLBACK],
         )
         
         assert generator.fallbacks is not None

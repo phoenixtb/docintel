@@ -10,7 +10,7 @@ from haystack import component
 from qdrant_client import QdrantClient, models
 from typing import Optional
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 
 
@@ -124,7 +124,7 @@ class SemanticCacheWriter:
                         "response": response,
                         "sources": sources,
                         "tenant_id": tenant_id,
-                        "created_at": datetime.utcnow().isoformat(),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
             ],

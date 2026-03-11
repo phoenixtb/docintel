@@ -30,13 +30,15 @@ class Settings(BaseSettings):
     qdrant_cache_collection: str = "response_cache"
     # Must match ollama_embed_dim. Update both together when switching embed model.
     qdrant_embedding_dim: int = 768
+    # Set QDRANT_QUANTIZATION=false to disable INT8 scalar quantization (e.g. during benchmarking).
+    qdrant_quantization: bool = True
 
     # ── Ollama (all inference runs through Ollama) ────────────────────────────
     # In prod: point to vLLM or any OpenAI-compatible endpoint via these env vars.
     ollama_base_url: str = "http://host.docker.internal:11434"
 
     # LLM — chat generation and streaming
-    ollama_llm_model: str = "qwen3:8b"
+    ollama_llm_model: str = "qwen3.5:4b"
     ollama_llm_fallback: str = "phi3:mini"
 
     # Embeddings — dense vectors (768-dim). Must match qdrant_embedding_dim.
@@ -47,10 +49,11 @@ class Settings(BaseSettings):
     ollama_llm_temperature: float = 0.1
     ollama_llm_max_tokens: int = 4096
 
-    # ── Reranker ─────────────────────────────────────────────────────────────
-    # Runs locally on CPU. Haystack has no Ollama reranker component.
-    # For prod: swap to Cohere/Jina reranker API or Infinity server.
-    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # ── Reranker — Infinity server ────────────────────────────────────────────
+    # Infinity serves cross-encoder models via OpenAI-compatible API.
+    # GPU/CPU acceleration is handled by Infinity; rag-service calls HTTP.
+    infinity_url: str = "http://infinity:7997"
+    infinity_reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     use_reranking: bool = True
 
     # ── RAG parameters ────────────────────────────────────────────────────────
@@ -62,6 +65,14 @@ class Settings(BaseSettings):
 
     # ── Hybrid search (BM25 sparse via fastembed, always local) ──────────────
     rag_use_hybrid_search: bool = True
+
+    # ── Concurrency ───────────────────────────────────────────────────────────
+    # Max concurrent LLM generation tasks across ALL tenants.
+    # Ollama (single GPU, serial queue): 2-4 is optimal — more just queues at Ollama.
+    # OpenAI / Anthropic API: set to 20-50+ (they handle concurrency server-side;
+    #   rate limits are TPM/RPM-based, not connection-count-based).
+    # vLLM with tensor-parallelism: set to (gpu_count * 4) or so.
+    llm_concurrency_limit: int = 3
 
     # ── Semantic caching ──────────────────────────────────────────────────────
     use_cache: bool = True

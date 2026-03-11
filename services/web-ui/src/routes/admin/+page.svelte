@@ -1,14 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { env } from '$env/dynamic/public';
-  import { getAuthHeaders, getTenantId } from '$lib/auth';
   import { toast } from 'svelte-sonner';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
-  
-  const API_BASE = env.PUBLIC_API_URL || 'http://localhost:8080';
+  import { apiFetch } from '$lib/api';
   
   // State
-  let activeTab: 'dashboard' | 'documents' | 'cache' | 'tenants' | 'tenant-mgmt' | 'users' = $state('dashboard');
+  let activeTab: 'dashboard' | 'documents' | 'cache' | 'tenants' | 'tenant-mgmt' | 'users' | 'model' = $state('dashboard');
   let loading = $state(true);
   
   // Dashboard data
@@ -51,11 +48,21 @@
   let selectedUserTenant = $state('');
   let updatingRoleFor: string | null = $state(null);
 
-  const headers = () => ({ ...getAuthHeaders() });
-  const jsonHeaders = () => ({ ...getAuthHeaders(), 'Content-Type': 'application/json' });
-  
+  // Platform model
+  interface ModelInfo { name: string; size?: number }
+  interface PlatformSettings { llmModel: string | null }
+  let availableModels: ModelInfo[] = $state([]);
+  let platformSettings: PlatformSettings | null = $state(null);
+  let selectedPlatformModel: string | null = $state(null); // null = "Tenant Choice"
+  let modelLoading = $state(false);
+  let modelSaving = $state(false);
+  let platformModelConfirmOpen = $state(false);
+  let pendingPlatformModel: string | null | undefined = $state(undefined);
+
+  const jsonHeaders = () => ({ 'Content-Type': 'application/json' });
+
   async function fetchJson(url: string) {
-    const res = await fetch(`${API_BASE}${url}`, { headers: headers() });
+    const res = await apiFetch(url);
     return res.ok ? res.json() : null;
   }
   
@@ -81,7 +88,7 @@
     cacheClearing = true;
     try {
       const url = tenantId ? `/api/v1/admin/cache/clear/${tenantId}` : '/api/v1/admin/cache/clear';
-      await fetch(`${API_BASE}${url}`, { method: 'POST', headers: headers() });
+      await apiFetch(url, { method: 'POST' });
       await loadCache();
     } catch (e) { console.error(e); }
     cacheClearing = false;
@@ -112,10 +119,7 @@
     deletingDocs = true;
     deleteResult = null;
     try {
-      const res = await fetch(`${API_BASE}/api/v1/documents/all?tenant_id=${tenantId}`, {
-        method: 'DELETE',
-        headers: headers(),
-      });
+      const res = await apiFetch(`/api/v1/documents/all?tenant_id=${tenantId}`, { method: 'DELETE' });
       if (res.ok) {
         const data = await res.json();
         deleteResult = `Deleted ${data.deleted} documents for tenant "${tenantId}"`;
@@ -139,7 +143,7 @@
     if (!newTenant.id.trim() || !newTenant.name.trim()) { toast.error('Tenant ID and name are required'); return; }
     creatingTenant = true;
     try {
-      const res = await fetch(`${API_BASE}/api/v1/tenants`, {
+      const res = await apiFetch(`/api/v1/tenants`, {
         method: 'POST',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -169,7 +173,7 @@
     if (!editingTenantId) return;
     savingTenant = true;
     try {
-      const res = await fetch(`${API_BASE}/api/v1/tenants/${editingTenantId}`, {
+      const res = await apiFetch(`/api/v1/tenants/${editingTenantId}`, {
         method: 'PUT',
         headers: jsonHeaders(),
         body: JSON.stringify({
@@ -202,10 +206,7 @@
     confirmTenantId = null;
     deletingTenant = true;
     try {
-      const res = await fetch(`${API_BASE}/api/v1/tenants/${tenantId}`, {
-        method: 'DELETE',
-        headers: headers(),
-      });
+      const res = await apiFetch(`/api/v1/tenants/${tenantId}`, { method: 'DELETE' });
       if (res.ok) {
         toast.success(`Tenant "${tenantId}" deleted`);
         await loadTenants();
@@ -235,7 +236,7 @@
   async function updateUserRole(user: TenantUser, newRole: string) {
     updatingRoleFor = user.id;
     try {
-      const res = await fetch(`${API_BASE}/api/v1/tenants/${user.tenantId}/users/${user.id}/role`, {
+      const res = await apiFetch(`/api/v1/tenants/${user.tenantId}/users/${user.id}/role`, {
         method: 'PUT',
         headers: jsonHeaders(),
         body: JSON.stringify({ role: newRole }),
@@ -250,6 +251,47 @@
     updatingRoleFor = null;
   }
   
+  async function loadPlatformModel() {
+    modelLoading = true;
+    try {
+      const [modelsRes, settingsRes] = await Promise.all([
+        apiFetch('/api/v1/models'),
+        apiFetch('/api/v1/admin/platform/settings'),
+      ]);
+      if (modelsRes.ok) availableModels = (await modelsRes.json()).models ?? [];
+      if (settingsRes.ok) {
+        platformSettings = await settingsRes.json();
+        selectedPlatformModel = platformSettings?.llmModel ?? null;
+      }
+    } catch (e) { toast.error(`Failed to load model settings: ${e}`); }
+    modelLoading = false;
+  }
+
+  function requestPlatformModelChange(model: string | null) {
+    pendingPlatformModel = model;
+    platformModelConfirmOpen = true;
+  }
+
+  async function confirmPlatformModelChange() {
+    platformModelConfirmOpen = false;
+    modelSaving = true;
+    try {
+      const res = await apiFetch('/api/v1/admin/platform/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ llmModel: pendingPlatformModel ?? null }),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      // Clear ALL tenant caches — model changed globally
+      await apiFetch('/api/v1/admin/cache/clear', { method: 'POST' });
+      platformSettings = await res.json();
+      selectedPlatformModel = platformSettings?.llmModel ?? null;
+      toast.success('Platform model updated and all caches cleared.');
+    } catch (e) { toast.error(`Failed: ${e}`); }
+    modelSaving = false;
+    pendingPlatformModel = undefined;
+  }
+
   function switchTab(tab: typeof activeTab) {
     activeTab = tab;
     deleteResult = null;
@@ -258,6 +300,7 @@
     if (tab === 'tenants') loadTenants();
     if (tab === 'tenant-mgmt') loadTenants();
     if (tab === 'users') { loadTenants(); users = []; }
+    if (tab === 'model') loadPlatformModel();
   }
   
   onMount(() => {
@@ -279,6 +322,7 @@
         { id: 'tenants', label: 'Usage' },
         { id: 'tenant-mgmt', label: 'Tenants' },
         { id: 'users', label: 'Users' },
+        { id: 'model', label: 'Model' },
       ] as tab}
         <button
           onclick={() => switchTab(tab.id as typeof activeTab)}
@@ -763,6 +807,94 @@
       </div>
     {/if}
 
+    <!-- Model Tab -->
+    {#if activeTab === 'model'}
+      <div class="space-y-6">
+        {#if modelLoading}
+          <div class="text-center py-12 text-gray-400">Loading...</div>
+        {:else}
+          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Platform LLM Model</h3>
+            <p class="text-sm text-gray-500 dark:text-gray-400 mb-1">
+              Set a platform-wide LLM model that overrides all tenant preferences.
+              Select <span class="font-mono font-medium">Tenant Choice</span> to let each tenant pick their own.
+            </p>
+            <p class="text-xs text-amber-600 dark:text-amber-400 mb-4">
+              Changing this setting will clear the semantic cache for ALL tenants.
+            </p>
+
+            <div class="flex items-end gap-3">
+              <div class="flex-1">
+                <label for="platform-model-select" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">
+                  Global model override
+                </label>
+                <select
+                  id="platform-model-select"
+                  disabled={modelSaving}
+                  bind:value={selectedPlatformModel}
+                  class="w-full rounded-lg border border-gray-300 dark:border-gray-600
+                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
+                    px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+                    disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <option value={null}>Tenant Choice (no override)</option>
+                  {#each availableModels as model}
+                    <option value={model.name}>{model.name}</option>
+                  {/each}
+                </select>
+              </div>
+              <button
+                onclick={() => requestPlatformModelChange(selectedPlatformModel)}
+                disabled={modelSaving || selectedPlatformModel === (platformSettings?.llmModel ?? null)}
+                class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white
+                  hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {modelSaving ? 'Saving...' : 'Apply'}
+              </button>
+            </div>
+
+            <p class="text-xs text-gray-400 mt-3">
+              Current setting:
+              <span class="font-mono font-medium">
+                {platformSettings?.llmModel ?? 'Tenant Choice'}
+              </span>
+            </p>
+          </div>
+
+          <!-- Per-tenant model overview -->
+          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-4">Per-Tenant Preferences</h3>
+            {#if tenants.length === 0}
+              <p class="text-sm text-gray-400">No tenants found.</p>
+            {:else}
+              <table class="w-full text-sm">
+                <thead class="border-b border-gray-200 dark:border-gray-700">
+                  <tr>
+                    <th class="text-left py-2 font-medium text-gray-600 dark:text-gray-400">Tenant</th>
+                    <th class="text-left py-2 font-medium text-gray-600 dark:text-gray-400">Preference</th>
+                    <th class="text-left py-2 font-medium text-gray-600 dark:text-gray-400">Effective</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
+                  {#each tenants as tenant}
+                    <tr>
+                      <td class="py-2.5 font-mono text-xs text-gray-700 dark:text-gray-300">{tenant.tenantId}</td>
+                      <td class="py-2.5 text-xs text-gray-500 dark:text-gray-400">
+                        {tenant.settings?.llmModel ?? 'Not set'}
+                      </td>
+                      <td class="py-2.5 text-xs font-medium text-gray-900 dark:text-white">
+                        {platformSettings?.llmModel ?? tenant.settings?.llmModel ?? 'Default'}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
   </div>
 </div>
 
@@ -778,4 +910,14 @@
   dangerous={true}
   onconfirm={handleConfirm}
   oncancel={() => { confirmOpen = false; confirmTenantId = null; }}
+/>
+
+<ConfirmDialog
+  open={platformModelConfirmOpen}
+  title="Change platform model?"
+  message={`This will set the platform model to "${pendingPlatformModel ?? 'Tenant Choice'}" and clear the semantic cache for ALL tenants. All cached responses will be regenerated. Proceed?`}
+  confirmLabel="Apply & Clear All Caches"
+  dangerous={false}
+  onconfirm={confirmPlatformModelChange}
+  oncancel={() => { platformModelConfirmOpen = false; pendingPlatformModel = undefined; }}
 />

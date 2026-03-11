@@ -47,6 +47,30 @@ jobs:
           pytest tests/ -v
 
   # ===========================================================================
+  # Analytics Service (Python)
+  # ===========================================================================
+  analytics-service:
+    name: Analytics Service
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/analytics-service-py
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  # ===========================================================================
   # Kotlin Services
   # ===========================================================================
   kotlin-services:
@@ -75,16 +99,85 @@ jobs:
       - name: Build
         run: ./gradlew build -x test
 
-      - name: Run tests
-        run: ./gradlew test
+      - name: Run tests with coverage
+        run: ./gradlew test jacocoTestReport
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jacoco-${{ matrix.service }}
+          path: services/${{ matrix.service }}/build/reports/jacoco/
 
   # ===========================================================================
-  # Docker Build Test
+  # Web UI
+  # ===========================================================================
+  web-ui:
+    name: Web UI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/web-ui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: services/web-ui/package.json
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        run: npx playwright test --reporter=github
+        env:
+          CI: true
+          PUBLIC_API_URL: http://localhost:8080
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: services/web-ui/playwright-report/
+
+  # ===========================================================================
+  # Docker Build Test — all services
   # ===========================================================================
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
-    needs: [rag-service, kotlin-services]
+    needs: [rag-service, analytics-service, kotlin-services, web-ui]
+    strategy:
+      matrix:
+        include:
+          - service: rag-service
+            context: services/rag-service
+            tag: docintel/rag-service:ci
+          - service: analytics-service-py
+            context: services/analytics-service-py
+            tag: docintel/analytics-service:ci
+          - service: api-gateway
+            context: services/api-gateway
+            tag: docintel/api-gateway:ci
+          - service: admin-service
+            context: services/admin-service
+            tag: docintel/admin-service:ci
+          - service: document-service
+            context: services/document-service
+            tag: docintel/document-service:ci
+          - service: web-ui
+            context: services/web-ui
+            tag: docintel/web-ui:ci
 
     steps:
       - uses: actions/checkout@v4
@@ -92,12 +185,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build RAG Service
+      - name: Build ${{ matrix.service }}
         uses: docker/build-push-action@v5
         with:
-          context: services/rag-service
+          context: ${{ matrix.context }}
           push: false
-          tags: docintel/rag-service:test
-
-      # Note: Kotlin services need source code to build
-      # In a real setup, you'd build these too
+          tags: ${{ matrix.tag }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}

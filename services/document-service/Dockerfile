@@ -37,6 +37,9 @@ WORKDIR /app
 
 COPY --from=build /app/build/libs/*.jar app.jar
 
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
 EXPOSE 8081
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

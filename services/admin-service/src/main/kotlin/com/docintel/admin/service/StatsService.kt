@@ -3,14 +3,17 @@ package com.docintel.admin.service
 import com.docintel.admin.dto.SystemStats
 import com.docintel.admin.dto.TenantSummary
 import com.docintel.admin.dto.TenantUsage
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 
 @Service
 class StatsService(
     private val jdbcTemplate: JdbcTemplate,
-    private val cacheService: CacheService
+    private val cacheService: CacheService,
+    private val objectMapper: ObjectMapper,
 ) {
     fun getSystemStats(): SystemStats {
         val documentCount = jdbcTemplate.queryForObject(
@@ -19,7 +22,7 @@ class StatsService(
         ) ?: 0L
 
         val chunkCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM chunks",
+            "SELECT COALESCE(SUM(chunk_count), 0) FROM documents",
             Long::class.java
         ) ?: 0L
 
@@ -45,7 +48,7 @@ class StatsService(
     fun listTenants(): List<TenantSummary> {
         return jdbcTemplate.query(
             """
-            SELECT t.id, t.name, 
+            SELECT t.id, t.name, t.quota_documents, t.quota_queries_per_day, t.settings,
                    COALESCE(d.doc_count, 0) as doc_count,
                    COALESCE(q.query_count, 0) as query_count
             FROM tenants t
@@ -62,15 +65,25 @@ class StatsService(
             ORDER BY t.name
             """.trimIndent()
         ) { rs, _ ->
+            @Suppress("UNCHECKED_CAST")
+            val settingsJson = runCatching {
+                rs.getString("settings")?.let {
+                    objectMapper.readValue(it, Map::class.java) as Map<String, Any?>
+                } ?: emptyMap()
+            }.getOrDefault(emptyMap())
             TenantSummary(
                 tenantId = rs.getString("id"),
                 name = rs.getString("name"),
                 documentCount = rs.getInt("doc_count"),
-                queryCount = rs.getLong("query_count")
+                queryCount = rs.getLong("query_count"),
+                quotaDocuments = rs.getInt("quota_documents"),
+                quotaQueriesPerDay = rs.getInt("quota_queries_per_day"),
+                settings = settingsJson
             )
         }
     }
 
+    @Transactional(readOnly = true)
     fun getTenantUsage(tenantId: String): TenantUsage? {
         val documentCount = jdbcTemplate.queryForObject(
             "SELECT COUNT(*) FROM documents WHERE tenant_id = ?",
@@ -79,7 +92,7 @@ class StatsService(
         )?.toInt() ?: 0
 
         val chunkCount = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM chunks WHERE tenant_id = ?",
+            "SELECT COALESCE(SUM(chunk_count), 0) FROM documents WHERE tenant_id = ?",
             Long::class.java,
             tenantId
         )?.toInt() ?: 0

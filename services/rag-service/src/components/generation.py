@@ -28,7 +28,7 @@ class LiteLLMStreamingGenerator:
 
     def __init__(
         self,
-        model: str = "ollama/qwen3:4b",
+        model: str = "ollama/qwen3.5:4b",
         temperature: float = 0.1,
         max_tokens: int = 1024,
         api_base: str | None = None,

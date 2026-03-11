@@ -8,13 +8,13 @@ spring:
 
   # OAuth2 Resource Server — JWT validation active in docker profile (not just prod).
   # Using jwk-set-uri (internal Docker URL) instead of issuer-uri to avoid issuer mismatch:
-  # browsers authenticate via localhost:9090 so the JWT iss = http://localhost:9090/...
-  # but the gateway only reaches Authentik via the internal docker hostname.
+  # browsers authenticate via localhost:9090 so the JWT iss = http://localhost:9090
+  # but the gateway connects directly to zitadel-api:8080 to fetch JWKS (bypasses Traefik).
   security:
     oauth2:
       resourceserver:
         jwt:
-          jwk-set-uri: ${AUTHENTIK_JWK_SET_URI:http://authentik-server:9000/application/o/docintel/jwks/}
+          jwk-set-uri: ${ZITADEL_JWK_SET_URI:http://zitadel-api:8080/oauth/v2/keys}
 
   cloud:
     gateway:
@@ -72,19 +72,19 @@ spring:
                 rate-limiter: "#{@queryRedisRateLimiter}"
                 key-resolver: "#{@tenantRateLimitKeyResolver}"
 
-        - id: rag-service-classify
-          uri: http://rag-service:8000
+        - id: ingestion-service-ingest
+          uri: http://ingestion-service:8001
           predicates:
-            - Path=/api/v1/classify-domain
+            - Path=/api/v1/ingest, /api/v1/ingest/**
           filters:
-            - RewritePath=/api/v1/classify-domain, /classify-domain
+            - RewritePath=/api/v1/ingest(?<segment>/?.*), /ingest${segment}
 
-        - id: rag-service-sample-datasets
-          uri: http://rag-service:8000
+        - id: ingestion-service-sample-datasets
+          uri: http://ingestion-service:8001
           predicates:
-            - Path=/api/v1/sample-datasets/**
+            - Path=/api/v1/sample-datasets, /api/v1/sample-datasets/**
           filters:
-            - RewritePath=/api/v1/sample-datasets(?<segment>.*), /sample-datasets${segment}
+            - RewritePath=/api/v1/sample-datasets(?<segment>/?.*), /ingest/dataset${segment}
 
         - id: rag-service-conversations
           uri: http://rag-service:8000
@@ -100,12 +100,27 @@ spring:
           filters:
             - RewritePath=/api/v1/vector-stats, /vector-stats
 
+        - id: rag-service-models
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/models
+          filters:
+            - RewritePath=/api/v1/models, /models
+
         - id: admin-service
           uri: http://admin-service:8082
           predicates:
             - Path=/api/v1/admin/**
           filters:
             - RewritePath=/api/v1/admin/(?<segment>.*), /internal/${segment}
+
+        - id: admin-tenants-settings
+          uri: http://admin-service:8082
+          predicates:
+            - Path=/api/v1/tenants/*/settings
+            - Method=GET,PATCH
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tid>[^/]+)/settings, /internal/tenants/${tid}/settings
 
         - id: admin-tenants
           uri: http://admin-service:8082

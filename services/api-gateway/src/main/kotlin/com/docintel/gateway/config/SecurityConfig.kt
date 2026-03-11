@@ -1,5 +1,6 @@
 package com.docintel.gateway.config
 
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Profile
@@ -21,10 +22,13 @@ class SecurityConfig {
      */
     @Bean
     @Profile("!dev")
-    fun securityWebFilterChain(http: ServerHttpSecurity): SecurityWebFilterChain {
+    fun securityWebFilterChain(
+        http: ServerHttpSecurity,
+        corsSource: CorsConfigurationSource,
+    ): SecurityWebFilterChain {
         return http
             .csrf { it.disable() }
-            .cors { it.configurationSource(corsConfigurationSource()) }
+            .cors { it.configurationSource(corsSource) }
             .oauth2ResourceServer { oauth2 ->
                 oauth2.jwt { }
             }
@@ -43,10 +47,13 @@ class SecurityConfig {
      */
     @Bean
     @Profile("dev")
-    fun securityWebFilterChainDev(http: ServerHttpSecurity): SecurityWebFilterChain {
+    fun securityWebFilterChainDev(
+        http: ServerHttpSecurity,
+        corsSource: CorsConfigurationSource,
+    ): SecurityWebFilterChain {
         return http
             .csrf { it.disable() }
-            .cors { it.configurationSource(corsConfigurationSource()) }
+            .cors { it.configurationSource(corsSource) }
             .authorizeExchange { auth ->
                 auth.anyExchange().permitAll()
             }
@@ -54,13 +61,17 @@ class SecurityConfig {
     }
 
     @Bean
-    fun corsConfigurationSource(): CorsConfigurationSource {
+    fun corsConfigurationSource(
+        @Value("\${docintel.cors.allowed-origins:http://localhost:3001}") allowedOriginsRaw: String
+    ): CorsConfigurationSource {
+        val origins = allowedOriginsRaw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         val configuration = CorsConfiguration().apply {
-            allowedOriginPatterns = listOf("*")
-            allowedMethods = listOf("GET", "POST", "PUT", "DELETE", "OPTIONS")
+            allowedOrigins = origins
+            allowedMethods = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
             allowedHeaders = listOf("*")
             exposedHeaders = listOf(
                 "X-Tenant-Id",
+                "X-Request-Id",
                 "X-RateLimit-Limit",
                 "X-RateLimit-Remaining",
                 "Retry-After"

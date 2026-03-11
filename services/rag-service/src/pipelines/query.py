@@ -18,12 +18,12 @@ Architecture (separation of concerns):
   └─────────────────────────────────────────────────────────────────────────┘
          ↓ pipeline.run()
   ┌── Haystack Pipeline (serialisable, warm-up managed, OTel-traceable) ─────┐
-  │  SecureRetriever → SentenceTransformersSimilarityRanker → PromptBuilder → LLM  │
+  │  SecureRetriever → InfinityReranker → PromptBuilder → LLM               │
   └─────────────────────────────────────────────────────────────────────────┘
 
 All model inference (LLM + dense embeddings) runs through Ollama for GPU acceleration.
 BM25 sparse embeddings use fastembed locally (no server, lightweight).
-Reranker (cross-encoder) runs CPU-local — Haystack has no Ollama reranker component.
+Reranker (cross-encoder) runs in Infinity — GPU/CPU via ONNX/TensorRT, decoupled from app.
 
 Why embedders live outside the pipeline:
   Cache check requires the dense embedding *before* deciding whether to run
@@ -36,18 +36,19 @@ import logging
 import time
 from typing import Optional
 
-from haystack import Pipeline
-from haystack.components.rankers import SentenceTransformersSimilarityRanker
+from haystack import AsyncPipeline
 from haystack.components.routers import TransformersZeroShotTextRouter
 from haystack_integrations.components.embedders.ollama import OllamaTextEmbedder
 
 from ..components.cache import SemanticCacheChecker, SemanticCacheWriter
 from ..components.embedders import BM25SparseTextEmbedder
 from ..components.prompt import PromptBuilder
+from ..components.reranker import InfinityReranker
 from ..components.retrieval import SecureRetriever
+from docintel_common.domain import DOMAIN_LABELS
+
 from ..components.routing import DomainFilterBuilder
 from ..config import Settings, get_settings
-from ..prompts import DOMAIN_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -56,20 +57,24 @@ logger = logging.getLogger(__name__)
 # Pipeline factory
 # ---------------------------------------------------------------------------
 
-def build_query_pipeline(settings: Settings) -> Pipeline:
+def build_query_pipeline(settings: Settings) -> AsyncPipeline:
     """
-    Build the core RAG Haystack Pipeline.
+    Build the core RAG Haystack AsyncPipeline.
 
-    Inputs required from caller (pipeline.run input dict):
+    AsyncPipeline (Haystack ≥ 2.11) runs independent components concurrently
+    via asyncio, and wraps sync components in run_in_executor automatically.
+    Use `await pipeline.run_async(data=...)` for non-blocking execution.
+
+    Inputs required from caller:
       retriever:      query_embedding, query_sparse_embedding, tenant_id,
                       user_roles, user_id, domain_filter
       reranker:       query
       prompt_builder: query, history (optional)
 
-    Outputs available after pipeline.run():
+    Outputs available after run_async():
       retriever.documents, reranker.documents, llm.replies
     """
-    pipeline = Pipeline()
+    pipeline = AsyncPipeline()
 
     pipeline.add_component(
         "retriever",
@@ -77,10 +82,10 @@ def build_query_pipeline(settings: Settings) -> Pipeline:
     )
     pipeline.add_component(
         "reranker",
-        SentenceTransformersSimilarityRanker(
-            model=settings.reranker_model,
+        InfinityReranker(
+            url=settings.infinity_url,
+            model=settings.infinity_reranker_model,
             top_k=settings.rag_reranker_top_k,
-            device=None,  # auto: CPU in Docker (no MPS/CUDA passthrough)
         ),
     )
     pipeline.add_component("prompt_builder", PromptBuilder())
@@ -179,8 +184,8 @@ class RAGService:
         self._domain_router: Optional[TransformersZeroShotTextRouter] = None
         self._domain_filter_builder: Optional[DomainFilterBuilder] = None
 
-        # Core Haystack Pipeline
-        self._pipeline: Optional[Pipeline] = None
+        # Core Haystack AsyncPipeline
+        self._pipeline: Optional[AsyncPipeline] = None
 
     # ── Initialisation ───────────────────────────────────────────────────────
 
@@ -258,12 +263,13 @@ class RAGService:
         question: str,
         answer: str,
         sources: list[dict],
+        tenant_id: str = "",
     ) -> None:
         try:
             from ..db import add_message
 
-            add_message(conversation_id, "user", question)
-            add_message(conversation_id, "assistant", answer, sources=sources)
+            add_message(conversation_id, "user", question, tenant_id=tenant_id)
+            add_message(conversation_id, "assistant", answer, sources=sources, tenant_id=tenant_id)
         except Exception as e:
             logger.warning("Failed to persist conversation messages: %s", e)
 
@@ -297,7 +303,7 @@ class RAGService:
 
     # ── Main query entry point ───────────────────────────────────────────────
 
-    def query(
+    async def query(
         self,
         question: str,
         tenant_id: str,
@@ -322,8 +328,12 @@ class RAGService:
           8. Cache write
           9. Conversation persist
         """
+        import asyncio
+        loop = asyncio.get_event_loop()
+
         if not self._ready:
-            self.warm_up()
+            # warm_up() loads models and builds pipelines — must not block the event loop.
+            await loop.run_in_executor(None, self.warm_up)
 
         cfg = self._settings
         effective_top_k = top_k if top_k is not None else cfg.rag_default_top_k
@@ -331,17 +341,26 @@ class RAGService:
         start_time = time.time()
 
         # ── Step 1: Embed query ──────────────────────────────────────────────
-        embed_result = self._dense_embedder.run(text=question)  # type: ignore[union-attr]
+        # OllamaTextEmbedder.run() makes a synchronous HTTP request to Ollama.
+        # BM25SparseTextEmbedder.run() is CPU-bound. Both are offloaded to a thread pool
+        # to avoid blocking the uvicorn event loop.
+        embed_result = await loop.run_in_executor(
+            None, lambda: self._dense_embedder.run(text=question)  # type: ignore[union-attr]
+        )
         query_embedding: list[float] = embed_result["embedding"]
 
-        sparse_result = self._sparse_embedder.run(text=question)  # type: ignore[union-attr]
+        sparse_result = await loop.run_in_executor(
+            None, lambda: self._sparse_embedder.run(text=question)  # type: ignore[union-attr]
+        )
         query_sparse_embedding = sparse_result.get("sparse_embedding")
 
         # ── Step 2: Cache check ──────────────────────────────────────────────
         if cfg.use_cache and self._cache_checker:
-            cache_result = self._cache_checker.run(
-                query_embedding=query_embedding,
-                tenant_id=tenant_id,
+            cache_result = await loop.run_in_executor(
+                None, lambda: self._cache_checker.run(  # type: ignore[union-attr]
+                    query_embedding=query_embedding,
+                    tenant_id=tenant_id,
+                )
             )
             if cache_result["cache_hit"]:
                 latency_ms = int((time.time() - start_time) * 1000)
@@ -383,7 +402,7 @@ class RAGService:
             },
         }
 
-        result = self._pipeline.run(pipeline_inputs)  # type: ignore[union-attr]
+        result = await self._pipeline.run_async(data=pipeline_inputs)  # type: ignore[union-attr]
 
         # ── Step 6: Extract + filter results ─────────────────────────────────
         reranked_docs = result.get("reranker", {}).get("documents", [])
@@ -418,27 +437,33 @@ class RAGService:
                 "document_id": doc.meta.get("document_id", ""),
                 "filename": doc.meta.get("filename", "Unknown"),
                 "section": _build_section_label(doc.meta, chunk_idx),
-                "content": doc.content[:200] + "..." if len(doc.content) > 200 else doc.content,
+                "content": (_c := doc.content or "")[:200] + "..." if len(doc.content or "") > 200 else _c,
                 "score": doc.score or 0.0,
                 "metadata": {k: v for k, v in doc.meta.items() if k != "content"},
             })
 
-        # ── Step 8: Cache write ───────────────────────────────────────────────
+        # ── Step 8: Cache write (non-blocking fire-and-forget) ───────────────
         if cfg.use_cache and self._cache_writer:
-            try:
-                self._cache_writer.run(
-                    query=question,
-                    query_embedding=query_embedding,
-                    response=answer,
-                    sources=sources,
-                    tenant_id=tenant_id,
-                )
-            except Exception as e:
-                logger.warning("Cache write failed: %s", e)
+            import asyncio
+            async def _write_cache():
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: self._cache_writer.run(  # type: ignore[union-attr]
+                            query=question,
+                            query_embedding=query_embedding,
+                            response=answer,
+                            sources=sources,
+                            tenant_id=tenant_id,
+                        ),
+                    )
+                except Exception as e:
+                    logger.warning("Cache write failed: %s", e)
+            asyncio.create_task(_write_cache())
 
         # ── Step 9: Persist conversation ──────────────────────────────────────
         if conversation_id:
-            self._persist_conversation(conversation_id, question, answer, sources)
+            self._persist_conversation(conversation_id, question, answer, sources, tenant_id=tenant_id)
 
         return {
             "answer": answer,

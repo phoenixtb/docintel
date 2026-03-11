@@ -4,26 +4,24 @@
 # Starts all DocIntel services
 #
 # Usage:
-#   ./scripts/start.sh                  # Start with authentication
-#   ./scripts/start.sh --no-auth        # Start without authentication (dev mode)
-#   ./scripts/start.sh --build          # Rebuild images before starting (after code changes)
-#   ./scripts/start.sh --build --no-auth
+#   ./scripts/start.sh          # Start with authentication
+#   ./scripts/start.sh --build  # Rebuild images before starting (after code changes)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Load model defaults (single source of truth)
+# shellcheck source=../config/defaults.env
+source "$PROJECT_DIR/config/defaults.env"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 # Parse arguments
-NO_AUTH=false
 DO_BUILD=false
 for arg in "$@"; do
     case $arg in
-        --no-auth)
-            NO_AUTH=true
-            shift
-            ;;
         --build)
             DO_BUILD=true
             shift
@@ -59,7 +57,7 @@ if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
     fi
 fi
 
-REQUIRED_MODELS=("qwen3:8b" "nomic-embed-text")
+REQUIRED_MODELS=("$DEFAULT_LLM_MODEL" "$DEFAULT_EMBED_MODEL")
 MISSING_MODELS=()
 for model in "${REQUIRED_MODELS[@]}"; do
     if ! ollama list 2>/dev/null | grep -q "^${model}"; then
@@ -116,49 +114,28 @@ if [ "$COLLECTIONS_EXIST" = "0" ]; then
 fi
 
 # =============================================================================
-# Start Authentik (if enabled)
-# =============================================================================
-
-AUTH_SETUP_OK=false
-
-if [ "$NO_AUTH" = false ]; then
-    echo ""
-    echo "Starting Authentik identity provider..."
-    docker compose --profile auth up -d
-    
-    # Run setup script (it handles waiting, blueprint verification, and prints credentials)
-    echo ""
-    if "$SCRIPT_DIR/setup-authentik.sh"; then
-        AUTH_SETUP_OK=true
-    else
-        echo ""
-        echo "Warning: Authentik setup did not complete successfully."
-        echo "Web UI will start in dev mode (no auth). Re-run setup once Authentik is ready:"
-        echo "  ./scripts/setup-authentik.sh"
-    fi
-fi
-
-# =============================================================================
-# Start Application Services
+# Start All Services (including Zitadel)
 # =============================================================================
 
 echo ""
 if [ "$DO_BUILD" = true ]; then
     echo "Building application services..."
-    docker compose --profile app build
+    docker compose build
 fi
 
-echo "Starting application services..."
+echo "Starting all services..."
+docker compose up -d
 
-if [ "$NO_AUTH" = false ] && [ "$AUTH_SETUP_OK" = true ]; then
-    PUBLIC_AUTH_ENABLED=true docker compose --profile app up -d
-else
-    PUBLIC_AUTH_ENABLED=false docker compose --profile app up -d
-    if [ "$NO_AUTH" = false ]; then
-        echo ""
-        echo "Note: Auth was requested but Authentik isn't ready yet."
-        echo "Web UI started in dev mode. Restart once Authentik is ready."
-    fi
+# Run Zitadel setup script after services are up
+# (handles waiting for Zitadel first-instance init, creates project/users/action, writes .env)
+echo ""
+if ! "$SCRIPT_DIR/setup-zitadel.sh"; then
+    echo ""
+    echo "Error: Zitadel setup did not complete successfully."
+    echo "Authentication is required. Fix the issue and re-run:"
+    echo "  ./scripts/setup-zitadel.sh"
+    echo "  docker compose restart web-ui"
+    exit 1
 fi
 
 # Wait for services
@@ -172,6 +149,30 @@ else
     echo "starting..."
 fi
 
+printf "  Ingestion Service: "
+for i in {1..60}; do
+    if curl -s http://localhost:8001/health > /dev/null 2>&1; then
+        echo "ready"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "timeout (check logs: docker compose logs ingestion-service)"
+    fi
+    sleep 2
+done
+
+printf "  Infinity Reranker: "
+for i in {1..60}; do
+    if curl -s http://localhost:7997/health > /dev/null 2>&1; then
+        echo "ready"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "timeout (check logs: docker compose logs infinity)"
+    fi
+    sleep 2
+done
+
 printf "  RAG Service: "
 for i in {1..60}; do
     if curl -s http://localhost:8000/health > /dev/null 2>&1; then
@@ -180,18 +181,6 @@ for i in {1..60}; do
     fi
     if [ $i -eq 60 ]; then
         echo "timeout (check logs: docker compose logs rag-service)"
-    fi
-    sleep 2
-done
-
-printf "  Analytics Service: "
-for i in {1..30}; do
-    if curl -s http://localhost:8001/health > /dev/null 2>&1; then
-        echo "ready"
-        break
-    fi
-    if [ $i -eq 30 ]; then
-        echo "timeout (check logs: docker compose logs analytics-service)"
     fi
     sleep 2
 done
@@ -225,36 +214,33 @@ echo "================================================"
 echo "  DocIntel Started"
 echo "================================================"
 echo ""
-echo "  Service              URL                              Credentials"
-echo "  -------------------  -------------------------------  -------------------------"
-echo "  Web UI               http://localhost:3001"
-echo "  API Gateway          http://localhost:8080"
-echo "  Analytics Service    http://localhost:8001"
-echo "  Langfuse             http://localhost:3000             admin@docintel.local / admin123"
-echo "  MinIO Console        http://localhost:9001             minioadmin / minioadmin"
-echo "  Qdrant               http://localhost:6333"
+  echo "  Service              URL                              Credentials"
+  echo "  -------------------  -------------------------------  -------------------------"
+  echo "  Web UI               http://localhost:3001"
+  echo "  API Gateway          http://localhost:8080"
+  echo "  Ingestion Service    http://localhost:8001"
+  echo "  Infinity Reranker    http://localhost:7997"
+  echo "  RAG Service          http://localhost:8000"
+  echo "  Langfuse             http://localhost:3000             admin@docintel.local / admin123"
+  echo "  MinIO Console        http://localhost:9001             minioadmin / minioadmin"
+  echo "  Qdrant               http://localhost:6333"
 echo ""
 
-if [ "$NO_AUTH" = false ] && [ "$AUTH_SETUP_OK" = true ]; then
-    echo "  Authentication: ENABLED"
-    echo ""
-    echo "  Authentik Admin      http://localhost:9090/if/admin/  akadmin / ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}"
-    echo ""
-    echo "  Users:"
-    echo "    akadmin     / ${AUTHENTIK_ADMIN_PASSWORD:-DocIntel@123}  — Authentik superuser (platform_admin)"
-    echo "    diadmin     / Diadmin@123     — Platform Admin    (platform_admin)"
-    echo "    alphaadmin  / Alphaadmin@123  — Alpha Tenant Admin (tenant_admin)"
-    echo "    alphauser   / Alphauser@123   — Alpha Tenant User  (tenant_user)"
-    echo "    betaadmin   / Betaadmin@123   — Beta Tenant Admin  (tenant_admin)"
-    echo "    betauser    / Betauser@123    — Beta Tenant User   (tenant_user)"
-else
-    echo "  Authentication: DISABLED (dev mode)"
-fi
+echo "  Authentication: ENABLED (Zitadel)"
+echo ""
+echo "  Zitadel UI     http://localhost:9090         ${ZITADEL_ADMIN_USERNAME:-zitadel-admin}@docintel.localhost / ${ZITADEL_ADMIN_PASSWORD:-DocIntel@zitadel2024!}"
+echo ""
+echo "  Users:"
+echo "    diadmin     / Diadmin@123     — Platform Admin    (platform_admin, org: platform)"
+echo "    alphaadmin  / Alphaadmin@123  — Alpha Tenant Admin (tenant_admin,  org: alpha)"
+echo "    alphauser   / Alphauser@123   — Alpha Tenant User  (tenant_user,   org: alpha)"
+echo "    betaadmin   / Betaadmin@123   — Beta Tenant Admin  (tenant_admin,  org: beta)"
+echo "    betauser    / Betauser@123    — Beta Tenant User   (tenant_user,   org: beta)"
 
 echo ""
 echo "  Commands:"
 echo "    ./scripts/stop.sh              Stop (preserves containers)"
 echo "    ./scripts/logs.sh debug         View logs (query path - for stuck queries)"
-echo "    ./scripts/start.sh --build     Rebuild after code changes"
+echo "    ./scripts/start.sh --build      Rebuild after code changes"
 echo "    ./scripts/cleanup.sh --all     Remove everything"
 echo ""

@@ -6,6 +6,7 @@ import io.minio.MinioClient
 import io.minio.RemoveBucketArgs
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.stereotype.Service
 import org.springframework.web.client.RestTemplate
 import org.springframework.http.HttpEntity
@@ -23,7 +24,10 @@ class ProvisioningService(
     @Value("\${qdrant.embedding-dim:768}") private val embeddingDim: Int,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
-    private val restTemplate = RestTemplate()
+    private val restTemplate = RestTemplate(SimpleClientHttpRequestFactory().apply {
+        setConnectTimeout(5000)
+        setReadTimeout(10000)
+    })
 
     // -------------------------------------------------------------------------
     // Qdrant

@@ -11,5 +11,9 @@ object TenantContextHolder {
 
     fun getUserRole(): String = get().userRole
 
+    fun setTenantId(tenantId: String) = ctx.set(get().copy(tenantId = tenantId))
+
+    fun setUserRole(role: String) = ctx.set(get().copy(userRole = role))
+
     fun clear() = ctx.remove()
 }

@@ -3,18 +3,23 @@ package com.docintel.admin.controller
 import com.docintel.admin.dto.*
 import com.docintel.admin.service.CacheService
 import com.docintel.admin.service.HealthService
+import com.docintel.admin.service.PlatformSettingsService
 import com.docintel.admin.service.StatsService
 import com.docintel.admin.service.TenantManagementService
+import jakarta.validation.Valid
 import org.springframework.http.ResponseEntity
+import org.springframework.validation.annotation.Validated
 import org.springframework.web.bind.annotation.*
 
+@Validated
 @RestController
 @RequestMapping("/internal")
 class AdminController(
     private val healthService: HealthService,
     private val cacheService: CacheService,
     private val statsService: StatsService,
-    private val tenantManagementService: TenantManagementService
+    private val tenantManagementService: TenantManagementService,
+    private val platformSettingsService: PlatformSettingsService,
 ) {
     /**
      * System health check with component status.
@@ -78,7 +83,7 @@ class AdminController(
      * Create a new tenant (provisions PostgreSQL record + Authentik group).
      */
     @PostMapping("/tenants")
-    fun createTenant(@RequestBody req: CreateTenantRequest): ResponseEntity<TenantSummary> {
+    fun createTenant(@Valid @RequestBody req: CreateTenantRequest): ResponseEntity<TenantSummary> {
         val tenant = tenantManagementService.createTenant(req)
         return ResponseEntity.ok(tenant)
     }
@@ -89,7 +94,7 @@ class AdminController(
     @PutMapping("/tenants/{tenantId}")
     fun updateTenant(
         @PathVariable tenantId: String,
-        @RequestBody req: UpdateTenantRequest
+        @Valid @RequestBody req: UpdateTenantRequest
     ): ResponseEntity<TenantSummary> {
         val tenant = tenantManagementService.updateTenant(tenantId, req)
             ?: return ResponseEntity.notFound().build()
@@ -127,4 +132,52 @@ class AdminController(
         return if (updated) ResponseEntity.ok().build()
         else ResponseEntity.badRequest().build()
     }
+
+    // -----------------------------------------------------------------------
+    // Platform-level settings (platform_admin only — enforced by OPA)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Get platform-wide settings (e.g. global LLM model override).
+     */
+    @GetMapping("/platform/settings")
+    fun getPlatformSettings(): ResponseEntity<PlatformSettings> =
+        ResponseEntity.ok(platformSettingsService.getPlatformSettings())
+
+    /**
+     * Update platform-wide settings.
+     * Setting llmModel=null reverts to "Tenant Choice".
+     * Cache invalidation is handled by the UI (separate cache/clear call).
+     */
+    @PutMapping("/platform/settings")
+    fun updatePlatformSettings(
+        @RequestBody req: UpdatePlatformSettingsRequest
+    ): ResponseEntity<PlatformSettings> =
+        ResponseEntity.ok(platformSettingsService.updatePlatformSettings(req))
+
+    // -----------------------------------------------------------------------
+    // Tenant-level model settings (tenant_admin for own tenant — enforced by OPA)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Get model settings for a specific tenant.
+     */
+    @GetMapping("/tenants/{tenantId}/settings")
+    fun getTenantSettings(
+        @PathVariable tenantId: String
+    ): ResponseEntity<TenantSettings> {
+        return ResponseEntity.ok(platformSettingsService.getTenantSettings(tenantId))
+    }
+
+    /**
+     * Update model preference for a specific tenant.
+     * Setting llmModel=null clears the preference (falls back to platform/default).
+     * Cache invalidation is handled by the UI (separate cache/clear call).
+     */
+    @PatchMapping("/tenants/{tenantId}/settings")
+    fun updateTenantSettings(
+        @PathVariable tenantId: String,
+        @RequestBody req: UpdateTenantSettingsRequest
+    ): ResponseEntity<TenantSettings> =
+        ResponseEntity.ok(platformSettingsService.updateTenantSettings(tenantId, req))
 }

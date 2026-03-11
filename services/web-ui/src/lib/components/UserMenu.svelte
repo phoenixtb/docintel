@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { 
-    isAuthEnabled, 
     getAuthState, 
     login, 
     logout,
@@ -50,10 +49,9 @@
     login();
   }
   
-  function handleLogout() {
+  async function handleLogout() {
     isOpen = false;
-    logout();
-    authState = getAuthState();
+    await logout();
   }
   
   onMount(() => {
@@ -149,32 +147,26 @@
       
       <!-- Auth Actions -->
       <div class="pt-1">
-        {#if isAuthEnabled()}
-          {#if authState.isAuthenticated}
-            <button 
-              onclick={handleLogout}
-              class="w-full px-4 py-2.5 text-left text-sm text-slate-400 hover:text-slate-200 hover:bg-white/5 flex items-center gap-2 transition-colors"
-            >
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-              </svg>
-              Sign out
-            </button>
-          {:else}
-            <button 
-              onclick={handleLogin}
-              class="w-full px-4 py-2.5 text-left text-sm text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10 flex items-center gap-2 font-medium transition-colors"
-            >
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
-              </svg>
-              Sign in
-            </button>
-          {/if}
+        {#if authState.isAuthenticated}
+          <button 
+            onclick={handleLogout}
+            class="w-full px-4 py-2.5 text-left text-sm text-slate-400 hover:text-slate-200 hover:bg-white/5 flex items-center gap-2 transition-colors"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+            Sign out
+          </button>
         {:else}
-          <div class="px-4 py-2 text-xs text-slate-600">
-            Auth disabled (dev mode)
-          </div>
+          <button 
+            onclick={handleLogin}
+            class="w-full px-4 py-2.5 text-left text-sm text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10 flex items-center gap-2 font-medium transition-colors"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+            </svg>
+            Sign in
+          </button>
         {/if}
       </div>
     </div>

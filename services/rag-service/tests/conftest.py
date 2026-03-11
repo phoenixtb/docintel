@@ -15,10 +15,30 @@ from pathlib import Path
 from typing import Generator
 import uuid
 
+# ---------------------------------------------------------------------------
+# Load model defaults from config/defaults.env — single source of truth.
+# This keeps tests aligned with scripts and production config.
+# ---------------------------------------------------------------------------
+def _load_defaults_env() -> dict[str, str]:
+    """Parse config/defaults.env as key=value pairs (no shell quoting)."""
+    defaults_path = Path(__file__).parents[3] / "config" / "defaults.env"
+    result: dict[str, str] = {}
+    if defaults_path.exists():
+        for line in defaults_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                result[key.strip()] = val.strip()
+    return result
+
+_DEFAULTS = _load_defaults_env()
+_DEFAULT_LLM_MODEL = _DEFAULTS.get("DEFAULT_LLM_MODEL", "qwen3.5:4b")
+_DEFAULT_EMBED_MODEL = _DEFAULTS.get("DEFAULT_EMBED_MODEL", "nomic-embed-text")
+
 # Set test environment before imports
 os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("EMBEDDING_MODEL", "nomic-ai/nomic-embed-text-v1.5")
-os.environ.setdefault("LITELLM_MODEL", "ollama/qwen3:4b")
+os.environ.setdefault("LITELLM_MODEL", f"ollama/{_DEFAULT_LLM_MODEL}")
 os.environ.setdefault("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
@@ -217,20 +237,6 @@ def cleanup_tenant_data(qdrant_client, test_tenant_id: str) -> Generator[str, No
 # =============================================================================
 # Service Fixtures
 # =============================================================================
-
-@pytest.fixture
-def chunking_service():
-    """Create ChunkingService instance."""
-    from src.chunking import ChunkingService
-    return ChunkingService()
-
-
-@pytest.fixture
-def domain_classifier():
-    """Create domain classifier instance."""
-    from src.datasets import DomainClassifier
-    return DomainClassifier()
-
 
 # =============================================================================
 # API Client Fixtures

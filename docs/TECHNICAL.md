@@ -588,10 +588,10 @@ LANGFUSE_HOST=http://langfuse:3000
 docker compose up -d
 
 # Start with app services
-docker compose --profile app up -d
+docker compose up -d
 
 # Rebuild specific service
-docker compose --profile app up -d --build rag-service
+docker compose up -d --build rag-service
 
 # View logs
 docker compose logs -f rag-service

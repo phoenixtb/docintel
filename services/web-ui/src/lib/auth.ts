@@ -1,22 +1,28 @@
 /**
- * Authentication module using oidc-client-ts
- * 
- * Uses the standard UserManager from oidc-client-ts for
- * OAuth2/OIDC flows with Authentik (or any OIDC provider).
- * 
- * Two modes:
- * 1. Dev mode (PUBLIC_AUTH_ENABLED=false): No auth, uses default tenant
- * 2. Auth mode (PUBLIC_AUTH_ENABLED=true): Full OIDC via Authentik
+ * Authentication module using oidc-client-ts.
+ *
+ * Design:
+ *  - Auth is always on. There is no PUBLIC_AUTH_ENABLED toggle.
+ *  - UserManager is created eagerly at module load (browser-only) so events
+ *    are always registered, including automaticSilentRenew timers.
+ *  - Tokens are stored in localStorage so they survive tab close/reopen and
+ *    are shared across all tabs.
+ *  - offline_access scope gets us a refresh token; oidc-client-ts uses the
+ *    refresh_token grant automatically when the access token expires.
+ *  - getAccessToken() always returns a live token — it calls signinSilent()
+ *    if the stored token is expired before returning.
+ *  - onSessionExpired() lets hooks.client.ts register one central handler that
+ *    fires for any unrecoverable auth failure (used by apiFetch).
+ *  - Runtime env vars come from window.__DOCINTEL_ENV__ (injected by nginx
+ *    entrypoint) via getEnv() — no Node server required.
+ *  - Zitadel supports RP-Initiated Logout (post_logout_redirect_uri with id_token_hint)
+ *    so signoutRedirect is used directly — no workaround needed.
  */
 
 import { browser } from '$app/environment';
-import { env } from '$env/dynamic/public';
+import { get, writable } from 'svelte/store';
 import { UserManager, WebStorageStateStore, type User as OidcUser } from 'oidc-client-ts';
-
-// Configuration
-const AUTH_ENABLED = env.PUBLIC_AUTH_ENABLED === 'true';
-const AUTHENTIK_AUTHORITY = env.PUBLIC_AUTHENTIK_ISSUER || 'http://localhost:9090/application/o/docintel/';
-const CLIENT_ID = env.PUBLIC_AUTHENTIK_CLIENT_ID || 'docintel';
+import { getEnv } from '$lib/env';
 
 // ---- Types ----
 
@@ -34,81 +40,91 @@ export interface AuthState {
   accessToken: string | null;
 }
 
-// ---- Default dev state ----
+// ---- Default states ----
 
-const DEV_STATE: AuthState = {
-  isAuthenticated: true,
-  user: {
-    id: 'dev-user',
-    email: 'dev@docintel.local',
-    name: 'Developer',
-    tenantId: 'default',
-    role: 'platform_admin',
-  },
-  accessToken: null,
-};
-
-const UNAUTHED_STATE: AuthState = {
+export const UNAUTHED_STATE: AuthState = {
   isAuthenticated: false,
   user: null,
   accessToken: null,
 };
 
-// ---- UserManager singleton ----
+// ---- Reactive store (single source of truth) ----
 
-let userManager: UserManager | null = null;
-let cachedState: AuthState = AUTH_ENABLED ? UNAUTHED_STATE : DEV_STATE;
+export const authStore = writable<AuthState>(UNAUTHED_STATE);
 
-function getUserManager(): UserManager {
-  if (!userManager && browser) {
-    userManager = new UserManager({
-      authority: AUTHENTIK_AUTHORITY,
-      client_id: CLIENT_ID,
-      redirect_uri: `${window.location.origin}/auth/callback`,
-      post_logout_redirect_uri: window.location.origin,
-      response_type: 'code',
-      scope: 'openid profile email tenant role',
-      // Fetch userinfo endpoint after login so custom scope claims
-      // (role, tenant_id) from Authentik scope mappings are merged into user.profile
-      loadUserInfo: true,
-      automaticSilentRenew: true,
-      userStore: new WebStorageStateStore({ store: sessionStorage }),
-    });
-
-    // Listen for token expiry / silent renew
-    userManager.events.addUserLoaded((user) => {
-      cachedState = oidcUserToState(user);
-    });
-    userManager.events.addUserUnloaded(() => {
-      cachedState = AUTH_ENABLED ? UNAUTHED_STATE : DEV_STATE;
-    });
-    userManager.events.addAccessTokenExpired(() => {
-      cachedState = AUTH_ENABLED ? UNAUTHED_STATE : DEV_STATE;
-    });
-  }
-  return userManager!;
+export function setAuthState(state: AuthState) {
+  authStore.set(state);
 }
 
-function oidcUserToState(user: OidcUser | null): AuthState {
-  if (!user || user.expired) {
-    return AUTH_ENABLED ? UNAUTHED_STATE : DEV_STATE;
+// ---- Session-expired callback (registered once by hooks.client.ts) ----
+
+let _sessionExpiredHandler: (() => void) | null = null;
+
+export function onSessionExpired(handler: () => void) {
+  _sessionExpiredHandler = handler;
+}
+
+export function triggerSessionExpired() {
+  if (_sessionExpiredHandler) {
+    _sessionExpiredHandler();
   }
-  const profile = user.profile;
-  // Extract tenant_id: try direct claim, then nested tenant object
+}
+
+// ---- UserManager (eager singleton, browser-only) ----
+
+function createUserManager(): UserManager | null {
+  if (!browser) return null;
+  const { PUBLIC_ZITADEL_ISSUER, PUBLIC_ZITADEL_CLIENT_ID } = getEnv();
+  if (!PUBLIC_ZITADEL_CLIENT_ID) {
+    console.warn('PUBLIC_ZITADEL_CLIENT_ID not set — auth will not work until setup-zitadel.sh runs.');
+  }
+  return new UserManager({
+    authority: PUBLIC_ZITADEL_ISSUER,
+    client_id: PUBLIC_ZITADEL_CLIENT_ID,
+    redirect_uri: `${window.location.origin}/auth/callback`,
+    post_logout_redirect_uri: `${window.location.origin}/`,
+    response_type: 'code',
+    // offline_access → refresh token grant; oidc-client-ts uses it automatically
+    // Zitadel injects tenant_id and role via Action; no custom scopes needed
+    scope: 'openid profile email offline_access',
+    loadUserInfo: true,
+    automaticSilentRenew: true,
+    // localStorage: persists across tabs and browser restarts (tokens are bound
+    // to the PKCE code verifier so there is no client_secret exposure risk)
+    userStore: new WebStorageStateStore({ store: window.localStorage }),
+  });
+}
+
+export const userManager: UserManager | null = createUserManager();
+
+// Wire events immediately so automaticSilentRenew works from first load
+if (userManager) {
+  userManager.events.addUserLoaded((user) => {
+    setAuthState(oidcUserToState(user));
+  });
+  userManager.events.addUserUnloaded(() => {
+    setAuthState(UNAUTHED_STATE);
+  });
+  // addSilentRenewError and addAccessTokenExpired are registered in hooks.client.ts
+  // so the central session-expired handler is already set up before they fire.
+}
+
+// ---- Helpers ----
+
+export function oidcUserToState(user: OidcUser | null): AuthState {
+  if (!user || user.expired) return UNAUTHED_STATE;
+  const profile = user.profile as Record<string, unknown>;
   const tenantId =
-    (profile as Record<string, unknown>).tenant_id as string ||
-    ((profile as Record<string, unknown>).tenant as Record<string, string>)?.tenant_id ||
+    (profile.tenant_id as string) ||
+    ((profile.tenant as Record<string, string>)?.tenant_id) ||
     'default';
-
-  const role =
-    (profile as Record<string, unknown>).role as string || 'tenant_user';
-
+  const role = (profile.role as string) || 'tenant_user';
   return {
     isAuthenticated: true,
     user: {
-      id: profile.sub,
-      email: profile.email || '',
-      name: profile.name || profile.preferred_username || 'User',
+      id: profile.sub as string,
+      email: (profile.email as string) || '',
+      name: (profile.name as string) || (profile.preferred_username as string) || 'User',
       tenantId,
       role,
     },
@@ -118,20 +134,16 @@ function oidcUserToState(user: OidcUser | null): AuthState {
 
 // ---- Public API ----
 
-export function isAuthEnabled(): boolean {
-  return AUTH_ENABLED;
-}
-
 export function getAuthState(): AuthState {
-  return { ...cachedState };
+  return get(authStore);
 }
 
 export function getTenantId(): string {
-  return cachedState.user?.tenantId || 'default';
+  return get(authStore).user?.tenantId || 'default';
 }
 
 export function getRole(): string {
-  return cachedState.user?.role || 'tenant_user';
+  return get(authStore).user?.role || 'tenant_user';
 }
 
 export function isPlatformAdmin(): boolean {
@@ -143,69 +155,81 @@ export function isTenantAdmin(): boolean {
   return role === 'tenant_admin' || role === 'platform_admin';
 }
 
-export function getAccessToken(): string | null {
-  return cachedState.accessToken;
-}
-
 /**
- * Restore auth state from oidc-client-ts session store.
- * Call once on app mount.
+ * Returns a live access token, using the refresh token grant if needed.
  */
-export async function restoreAuthState(): Promise<void> {
-  if (!AUTH_ENABLED || !browser) return;
+export async function getAccessToken(): Promise<string | null> {
+  if (!userManager) return null;
   try {
-    const user = await getUserManager().getUser();
-    cachedState = oidcUserToState(user);
+    let user = await userManager.getUser();
+    if (!user || user.expired) {
+      user = await userManager.signinSilent();
+    }
+    return user?.access_token ?? null;
   } catch {
-    cachedState = UNAUTHED_STATE;
+    return null;
   }
 }
 
 /**
- * Redirect to the OIDC provider login page.
+ * Restore auth state on app load. If the stored token is expired, signinSilent()
+ * uses the refresh token to get a new one silently.
  */
-export function login(): void {
-  if (!AUTH_ENABLED || !browser) return;
-  getUserManager().signinRedirect();
+export async function restoreAuthState(): Promise<void> {
+  if (!browser || !userManager) return;
+  try {
+    let user = await userManager.getUser();
+    if (!user || user.expired) {
+      try {
+        user = await userManager.signinSilent();
+      } catch {
+        // Refresh token also expired — fall through to UNAUTHED_STATE
+      }
+    }
+    setAuthState(oidcUserToState(user));
+  } catch {
+    setAuthState(UNAUTHED_STATE);
+  }
 }
 
-/**
- * Handle the OIDC callback (exchange code for tokens).
- * Returns the authenticated user state on success, null on failure.
- */
+export function login(): void {
+  if (!browser || !userManager) return;
+  userManager.signinRedirect();
+}
+
 export async function handleCallback(): Promise<AuthState | null> {
-  if (!browser) return null;
+  if (!browser || !userManager) return null;
   try {
-    const user = await getUserManager().signinRedirectCallback();
-    cachedState = oidcUserToState(user);
-    return cachedState;
+    const user = await userManager.signinRedirectCallback();
+    const state = oidcUserToState(user);
+    setAuthState(state);
+    return state;
   } catch (err) {
     console.error('OIDC callback error:', err);
     return null;
   }
 }
 
-/**
- * Log out and redirect to OIDC provider end-session.
- */
-export function logout(): void {
+export async function logout(): Promise<void> {
   if (!browser) return;
-  if (AUTH_ENABLED) {
-    getUserManager().signoutRedirect();
+  if (userManager) {
+    try {
+      const user = await userManager.getUser();
+      setAuthState(UNAUTHED_STATE);
+      if (user?.id_token) {
+        // Zitadel RP-Initiated Logout: clears the session and redirects back to our app.
+        // id_token_hint is required; post_logout_redirect_uri is respected by Zitadel.
+        await userManager.signoutRedirect({
+          id_token_hint: user.id_token,
+          post_logout_redirect_uri: `${window.location.origin}/`,
+        });
+        return;
+      }
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
+    await userManager.removeUser();
   }
-  cachedState = AUTH_ENABLED ? UNAUTHED_STATE : DEV_STATE;
-}
-
-/**
- * Build headers for authenticated API requests.
- * Includes Authorization bearer token and X-Tenant-Id.
- */
-export function getAuthHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    'X-Tenant-Id': getTenantId(),
-  };
-  if (cachedState.accessToken) {
-    headers['Authorization'] = `Bearer ${cachedState.accessToken}`;
-  }
-  return headers;
+  setAuthState(UNAUTHED_STATE);
+  window.location.replace('/');
 }

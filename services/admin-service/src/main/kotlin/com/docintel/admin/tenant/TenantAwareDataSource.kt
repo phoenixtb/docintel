@@ -6,23 +6,16 @@ import javax.sql.DataSource
 
 class TenantAwareDataSource(delegate: DataSource) : DelegatingDataSource(delegate) {
 
-    override fun getConnection(): Connection = TenantConnection(super.getConnection())
+    override fun getConnection(): Connection =
+        super.getConnection().also { applyTenantContext(it) }
 
     override fun getConnection(username: String, password: String): Connection =
-        TenantConnection(super.getConnection(username, password))
-}
+        super.getConnection(username, password).also { applyTenantContext(it) }
 
-class TenantConnection(private val delegate: Connection) : Connection by delegate {
-
-    override fun setAutoCommit(autoCommit: Boolean) {
-        delegate.setAutoCommit(autoCommit)
-        if (!autoCommit) {
-            val tenant = TenantContextHolder.getTenantId().replace("'", "''")
-            val role   = TenantContextHolder.getUserRole().replace("'", "''")
-            delegate.createStatement().use { stmt ->
-                stmt.execute("SET LOCAL app.current_tenant = '$tenant'")
-                stmt.execute("SET LOCAL app.current_role = '$role'")
-            }
-        }
+    private fun applyTenantContext(conn: Connection) {
+        // Use PreparedStatement to safely bind session variables —
+        // avoids injection via special characters in tenant/role values.
+        conn.prepareStatement("SELECT set_config('app.current_tenant', ?, false)").use { it.setString(1, TenantContextHolder.getTenantId()); it.execute() }
+        conn.prepareStatement("SELECT set_config('app.user_role', ?, false)").use { it.setString(1, TenantContextHolder.getUserRole()); it.execute() }
     }
 }

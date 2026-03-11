@@ -39,7 +39,7 @@ class DocumentControllerTest : BaseIntegrationTest() {
     private lateinit var chunkRepository: ChunkRepository
 
     @MockkBean
-    private lateinit var ragServiceClient: RagServiceClient
+    private lateinit var ingestionServiceClient: IngestionServiceClient
 
     private val testTenantId = "integration-test-tenant"
 
@@ -49,28 +49,12 @@ class DocumentControllerTest : BaseIntegrationTest() {
         chunkRepository.deleteAll()
         documentRepository.deleteAll()
 
-        // Mock RAG service responses
-        coEvery { ragServiceClient.classifyDomain(any()) } returns 
-            ClassifyDomainResponse("general", 0.8, mapOf("general" to 0.8))
-        
-        coEvery { ragServiceClient.chunkText(any(), any(), any(), any(), any()) } answers {
-            val docId = arg<UUID>(1)
-            RagChunkResponse(
-                documentId = docId.toString(),
-                chunkCount = 2,
-                chunks = listOf(
-                    ChunkResponseItem(UUID.randomUUID().toString(), "chunk 1 content", 0, 100, 20, mapOf()),
-                    ChunkResponseItem(UUID.randomUUID().toString(), "chunk 2 content", 100, 200, 20, mapOf())
-                )
-            )
-        }
-        
-        coEvery { ragServiceClient.indexChunks(any(), any(), any()) } answers {
-            val docId = arg<UUID>(1)
-            IndexResponse("success", docId.toString(), 2, "documents")
-        }
-        
-        coEvery { ragServiceClient.deleteDocumentVectors(any(), any()) } returns true
+        // Mock ingestion service responses
+        coEvery { ingestionServiceClient.triggerIngestion(any(), any(), any(), any(), any(), any(), any()) } returns
+            IngestionTriggerResponse("accepted", "test-doc-id")
+
+        coEvery { ingestionServiceClient.deleteDocumentVectors(any(), any()) } returns true
+        coEvery { ingestionServiceClient.deleteTenantVectors(any()) } returns true
     }
 
     @Test
