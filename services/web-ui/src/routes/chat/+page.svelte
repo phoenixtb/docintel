@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { getTenantId, getAuthState } from '$lib/auth';
@@ -45,6 +45,7 @@
   let currentSources: Source[] = $state([]);
   let currentQueryId = $state('');
   let currentRoutedDomain = $state<string | null>(null);
+  let streamAbort: AbortController | null = null;
 
   // Scroll anchor
   let messagesEndEl: HTMLDivElement | undefined = $state();
@@ -190,9 +191,11 @@
     currentSources = [];
     currentQueryId = '';
     
+    streamAbort = new AbortController();
     try {
       const response = await apiFetch(`/api/v1/query/stream`, {
         method: 'POST',
+        signal: streamAbort.signal,
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream',
@@ -210,6 +213,7 @@
       
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
+      let serverError: string | null = null;
       
       while (reader) {
         const { done, value } = await reader.read();
@@ -228,12 +232,14 @@
               if (data.thinking_token) { isQueued = false; currentThinking += data.thinking_token; }
               if (data.token) { isQueued = false; currentResponse += data.token; }
               if (data.sources) currentSources = data.sources;
-              if (data.error) throw new Error(data.error);
+              if (data.error) { serverError = data.error; reader.cancel(); break; }
               if (data.done) { reader.cancel(); break; }
-            } catch { /* skip malformed */ }
+            } catch { /* skip malformed JSON lines */ }
           }
         }
       }
+
+      if (serverError) throw new Error(serverError);
       
       messages = [...messages, {
         id: generateId(),
@@ -253,13 +259,18 @@
       }
       
     } catch (error) {
-      console.error('Stream error:', error);
-      messages = [...messages, { 
-        id: generateId(), 
-        role: 'assistant', 
-        content: 'Sorry, an error occurred. Please try again.' 
-      }];
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        // User navigated away or component unmounted — no error message needed
+      } else {
+        console.error('Stream error:', error);
+        messages = [...messages, { 
+          id: generateId(), 
+          role: 'assistant', 
+          content: 'Sorry, an error occurred. Please try again.' 
+        }];
+      }
     } finally {
+      streamAbort = null;
       isStreaming = false;
       isQueued = false;
       currentResponse = '';
@@ -325,6 +336,10 @@
     if (idParam) {
       await loadConversation(idParam);
     }
+  });
+
+  onDestroy(() => {
+    streamAbort?.abort();
   });
 
   // Auto-scroll to bottom whenever messages or the streaming response change

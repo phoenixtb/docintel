@@ -61,7 +61,7 @@ async def _emit_query_event(
 
 def _fire_and_forget(coro) -> asyncio.Task:
     """Create a task and attach an error-logging callback so exceptions are never silently dropped."""
-    task = asyncio.create_task(coro)
+    task = asyncio.ensure_future(coro)
 
     def _on_done(t: asyncio.Task):
         if not t.cancelled() and t.exception():
@@ -638,20 +638,24 @@ async def query_documents_stream(
             # ollama-haystack ≥6.1 maps message.thinking → chunk.reasoning.reasoning_text
             # and message.content → chunk.content, giving clean separation without
             # any custom parsing or direct Ollama API calls.
-            queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+            # Unbounded queue: streaming_callback runs inside the executor thread, so
+            # we MUST use call_soon_threadsafe to safely enqueue items into the event
+            # loop. put_nowait alone is not thread-safe — it won't wake a coroutine
+            # waiting on queue.get() if called from outside the event loop thread.
+            queue: asyncio.Queue = asyncio.Queue()
 
             full_thinking = ""
             full_answer = ""
 
             # OllamaChatGenerator calls the streaming_callback SYNCHRONOUSLY inside
-            # its HTTP response loop. An async def would return a coroutine object
-            # that gets immediately discarded — the body would never execute.
+            # its HTTP response loop (executor thread). Use call_soon_threadsafe so
+            # the event loop wakes up and delivers items to the waiting consumer.
             def streaming_callback(chunk):
                 reasoning = getattr(chunk, "reasoning", None)
                 if reasoning and getattr(reasoning, "reasoning_text", None):
-                    queue.put_nowait(("thinking", reasoning.reasoning_text))
+                    loop.call_soon_threadsafe(queue.put_nowait, ("thinking", reasoning.reasoning_text))
                 elif chunk.content:
-                    queue.put_nowait(("answer", chunk.content))
+                    loop.call_soon_threadsafe(queue.put_nowait, ("answer", chunk.content))
 
             llm = OllamaChatGenerator(
                 model=effective_model,

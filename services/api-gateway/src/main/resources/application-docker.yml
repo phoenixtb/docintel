@@ -73,6 +73,9 @@ spring:
               args:
                 rate-limiter: "#{@queryRedisRateLimiter}"
                 key-resolver: "#{@tenantRateLimitKeyResolver}"
+          metadata:
+            response-timeout: -1
+            connect-timeout: 10000
 
         - id: ingestion-service-ingest
           uri: http://ingestion-service:8001
