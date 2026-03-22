@@ -6,6 +6,8 @@ import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Profile
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity
 import org.springframework.security.config.web.server.ServerHttpSecurity
+import org.springframework.security.oauth2.jwt.NimbusReactiveJwtDecoder
+import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder
 import org.springframework.security.web.server.SecurityWebFilterChain
 import org.springframework.web.cors.CorsConfiguration
 import org.springframework.web.cors.reactive.CorsConfigurationSource
@@ -15,23 +17,25 @@ import org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource
 @EnableWebFluxSecurity
 class SecurityConfig {
 
-    /**
-     * Default security configuration — JWT validation active for ALL profiles including docker.
-     * Requires spring.security.oauth2.resourceserver.jwt.issuer-uri to be set.
-     * Apply to any profile other than "dev" (local IDE runs without Authentik).
-     */
+    @Bean
+    @Profile("!dev")
+    fun reactiveJwtDecoder(
+        @Value("\${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}") jwkSetUri: String,
+    ): ReactiveJwtDecoder {
+        return NimbusReactiveJwtDecoder.withJwkSetUri(jwkSetUri).build()
+    }
+
     @Bean
     @Profile("!dev")
     fun securityWebFilterChain(
         http: ServerHttpSecurity,
         corsSource: CorsConfigurationSource,
+        jwtDecoder: ReactiveJwtDecoder,
     ): SecurityWebFilterChain {
         return http
             .csrf { it.disable() }
             .cors { it.configurationSource(corsSource) }
-            .oauth2ResourceServer { oauth2 ->
-                oauth2.jwt { }
-            }
+            .oauth2ResourceServer { oauth2 -> oauth2.jwt { it.jwtDecoder(jwtDecoder) } }
             .authorizeExchange { auth ->
                 auth
                     .pathMatchers("/actuator/health").permitAll()
@@ -42,21 +46,13 @@ class SecurityConfig {
             .build()
     }
 
-    /**
-     * Dev-only security — permitAll for local IDE runs without Authentik.
-     */
     @Bean
     @Profile("dev")
-    fun securityWebFilterChainDev(
-        http: ServerHttpSecurity,
-        corsSource: CorsConfigurationSource,
-    ): SecurityWebFilterChain {
+    fun securityWebFilterChainDev(http: ServerHttpSecurity, corsSource: CorsConfigurationSource): SecurityWebFilterChain {
         return http
             .csrf { it.disable() }
             .cors { it.configurationSource(corsSource) }
-            .authorizeExchange { auth ->
-                auth.anyExchange().permitAll()
-            }
+            .authorizeExchange { auth -> auth.anyExchange().permitAll() }
             .build()
     }
 
@@ -70,16 +66,12 @@ class SecurityConfig {
             allowedMethods = listOf("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
             allowedHeaders = listOf("*")
             exposedHeaders = listOf(
-                "X-Tenant-Id",
-                "X-Request-Id",
-                "X-RateLimit-Limit",
-                "X-RateLimit-Remaining",
-                "Retry-After"
+                "X-Tenant-Id", "X-Request-Id",
+                "X-RateLimit-Limit", "X-RateLimit-Remaining", "Retry-After"
             )
             allowCredentials = true
             maxAge = 3600L
         }
-
         return UrlBasedCorsConfigurationSource().apply {
             registerCorsConfiguration("/**", configuration)
         }

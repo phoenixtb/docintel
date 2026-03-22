@@ -1,0 +1,122 @@
+"""
+Document service client.
+
+Calls document-service /internal/documents/from-path to register a file
+that was already uploaded to MinIO. Document-service performs dedup check,
+creates the DB record, and triggers ingestion.
+"""
+
+import logging
+from uuid import UUID
+
+import httpx
+
+from .config import get_settings
+
+logger = logging.getLogger(__name__)
+
+# document-service only checks for X-User-Id presence (GatewayAuthFilter).
+# data-loader is an internal service — no JWT, no HMAC token required.
+_INTERNAL_USER_ID = "system-data-loader"
+
+
+async def register_from_path(
+    *,
+    tenant_id: str,
+    minio_path: str,
+    content_hash: str,
+    filename: str,
+    file_size: int,
+    content_type: str = "text/plain",
+    data_source_id: UUID | None = None,
+    metadata: dict | None = None,
+    domain_hint: str = "auto",
+) -> dict:
+    """
+    Register a file that already exists in MinIO with document-service.
+
+    Returns the document response dict from document-service.
+
+    Raises:
+        httpx.HTTPStatusError: on non-2xx response from document-service
+    """
+    cfg = get_settings()
+    url = f"{cfg.document_service_url}/internal/documents/from-path"
+
+    payload: dict = {
+        "minioPath": minio_path,
+        "contentHash": content_hash,
+        "filename": filename,
+        "fileSize": file_size,
+        "contentType": content_type,
+        "metadata": metadata or {},
+        "domainHint": domain_hint,
+    }
+    if data_source_id is not None:
+        payload["dataSourceId"] = str(data_source_id)
+
+    headers = {
+        "X-User-Id": _INTERNAL_USER_ID,
+        "X-Tenant-Id": tenant_id,
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def create_data_source(
+    *,
+    tenant_id: str,
+    source_type: str,
+    source_config: dict,
+) -> dict:
+    """Create a data source record in document-service. Returns the data source dict."""
+    cfg = get_settings()
+    url = f"{cfg.document_service_url}/internal/documents/data-sources"
+    headers = {
+        "X-User-Id": _INTERNAL_USER_ID,
+        "X-Tenant-Id": tenant_id,
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            url,
+            json={"sourceType": source_type, "sourceConfig": source_config},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def complete_data_source(
+    *,
+    tenant_id: str,
+    data_source_id: UUID,
+    document_count: int,
+) -> None:
+    """Mark a data source as COMPLETED."""
+    cfg = get_settings()
+    url = (
+        f"{cfg.document_service_url}/internal/documents/data-sources"
+        f"/{data_source_id}/complete"
+    )
+    headers = {"X-User-Id": _INTERNAL_USER_ID, "X-Tenant-Id": tenant_id}
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(url, params={"document_count": document_count}, headers=headers)
+        resp.raise_for_status()
+
+
+async def fail_data_source(*, tenant_id: str, data_source_id: UUID) -> None:
+    """Mark a data source as FAILED."""
+    cfg = get_settings()
+    url = (
+        f"{cfg.document_service_url}/internal/documents/data-sources"
+        f"/{data_source_id}/fail"
+    )
+    headers = {"X-User-Id": _INTERNAL_USER_ID, "X-Tenant-Id": tenant_id}
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(url, headers=headers)
+        resp.raise_for_status()

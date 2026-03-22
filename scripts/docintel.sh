@@ -29,10 +29,14 @@ NC='\033[0m'
 ACTIONS=(
     "setup"
     "start"
+    "start-build"
     "stop"
     "build"
     "status"
     "logs"
+    "test"
+    "seed"
+    "backup"
     "cleanup"
     "cleanup-data"
     "cleanup-all"
@@ -42,10 +46,14 @@ ACTIONS=(
 LABELS=(
     "Setup              First-time setup (pull images + models)"
     "Start              Start all services"
+    "Start (build)      Rebuild images then start all services"
     "Stop               Stop all services (preserves containers)"
     "Build              Rebuild services (interactive selector)"
     "Status             Show running containers and health"
     "Logs               Follow service logs"
+    "Test               Run tests (interactive selector)"
+    "Seed Data          Load sample data into running services"
+    "Backup             Back up volumes to archive"
     "Cleanup            Stop and remove containers"
     "Cleanup (data)     Wipe all data volumes (keeps images + models)"
     "Cleanup (full)     Remove containers, volumes, and models"
@@ -139,6 +147,9 @@ case "$action" in
     start)
         exec "$SCRIPT_DIR/start.sh"
         ;;
+    start-build)
+        exec "$SCRIPT_DIR/start.sh" --build
+        ;;
     stop)
         exec "$SCRIPT_DIR/stop.sh"
         ;;
@@ -153,6 +164,15 @@ case "$action" in
         ;;
     logs)
         exec "$SCRIPT_DIR/logs.sh"
+        ;;
+    test)
+        exec "$SCRIPT_DIR/test.sh"
+        ;;
+    seed)
+        exec "$SCRIPT_DIR/seed-data.sh"
+        ;;
+    backup)
+        exec "$SCRIPT_DIR/backup.sh"
         ;;
     cleanup)
         exec "$SCRIPT_DIR/cleanup.sh"

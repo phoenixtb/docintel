@@ -5,38 +5,44 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Pull uv binary — 10-100x faster than pip
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy shared lib first (path dep resolved at install time)
+# ── Layer 1: local common lib (not on PyPI) ──────────────────────────────────
 COPY lib/docintel-common/ /app/lib/docintel-common/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /app/lib/docintel-common/
 
-# Copy project files
+# ── Layer 2: service deps (only reruns when pyproject.toml changes) ───────────
+# Cache mount = persistent host-side package cache across builds (like ~/.gradle).
+# uv downloads each package once; subsequent builds — even after pyproject.toml
+# changes — pull from the local cache, not from PyPI.
+# Stub src/__init__.py lets uv resolve deps from pyproject.toml without real source.
+# --no-sources tells uv to ignore [tool.uv.sources] path overrides (docintel-common
+# is already installed above so the resolver finds it satisfied).
 COPY services/rag-service/pyproject.toml services/rag-service/README.md ./
+RUN mkdir -p src && touch src/__init__.py
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-sources .
+
+# ── Layer 3: actual source (changes here don't bust dep layers above) ─────────
 COPY services/rag-service/src/ ./src/
 
-# Install Python dependencies
-RUN pip install --no-cache-dir pip --upgrade && \
-    pip install --no-cache-dir /app/lib/docintel-common/ && \
-    pip install --no-cache-dir .
-
-# Non-root user for security.
-# -m creates the home directory (/home/appuser) so Haystack telemetry and other
-# libraries that write to ~/.config/ don't fail with PermissionError at startup.
+# Non-root user. -m creates home dir so Haystack/HF libs that write to ~/.config
+# don't fail with PermissionError at startup.
 RUN useradd -r -u 1001 -g root -m appuser
 ENV HOME=/home/appuser
 USER 1001
 
-# Expose port
 EXPOSE 8000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application
 CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

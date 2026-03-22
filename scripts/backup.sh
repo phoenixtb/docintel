@@ -90,7 +90,7 @@ fi
 echo ""
 echo "[3/3] Backing up MinIO document storage..."
 
-MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://localhost:9000}"
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://localhost:19000}"
 MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
 MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
 

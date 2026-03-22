@@ -8,13 +8,11 @@
   onMount(async () => {
     const result = await handleCallback();
 
-    if (result?.isAuthenticated) {
+    if (result?.auth.isAuthenticated) {
       status = 'success';
-      // Go directly to the app — skip the landing page to avoid an extra redirect hop.
-      goto('/chat');
+      goto(result.returnPath);
     } else {
       status = 'error';
-      // Redirect back to landing page so the user can try again from a clean state.
       setTimeout(() => goto('/'), 1500);
     }
   });

@@ -39,7 +39,7 @@ if [[ "$1" == "clear" ]]; then
         echo -e "${GREEN}Done. Logs cleared (container recreated).${NC}"
     else
         echo -e "${YELLOW}Clearing logs for all app services...${NC}"
-        SERVICES=(rag-service api-gateway document-service web-ui admin-service analytics-service)
+        SERVICES=(rag-service ingestion-service api-gateway document-service web-ui admin-service analytics-service docintel-actions)
         for svc in "${SERVICES[@]}"; do
             docker rm -f "$(docker compose ps -q "$svc" 2>/dev/null)" 2>/dev/null || true
         done
@@ -64,7 +64,7 @@ fi
 if [[ -n "$1" ]]; then
     docker compose logs -f "$1" 2>/dev/null || {
         echo -e "${RED}Service '$1' not found or not running.${NC}"
-        echo "Valid: rag-service, api-gateway, document-service, web-ui, admin-service, analytics-service"
+        echo "Valid: rag-service, ingestion-service, api-gateway, document-service, web-ui, admin-service, analytics-service, docintel-actions"
         exit 1
     }
     exit 0
@@ -74,24 +74,28 @@ fi
 OPTIONS=(
     "debug"
     "rag-service"
+    "ingestion-service"
     "api-gateway"
     "document-service"
     "web-ui"
     "admin-service"
     "analytics-service"
+    "docintel-actions"
     "all"
     "clear"
 )
 
 LABELS=(
     "Debug              rag-service + api-gateway (query path - best for stuck queries)"
-    "rag-service        RAG pipeline, embeddings, LLM calls"
+    "rag-service        RAG query pipeline, embeddings, LLM calls"
+    "ingestion-service  Docling parse + embed + index pipeline"
     "api-gateway        Request routing, JWT validation"
-    "document-service   Document upload, chunking"
-    "web-ui             SvelteKit frontend"
-    "admin-service      Admin operations"
+    "document-service   Document upload and management"
+    "web-ui             SvelteKit SPA frontend"
+    "admin-service      Admin operations, tenant management"
     "analytics-service  Event ingestion, ClickHouse analytics"
-    "All                All app + auth services"
+    "docintel-actions   Zitadel Actions v2 custom claims webhook"
+    "All                All services"
     "Clear logs         Recreate all containers (wipes log buffers)"
 )
 
@@ -165,7 +169,7 @@ elif [[ "$choice" == "all" ]]; then
     docker compose logs -f
 elif [[ "$choice" == "clear" ]]; then
     echo -e "${YELLOW}Recreating all app containers (clears log buffers)...${NC}"
-    SERVICES=(rag-service api-gateway document-service web-ui admin-service analytics-service)
+    SERVICES=(rag-service ingestion-service api-gateway document-service web-ui admin-service analytics-service docintel-actions)
     for svc in "${SERVICES[@]}"; do
         cid=$(docker compose ps -q "$svc" 2>/dev/null || true)
         [[ -n "$cid" ]] && docker rm -f "$cid" 2>/dev/null || true

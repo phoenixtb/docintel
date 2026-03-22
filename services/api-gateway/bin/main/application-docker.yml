@@ -4,32 +4,45 @@ spring:
     redis:
       host: redis
       port: 6379
+      password: ${SPRING_DATA_REDIS_PASSWORD:redissecret}
 
-  # OAuth2 Resource Server configuration (enabled in prod profile)
   security:
     oauth2:
       resourceserver:
         jwt:
-          jwk-set-uri: ${ZITADEL_JWK_SET_URI:http://zitadel-api:8080/oauth/v2/keys}
+          issuer-uri: ${ZITADEL_ISSUER_URI:http://localhost:9090}
+          jwk-set-uri: ${ZITADEL_JWK_SET_URI:http://zitadel-oidc/oauth/v2/keys}
+          audiences: ${ZITADEL_PROJECT_ID}
 
   cloud:
     gateway:
+      # Global rate limiter: 100 req/s per tenant, burst 150
+      default-filters:
+        - name: RequestRateLimiter
+          args:
+            rate-limiter: "#{@defaultRedisRateLimiter}"
+            key-resolver: "#{@tenantRateLimitKeyResolver}"
+
       routes:
+        # document-service SSE stream — must be before the generic document-service route.
+        # response-timeout=-1 prevents the gateway from closing the long-lived SSE connection.
+        - id: document-service-events
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents/events
+            - Method=GET
+          filters:
+            - RewritePath=/api/v1/documents/events, /internal/documents/events
+          metadata:
+            response-timeout: -1
+            connect-timeout: 5000
+
         - id: document-service
           uri: http://document-service:8081
           predicates:
             - Path=/api/v1/documents, /api/v1/documents/**
           filters:
             - RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents${segment}
-
-        - id: document-service-bulk-create
-          uri: http://document-service:8081
-          predicates:
-            - Path=/internal/documents/bulk-create
-          filters:
-            - name: RequestSize
-              args:
-                maxSize: 50MB
 
         - id: document-service-delete-all
           uri: http://document-service:8081
@@ -45,6 +58,10 @@ spring:
             - Path=/api/v1/query
           filters:
             - RewritePath=/api/v1/query, /query
+            - name: RequestRateLimiter
+              args:
+                rate-limiter: "#{@queryRedisRateLimiter}"
+                key-resolver: "#{@tenantRateLimitKeyResolver}"
 
         - id: rag-service-query-stream
           uri: http://rag-service:8000
@@ -52,20 +69,36 @@ spring:
             - Path=/api/v1/query/stream
           filters:
             - RewritePath=/api/v1/query/stream, /query/stream
+            - name: RequestRateLimiter
+              args:
+                rate-limiter: "#{@queryRedisRateLimiter}"
+                key-resolver: "#{@tenantRateLimitKeyResolver}"
 
-        - id: rag-service-classify
-          uri: http://rag-service:8000
+        - id: ingestion-service-ingest
+          uri: http://ingestion-service:8001
           predicates:
-            - Path=/api/v1/classify-domain
+            - Path=/api/v1/ingest, /api/v1/ingest/**
           filters:
-            - RewritePath=/api/v1/classify-domain, /classify-domain
+            - RewritePath=/api/v1/ingest(?<segment>/?.*), /ingest${segment}
 
-        - id: rag-service-sample-datasets
-          uri: http://rag-service:8000
+        # data-loader: SSE progress stream — long-lived connection, no response timeout
+        - id: data-loader-dataset-progress
+          uri: ${DATA_LOADER_URL:http://data-loader:8002}
           predicates:
-            - Path=/api/v1/sample-datasets/**
+            - Path=/api/v1/datasets/load/*/progress
           filters:
-            - RewritePath=/api/v1/sample-datasets(?<segment>.*), /sample-datasets${segment}
+            - RewritePath=/api/v1/datasets/load/(?<jobId>[^/]+)/progress, /datasets/load/${jobId}/progress
+          metadata:
+            response-timeout: -1   # -1 = unlimited (SSE stream)
+            connect-timeout: 5000
+
+        # data-loader: dataset list + bulk load trigger
+        - id: data-loader-datasets
+          uri: ${DATA_LOADER_URL:http://data-loader:8002}
+          predicates:
+            - Path=/api/v1/datasets, /api/v1/datasets/**
+          filters:
+            - RewritePath=/api/v1/datasets(?<segment>/?.*), /datasets${segment}
 
         - id: rag-service-conversations
           uri: http://rag-service:8000
@@ -81,12 +114,12 @@ spring:
           filters:
             - RewritePath=/api/v1/vector-stats, /vector-stats
 
-        - id: rag-service-debug
+        - id: rag-service-models
           uri: http://rag-service:8000
           predicates:
-            - Path=/api/v1/debug/**
+            - Path=/api/v1/models
           filters:
-            - RewritePath=/api/v1/debug/(?<segment>.*), /debug/${segment}
+            - RewritePath=/api/v1/models, /models
 
         - id: admin-service
           uri: http://admin-service:8082
@@ -95,13 +128,39 @@ spring:
           filters:
             - RewritePath=/api/v1/admin/(?<segment>.*), /internal/${segment}
 
+        - id: admin-tenants-settings
+          uri: http://admin-service:8082
+          predicates:
+            - Path=/api/v1/tenants/*/settings
+            - Method=GET,PATCH
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tid>[^/]+)/settings, /internal/tenants/${tid}/settings
+
         - id: admin-tenants
           uri: http://admin-service:8082
           predicates:
-            - Path=/api/v1/tenants/**
+            - Path=/api/v1/tenants, /api/v1/tenants/**
           filters:
-            - RewritePath=/api/v1/tenants/(?<segment>.*), /internal/tenants/${segment}
+            - RewritePath=/api/v1/tenants(?<segment>/?.*), /internal/tenants${segment}
 
+        - id: analytics-service-feedback
+          uri: http://analytics-service:8001
+          predicates:
+            - Path=/api/v1/feedback
+          filters:
+            - RewritePath=/api/v1/feedback, /events/feedback
+
+        - id: analytics-service-analytics
+          uri: http://analytics-service:8001
+          predicates:
+            - Path=/api/v1/analytics/**
+          filters:
+            - RewritePath=/api/v1/analytics/(?<segment>.*), /analytics/${segment}
+
+# DocIntel gateway config
+docintel:
+  opa:
+    url: ${OPA_URL:http://opa:8181}
 logging:
   level:
     com.docintel: DEBUG

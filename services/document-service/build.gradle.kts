@@ -29,6 +29,11 @@ dependencies {
     
     // Database
     runtimeOnly("org.postgresql:postgresql")
+    implementation("org.flywaydb:flyway-core")
+    implementation("org.flywaydb:flyway-database-postgresql")
+
+    // Redis Streams message bus
+    implementation("org.springframework.boot:spring-boot-starter-data-redis")
     
     // MinIO (S3-compatible storage)
     implementation("io.minio:minio:8.5.14")

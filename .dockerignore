@@ -1,0 +1,34 @@
+# Root .dockerignore — used by rag-service and ingestion-service (build context: .)
+# Excludes everything not needed for the Python services
+
+# Version control
+.git
+.gitignore
+
+# Other services (not needed in Python build context)
+services/api-gateway
+services/document-service
+services/admin-service
+services/analytics-service
+services/analytics-service-py
+services/web-ui
+
+# Test artifacts
+tests/
+scripts/
+terraform/
+config/
+
+# Python artifacts
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.venv
+**/venv
+
+# Documentation / misc
+*.md
+.env
+.env.*
+tasks/

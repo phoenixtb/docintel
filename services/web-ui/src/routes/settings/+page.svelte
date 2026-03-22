@@ -39,16 +39,18 @@
   interface TenantSettings { llmModel: string | null; effectiveModel: string | null }
   let modelLoading = $state(false);
   let availableModels: ModelInfo[] = $state([]);
+  let platformDefaultModel: string | null = $state(null);
   let tenantSettings: TenantSettings | null = $state(null);
   let selectedModel: string | null = $state(null);   // null = "Platform Default"
   let modelSaving = $state(false);
   let modelConfirmOpen = $state(false);
   let pendingModel: string | null = $state(null);
 
+  // Platform admin has a global override when effectiveModel differs from tenant's own llmModel
   let isPlatformControlled = $derived(
     tenantSettings != null &&
-    (tenantSettings as TenantSettings).llmModel === null &&
-    (tenantSettings as TenantSettings).effectiveModel !== null
+    tenantSettings.effectiveModel !== null &&
+    tenantSettings.effectiveModel !== tenantSettings.llmModel
   );
 
   const tenantId = getTenantId();
@@ -134,6 +136,7 @@
       if (modelsRes.ok) {
         const data = await modelsRes.json();
         availableModels = data.models ?? [];
+        platformDefaultModel = data.default_model ?? null;
       }
       if (settingsRes.ok) {
         tenantSettings = await settingsRes.json();
@@ -220,8 +223,8 @@
 <div class="h-full overflow-y-auto">
   <div class="max-w-5xl mx-auto p-6">
     <div class="mb-6">
-      <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Settings</h1>
-      <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Manage your tenant: <span class="font-mono font-medium">{tenantId}</span></p>
+      <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Manage</h1>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Tenant: <span class="font-mono font-medium">{tenantId}</span></p>
     </div>
 
     <!-- Tabs -->
@@ -355,7 +358,7 @@
           {#if users.length === 0}
             <div class="text-center py-12 text-sm">
               <p class="text-gray-400">No users found.</p>
-              <p class="text-gray-500 dark:text-gray-500 text-xs mt-1">Users are managed via Authentik. Ensure the Authentik token is configured.</p>
+              <p class="text-gray-500 dark:text-gray-500 text-xs mt-1">Users are managed via Zitadel. Ensure the service account PAT is configured.</p>
             </div>
           {:else}
             <table class="w-full text-sm">
@@ -404,7 +407,7 @@
         <div class="space-y-6">
 
           <!-- Platform override notice -->
-          {#if tenantSettings?.effectiveModel && tenantSettings.llmModel === null && tenantSettings.effectiveModel !== null}
+          {#if isPlatformControlled}
             <div class="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/40 rounded-lg px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
               <span class="font-semibold">Platform controlled:</span> The platform administrator has set a global model override.
               Your tenant is currently using <span class="font-mono font-medium">{tenantSettings.effectiveModel}</span>.
@@ -434,15 +437,16 @@
                     px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500
                     disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <option value={null}>Platform Default</option>
                   {#each availableModels as model}
-                    <option value={model.name}>{model.name}</option>
+                    <option value={model.name}>
+                      {model.name}{model.name === platformDefaultModel ? ' (Platform Default)' : ''}
+                    </option>
                   {/each}
                 </select>
               </div>
               <button
                 onclick={() => requestModelChange(selectedModel)}
-                disabled={isPlatformControlled || modelSaving || selectedModel === (tenantSettings?.llmModel ?? null)}
+                disabled={isPlatformControlled || modelSaving || selectedModel === tenantSettings?.llmModel}
                 class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white
                   hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
@@ -475,7 +479,7 @@
 <ConfirmDialog
   open={modelConfirmOpen}
   title="Change LLM model?"
-  message={`This will update the active model to "${pendingModel ?? 'Platform Default'}" and clear the semantic cache for your tenant. Cached responses will be regenerated on the next query. Proceed?`}
+  message={`This will update the active model to "${pendingModel}" and clear the semantic cache for your tenant. Cached responses will be regenerated on the next query. Proceed?`}
   confirmLabel="Change & Clear Cache"
   dangerous={false}
   onconfirm={confirmModelChange}

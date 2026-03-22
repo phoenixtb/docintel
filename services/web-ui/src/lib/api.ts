@@ -18,11 +18,16 @@ import {
   userManager,
   getAccessToken,
   getTenantId,
+  oidcUserToState,
   setAuthState,
   triggerSessionExpired,
   UNAUTHED_STATE,
 } from '$lib/auth';
 import { getEnv } from '$lib/env';
+
+// Singleton in-flight promise for silent token refresh.
+// Prevents 5 concurrent 401s from spawning 5 separate signinSilent() calls.
+let _silentRefreshInFlight: Promise<void> | null = null;
 
 function getApiBase(): string {
   return getEnv().PUBLIC_API_URL || 'http://localhost:8080';
@@ -48,24 +53,35 @@ export async function apiFetch(url: string, options: RequestInit = {}): Promise<
   const tenantId = getTenantId();
   const headers = buildHeaders(options.headers, token, tenantId);
 
-  const response = await fetch(`${getApiBase()}${url}`, { ...options, headers });
+  // Use caller's AbortSignal (e.g. SSE AbortController) if provided, else 30s default.
+  // SSE callers supply their own signal so they must not be capped at 30s.
+  const signal = options.signal ?? AbortSignal.timeout(30_000);
+
+  const response = await fetch(`${getApiBase()}${url}`, { ...options, headers, signal });
 
   if (response.status !== 401) return response;
 
   // Server returned 401 — force one silent refresh and retry.
+  // Deduplicate: if a refresh is already in flight (e.g. 5 concurrent 401s),
+  // wait for it rather than launching another signinSilent() call.
   if (!userManager) return response;
 
   try {
-    const fresh = await userManager.signinSilent();
-    setAuthState({
-      isAuthenticated: true,
-      user: null, // will be updated by the addUserLoaded event
-      accessToken: fresh?.access_token ?? null,
-    });
-    const retryHeaders = buildHeaders(options.headers, fresh?.access_token ?? null, tenantId);
-    const retryResponse = await fetch(`${getApiBase()}${url}`, { ...options, headers: retryHeaders });
+    if (!_silentRefreshInFlight) {
+      _silentRefreshInFlight = userManager.signinSilent()
+        .then(u => { if (u) setAuthState(oidcUserToState(u)); })
+        .catch(() => {
+          setAuthState(UNAUTHED_STATE);
+          triggerSessionExpired();
+        })
+        .finally(() => { _silentRefreshInFlight = null; });
+    }
+    await _silentRefreshInFlight;
+
+    const freshToken = await getAccessToken();
+    const retryHeaders = buildHeaders(options.headers, freshToken, tenantId);
+    const retryResponse = await fetch(`${getApiBase()}${url}`, { ...options, headers: retryHeaders, signal });
     if (retryResponse.status === 401) {
-      // Still 401 after refresh — session is truly dead
       setAuthState(UNAUTHED_STATE);
       triggerSessionExpired();
       throw new Error('Session expired');
@@ -73,7 +89,6 @@ export async function apiFetch(url: string, options: RequestInit = {}): Promise<
     return retryResponse;
   } catch (err) {
     if (err instanceof Error && err.message === 'Session expired') throw err;
-    // signinSilent() itself threw (e.g. refresh token expired)
     setAuthState(UNAUTHED_STATE);
     triggerSessionExpired();
     throw new Error('Session expired');

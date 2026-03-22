@@ -29,6 +29,12 @@ interface DocumentRepository : JpaRepository<Document, UUID> {
     
     fun deleteByIdAndTenantId(id: UUID, tenantId: String): Long
 
+    /** Dedup check: find an existing document by its content hash within a tenant. */
+    fun findByContentHashAndTenantId(contentHash: String, tenantId: String): Document?
+
+    /** Find all in-flight documents for a tenant (SSE snapshot on connect). */
+    fun findByTenantIdAndStatusIn(tenantId: String, statuses: List<ProcessingStatus>): List<Document>
+
     /** Find stale PENDING/PROCESSING documents for the retry sweeper. */
     @Query("SELECT d FROM Document d WHERE d.status IN :statuses AND d.createdAt < :before")
     fun findStaleByStatusIn(

@@ -57,10 +57,10 @@
       { href: '/documents', label: 'Documents' },
     ];
     if (role === 'tenant_admin' || role === 'platform_admin') {
-      items.push({ href: '/settings', label: 'Settings' });
+      items.push({ href: '/settings', label: 'Manage' });
     }
     if (role === 'platform_admin') {
-      items.push({ href: '/admin', label: 'Admin' });
+      items.push({ href: '/admin', label: 'Platform' });
     }
     return items;
   });

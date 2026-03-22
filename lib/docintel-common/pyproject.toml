@@ -10,6 +10,17 @@ dependencies = [
     "transformers>=4.40.0",
     # Device detection (MPS / CUDA / CPU)
     "torch>=2.0.0",
+    # Security models (DocumentACL, UserContext, etc.)
+    "pydantic>=2.0",
+    # Redis Streams message bus (optional — only loaded if messaging module is imported)
+    "redis>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "fakeredis>=2.0.0",
 ]
 
 [build-system]
@@ -18,3 +29,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["docintel_common"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { getTenantId } from '$lib/auth';
   import { apiFetch } from '$lib/api';
   import { toast } from 'svelte-sonner';
@@ -160,7 +160,7 @@
 
   async function loadAvailableDatasets() {
     try {
-      const response = await apiFetch(`/api/v1/sample-datasets`);
+      const response = await apiFetch(`/api/v1/datasets`);
       if (response.ok) {
         const data = await response.json();
         availableDatasets = data.available_datasets || [];
@@ -182,6 +182,8 @@
     isUploading = true;
     error = null;
     success = null;
+
+    openStatusSse(true);
 
     try {
       const formData = new FormData();
@@ -219,20 +221,121 @@
     }
   }
 
+  // SSE progress state
+  let sseProcessed = $state(0);
+  let sseTotal = $state(0);
+  let sseCurrentFile = $state('');
+  let sseAbort: AbortController | null = null;
+
+  /**
+   * Consume a single SSE connection for the given jobId.
+   * Returns 'done' when the stream completed normally,
+   * 'error' with a reason when the server signals an error,
+   * or throws a network/HTTP error when the connection drops.
+   */
+  async function consumeSSE(jobId: string): Promise<{ status: 'done'; processed: number; totalChunks: number } | { status: 'error'; reason: string }> {
+    sseAbort = new AbortController();
+    const sseRes = await apiFetch(`/api/v1/datasets/load/${jobId}/progress`, {
+      signal: sseAbort.signal,
+    });
+
+    if (!sseRes.ok || !sseRes.body) throw new Error(`SSE connect failed: HTTP ${sseRes.status}`);
+
+    const reader = sseRes.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error('Stream ended unexpectedly');
+
+      buffer += value;
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() ?? '';
+
+      for (const block of parts) {
+        if (!block.trim() || block.startsWith(':')) continue;
+
+        let eventType = 'message';
+        let dataLine = '';
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+          if (line.startsWith('data: '))  dataLine  = line.slice(6).trim();
+        }
+        if (!dataLine) continue;
+
+        const payload = JSON.parse(dataLine);
+
+        if (eventType === 'total') {
+          sseTotal = payload.total;
+          loadingProgress = { phase: 'downloading', message: `Indexing 0 / ${sseTotal} files…` };
+
+        } else if (eventType === 'progress') {
+          sseProcessed = payload.processed;
+          sseTotal     = payload.total || sseTotal;
+          sseCurrentFile = payload.filename ?? '';
+          loadingProgress = {
+            phase: 'downloading',
+            message: `Indexing ${sseProcessed} / ${sseTotal} files…`,
+          };
+
+        } else if (eventType === 'done') {
+          return { status: 'done', processed: payload.processed, totalChunks: payload.total_chunks };
+
+        } else if (eventType === 'error') {
+          return { status: 'error', reason: payload.reason ?? 'Server error during ingestion' };
+        }
+      }
+    }
+  }
+
+  /**
+   * Connect to an existing job's SSE stream with automatic reconnect on network drop.
+   * The backend replays all events from pos=0 on each new subscriber, so reconnecting
+   * transparently recovers the full progress state regardless of how long we were away.
+   * Throws when max retries are exhausted or the server sends an error event.
+   * Returns silently when the job completed successfully.
+   */
+  async function runSSEWithRetry(jobId: string, maxRetries = 6): Promise<{ processed: number; totalChunks: number }> {
+    let attempt = 0;
+    while (true) {
+      try {
+        const result = await consumeSSE(jobId);
+        if (result.status === 'error') throw new Error(result.reason);
+        return { processed: result.processed, totalChunks: result.totalChunks };
+      } catch (netErr: unknown) {
+        if (netErr instanceof DOMException && netErr.name === 'AbortError') throw netErr;
+        attempt++;
+        if (attempt > maxRetries) throw netErr;
+        const delayMs = Math.min(1000 * 2 ** (attempt - 1), 30_000);
+        loadingProgress = {
+          phase: 'downloading',
+          message: `Connection lost — reconnecting in ${Math.round(delayMs / 1000)}s… (${attempt}/${maxRetries})`,
+        };
+        await new Promise(r => setTimeout(r, delayMs));
+        loadingProgress = { phase: 'downloading', message: `Reconnecting… (${attempt}/${maxRetries})` };
+      }
+    }
+  }
+
   async function loadSampleDatasets() {
     if (selectedDatasets.length === 0 || isLoadingDatasets) return;
 
     isLoadingDatasets = true;
     error = null;
     success = null;
+    sseProcessed = 0;
+    sseTotal = 0;
+    sseCurrentFile = '';
 
-    loadingProgress = {
-      phase: 'downloading',
-      message: `Downloading ${selectedDatasets.length} dataset(s)...`
-    };
+    loadingProgress = { phase: 'downloading', message: 'Starting…' };
+
+    // Open pipeline SSE before starting the job so the emitter is registered
+    // before FilesAvailableConsumer fires any PENDING events.
+    openStatusSse(true);
 
     try {
-      const response = await apiFetch(`/api/v1/sample-datasets/load`, {
+      // 1. POST to start the job — returns 202 + job_id immediately
+      const startRes = await apiFetch(`/api/v1/datasets/load`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -242,24 +345,27 @@
         }),
       });
 
-      if (!response.ok) throw new Error(`Load failed: HTTP ${response.status}`);
+      if (!startRes.ok) throw new Error(`Failed to start: HTTP ${startRes.status}`);
+      const { message: jobId } = await startRes.json();
 
-      const result = await response.json();
-
-      loadingProgress = { phase: 'done', message: 'Loading complete!' };
-      success = `Loaded ${result.total_indexed} documents from ${result.loaded.length} dataset(s)`;
+      sessionStorage.setItem(INGEST_JOB_KEY, jobId);
       selectedDatasets = [];
+      loadingProgress = { phase: 'downloading', message: 'Connecting to progress stream…' };
 
-      setTimeout(async () => {
-        await refreshAll();
-        loadingProgress = null;
-      }, 1500);
+      // 2. Connect to SSE stream, auto-reconnecting on network drops.
+      const result = await runSSEWithRetry(jobId);
+      sessionStorage.removeItem(INGEST_JOB_KEY);
+      loadingProgress = { phase: 'done', message: `${result.processed} files queued` };
+      await refreshAll();
 
-    } catch (e) {
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      sessionStorage.removeItem(INGEST_JOB_KEY);
       error = e instanceof Error ? e.message : 'Failed to load sample datasets';
-      loadingProgress = null;
     } finally {
       isLoadingDatasets = false;
+      sseAbort = null;
+      setTimeout(() => { loadingProgress = null; }, 3000);
     }
   }
 
@@ -387,11 +493,212 @@
     return '~10-15 minutes';
   }
 
+  const INGEST_JOB_KEY = 'docintel_active_ingest_job';
+
+  // -------------------------------------------------------------------------
+  // Pipeline panel — per-document SSE progress
+  // -------------------------------------------------------------------------
+
+  interface PipelineRow {
+    documentId: string;
+    filename: string;
+    status: string;          // PENDING | PROCESSING | COMPLETED | FAILED
+    stage: string;           // Queued | Processing | Indexed | Failed
+    chunkCount: number;
+    errorMessage?: string;
+  }
+
+  // SSE uses fetch (not EventSource) so apiFetch can add Authorization: Bearer.
+  // EventSource doesn't support custom headers — cross-origin requests silently drop the token.
+  let statusSseAbort: AbortController | null = null;
+  let sseSettleTimer: ReturnType<typeof setTimeout> | null = null;
+  let sseInFlight = $state(false);
+  let pipelineRows: Record<string, PipelineRow> = $state({});
+  let pipelineDismissed = $state(false);
+
+  function pipelineHasInFlight(): boolean {
+    return Object.values(pipelineRows).some(r => r.status === 'PENDING' || r.status === 'PROCESSING');
+  }
+
+  function applyPipelineUpdate(data: {
+    documentId: string; filename?: string; status: string; stage: string;
+    chunkCount?: number; errorMessage?: string;
+  }) {
+    pipelineRows = {
+      ...pipelineRows,
+      [data.documentId]: {
+        documentId:   data.documentId,
+        filename:     data.filename || pipelineRows[data.documentId]?.filename || data.documentId,
+        status:       data.status,
+        stage:        data.stage,
+        chunkCount:   data.chunkCount ?? pipelineRows[data.documentId]?.chunkCount ?? 0,
+        errorMessage: data.errorMessage,
+      },
+    };
+
+    allDocuments = allDocuments.map(d =>
+      d.id === data.documentId
+        ? { ...d, status: data.status as Document['status'], chunkCount: data.chunkCount ?? d.chunkCount }
+        : d
+    );
+
+    if (data.status === 'COMPLETED') loadVectorStats();
+
+    // Settle timer: close SSE only after a grace period of no new in-flight events.
+    // Avoids premature close when FilesAvailableConsumer registers docs in sequential
+    // batches — the first batch might settle before the next batch is even registered.
+    if (!pipelineHasInFlight() && Object.keys(pipelineRows).length > 0) {
+      if (!sseSettleTimer) {
+        sseSettleTimer = setTimeout(() => {
+          sseSettleTimer = null;
+          if (!pipelineHasInFlight()) closeStatusSse();
+        }, 5_000);
+      }
+    } else {
+      // Still in flight — cancel any pending settle
+      if (sseSettleTimer) { clearTimeout(sseSettleTimer); sseSettleTimer = null; }
+    }
+  }
+
+  /**
+   * Opens the document-service SSE stream.
+   *
+   * jobInProgress=true  → called before a data-loader/upload job starts.
+   *   No short stale guard: data-loader may take >10s before publishing events.
+   *   The stream stays open until the settle timer fires or the user dismisses.
+   *
+   * jobInProgress=false → called on mount to reconnect to an existing in-flight batch.
+   *   Short 10s stale guard: if the snapshot is empty the job must have already
+   *   finished so we close cleanly instead of holding a ghost connection.
+   */
+  function openStatusSse(jobInProgress = false) {
+    if (statusSseAbort) return;
+    pipelineDismissed = false;
+    sseInFlight = true;
+    statusSseAbort = new AbortController();
+
+    // Stale guard only for reconnect-on-mount; skip when a job is actively running.
+    const staleGuard = jobInProgress
+      ? null
+      : setTimeout(() => {
+          if (Object.keys(pipelineRows).length === 0) closeStatusSse();
+        }, 10_000);
+
+    runDocumentStatusSse(statusSseAbort.signal, staleGuard);
+  }
+
+  async function runDocumentStatusSse(signal: AbortSignal, staleGuard: ReturnType<typeof setTimeout> | null) {
+    try {
+      while (!signal.aborted) {
+        try {
+          const res = await apiFetch('/api/v1/documents/events', {
+            signal,
+            headers: { Accept: 'text/event-stream' },
+          });
+
+          if (!res.ok || !res.body) {
+            await new Promise(r => setTimeout(r, 3000));
+            continue;
+          }
+
+          const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+          let buf = '';
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            // Normalize CRLF→LF: Python/Starlette sends CRLF, Spring sends LF.
+            buf += value.replace(/\r\n/g, '\n');
+            const parts = buf.split('\n\n');
+            buf = parts.pop() ?? '';
+            for (const block of parts) {
+              if (!block.trim() || block.startsWith(':')) continue;
+              let eventType = 'message', dataLine = '';
+              for (const rawLine of block.split('\n')) {
+                const line = rawLine.trimEnd(); // strip trailing \r if any
+                // Spring omits the space: "event:name"; Starlette adds one: "event: name".
+                // Handle both by checking 'event:' then trimming the value.
+                if (line.startsWith('event:')) eventType = line.slice(6).trimStart();
+                if (line.startsWith('data:'))  dataLine  = line.slice(5).trimStart();
+              }
+              if (!dataLine) continue;
+              const payload = JSON.parse(dataLine);
+              if (eventType === 'current_state' || eventType === 'document_status') {
+                applyPipelineUpdate(payload);
+              }
+            }
+          }
+          // Stream closed cleanly — reconnect unless aborted or settle timer fired.
+          if (signal.aborted) return;
+          await new Promise(r => setTimeout(r, 1000));
+        } catch (e) {
+          if (signal.aborted) return;
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+    } finally {
+      clearTimeout(staleGuard);
+      sseInFlight = false;
+    }
+  }
+
+  function closeStatusSse() {
+    if (sseSettleTimer) { clearTimeout(sseSettleTimer); sseSettleTimer = null; }
+    statusSseAbort?.abort();
+    statusSseAbort = null;
+    sseInFlight = false;
+  }
+
+  function dismissPipelinePanel() {
+    closeStatusSse();
+    pipelineRows = {};
+    pipelineDismissed = true;
+  }
+
   onMount(() => {
-    loadDocuments();
+    loadDocuments().then(() => {
+      // Re-open SSE if there are already in-flight docs on the first page —
+      // covers accidental browser close / navigation away during ingestion.
+      // Safe because: (a) snapshot gives real state immediately, (b) sweeper
+      // guarantees stuck PENDING docs eventually resolve, so the panel won't
+      // stay open indefinitely.
+      if (allDocuments.some(d => d.status === 'PENDING' || d.status === 'PROCESSING')) {
+        openStatusSse();
+      }
+    });
     loadAvailableDatasets();
     loadVectorStats();
+
+    // Re-attach to an in-progress data-loader job saved before navigation.
+    const savedJobId = sessionStorage.getItem(INGEST_JOB_KEY);
+    if (savedJobId) {
+      isLoadingDatasets = true;
+      loadingProgress = { phase: 'downloading', message: 'Reconnecting to running job…' };
+      resumeIngestJob(savedJobId);
+    }
   });
+
+  onDestroy(() => {
+    sseAbort?.abort();
+    closeStatusSse();
+  });
+
+  async function resumeIngestJob(jobId: string) {
+    openStatusSse(true);
+    try {
+      const result = await runSSEWithRetry(jobId);
+      loadingProgress = { phase: 'done', message: `${result.processed} files queued` };
+      sessionStorage.removeItem(INGEST_JOB_KEY);
+      await refreshAll();
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      error = e instanceof Error ? e.message : 'Failed to reconnect to running job';
+      sessionStorage.removeItem(INGEST_JOB_KEY);
+    } finally {
+      isLoadingDatasets = false;
+      sseAbort = null;
+      setTimeout(() => { loadingProgress = null; }, 3000);
+    }
+  }
 </script>
 
 <div class="h-full overflow-y-auto p-6">
@@ -429,6 +736,77 @@
         <span class="text-red-600 dark:text-red-400">!</span>
         <p class="text-red-700 dark:text-red-300 flex-1">{error}</p>
         <button onclick={() => error = null} class="text-red-500 hover:text-red-700 text-xl">&times;</button>
+      </div>
+    {/if}
+
+    <!-- Pipeline progress panel: shown while SSE is active or has rows to display -->
+    {#if Object.keys(pipelineRows).length > 0}
+      {@const rows = Object.values(pipelineRows)}
+      {@const inFlight = rows.filter(r => r.status === 'PENDING' || r.status === 'PROCESSING')}
+      {@const settled = rows.filter(r => r.status === 'COMPLETED' || r.status === 'FAILED')}
+      <div class="border border-blue-200 dark:border-blue-800 rounded-xl overflow-hidden">
+        <div class="bg-blue-50 dark:bg-blue-900/20 px-4 py-3 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            {#if inFlight.length > 0}
+              <div class="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+              <span class="text-sm font-medium text-blue-700 dark:text-blue-300">
+                Ingestion pipeline — {inFlight.length} processing, {settled.filter(r => r.status === 'COMPLETED').length} indexed
+              </span>
+            {:else}
+              <svg class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+              </svg>
+              <span class="text-sm font-medium text-green-700 dark:text-green-300">
+                Pipeline complete — {settled.filter(r => r.status === 'COMPLETED').length} indexed{settled.filter(r => r.status === 'FAILED').length > 0 ? `, ${settled.filter(r => r.status === 'FAILED').length} failed` : ''}
+              </span>
+            {/if}
+          </div>
+          <button
+            onclick={dismissPipelinePanel}
+            class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-lg leading-none"
+            title="Dismiss"
+          >&times;</button>
+        </div>
+        <div class="divide-y divide-gray-100 dark:divide-gray-700 max-h-56 overflow-y-auto">
+          {#each [...inFlight, ...settled] as row (row.documentId)}
+            <div class="flex items-center gap-3 px-4 py-2 bg-white dark:bg-gray-800 text-sm">
+              <!-- spinner or status icon -->
+              {#if row.status === 'PENDING' || row.status === 'PROCESSING'}
+                <div class="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
+              {:else if row.status === 'COMPLETED'}
+                <svg class="w-3 h-3 text-green-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>
+              {:else}
+                <svg class="w-3 h-3 text-red-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                </svg>
+              {/if}
+
+              <!-- filename -->
+              <span class="flex-1 truncate text-gray-700 dark:text-gray-300 font-mono text-xs" title={row.filename}>
+                {row.filename}
+              </span>
+
+              <!-- stage badge -->
+              <span class="flex-shrink-0 px-2 py-0.5 rounded text-xs font-medium {
+                row.status === 'COMPLETED'  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
+                row.status === 'FAILED'     ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
+                row.status === 'PROCESSING' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
+                                              'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+              }">
+                {row.stage}
+              </span>
+
+              {#if row.status === 'COMPLETED' && row.chunkCount > 0}
+                <span class="text-xs text-gray-400 flex-shrink-0">{row.chunkCount} chunks</span>
+              {/if}
+              {#if row.status === 'FAILED' && row.errorMessage}
+                <span class="text-xs text-red-400 flex-shrink-0 truncate max-w-32" title={row.errorMessage}>{row.errorMessage}</span>
+              {/if}
+            </div>
+          {/each}
+        </div>
       </div>
     {/if}
 
@@ -492,16 +870,30 @@
 
       {#if loadingProgress}
         <div class="mb-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-          <div class="flex items-center gap-3">
+          <div class="flex items-center gap-3 mb-2">
             {#if loadingProgress.phase !== 'done'}
-              <div class="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+              <div class="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
             {:else}
-              <span class="text-green-500 text-xl">✓</span>
+              <span class="text-green-500 text-xl flex-shrink-0">✓</span>
             {/if}
-            <span class="font-medium text-blue-800 dark:text-blue-300">
-              {PHASE_LABELS[loadingProgress.phase]}
+            <span class="font-medium text-blue-800 dark:text-blue-300 text-sm">
+              {loadingProgress.message}
             </span>
           </div>
+          {#if sseTotal > 0 && loadingProgress.phase !== 'done'}
+            <div class="mt-2">
+              <div class="flex justify-between text-xs text-blue-600 dark:text-blue-400 mb-1">
+                <span class="truncate max-w-xs">{sseCurrentFile}</span>
+                <span class="ml-2 flex-shrink-0">{sseProcessed} / {sseTotal}</span>
+              </div>
+              <div class="w-full bg-blue-200 dark:bg-blue-900 rounded-full h-1.5">
+                <div
+                  class="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
+                  style="width: {Math.round((sseProcessed / sseTotal) * 100)}%"
+                ></div>
+              </div>
+            </div>
+          {/if}
         </div>
       {/if}
 

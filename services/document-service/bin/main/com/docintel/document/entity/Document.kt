@@ -17,12 +17,12 @@ enum class ProcessingStatus {
 @Table(name = "documents")
 data class Document(
     @Id
-    val id: UUID = UUID.randomUUID(),
+    val id: UUID,
 
     @Column(name = "tenant_id", nullable = false)
     val tenantId: String,
 
-    @Column(nullable = false)
+    @Column(nullable = false, columnDefinition = "text")
     val filename: String,
 
     @Column(name = "content_type")
@@ -31,7 +31,7 @@ data class Document(
     @Column(name = "file_size")
     val fileSize: Long = 0,
 
-    @Column(name = "file_path", nullable = false)
+    @Column(name = "file_path", nullable = false, columnDefinition = "text")
     val filePath: String,
 
     @Enumerated(EnumType.STRING)
@@ -46,6 +46,14 @@ data class Document(
 
     @Column(name = "error_message")
     var errorMessage: String? = null,
+
+    /** Full 64-char sha256 hex of (tenant_id + file_bytes). Stored for observability/dedup queries. */
+    @Column(name = "content_hash")
+    val contentHash: String? = null,
+
+    /** Null for manual browser uploads; populated for data-loader-originated documents. */
+    @Column(name = "data_source_id")
+    val dataSourceId: UUID? = null,
 
     @Column(name = "created_at")
     val createdAt: Instant = Instant.now(),

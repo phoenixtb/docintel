@@ -117,8 +117,23 @@ export function oidcUserToState(user: OidcUser | null): AuthState {
   const tenantId =
     (profile.tenant_id as string) ||
     ((profile.tenant as Record<string, string>)?.tenant_id) ||
+    (profile['urn:zitadel:iam:org:name'] as string) ||
     'default';
-  const role = (profile.role as string) || 'tenant_user';
+
+  // Primary: custom claim injected by Actions v2 webhook.
+  // Fallback: Zitadel native role assertion (accessTokenRoleAssertion=true)
+  // produces urn:zitadel:iam:org:project:roles = { "role_key": { ... } }.
+  const ROLE_RANK: Record<string, number> = { platform_admin: 2, tenant_admin: 1, tenant_user: 0 };
+  let role = (profile.role as string) || '';
+  if (!role || !(role in ROLE_RANK)) {
+    const projectRoles = profile['urn:zitadel:iam:org:project:roles'] as Record<string, unknown> | undefined;
+    if (projectRoles && typeof projectRoles === 'object') {
+      role = Object.keys(projectRoles).reduce((best, r) =>
+        (ROLE_RANK[r] ?? -1) > (ROLE_RANK[best] ?? -1) ? r : best, 'tenant_user');
+    } else {
+      role = 'tenant_user';
+    }
+  }
   return {
     isAuthenticated: true,
     user: {
@@ -192,18 +207,22 @@ export async function restoreAuthState(): Promise<void> {
   }
 }
 
-export function login(): void {
+export function login(returnPath?: string): void {
   if (!browser || !userManager) return;
-  userManager.signinRedirect();
+  // Pass the current path as OIDC state so the callback can redirect back to it.
+  userManager.signinRedirect({ state: returnPath ?? window.location.pathname });
 }
 
-export async function handleCallback(): Promise<AuthState | null> {
+export async function handleCallback(): Promise<{ auth: AuthState; returnPath: string } | null> {
   if (!browser || !userManager) return null;
   try {
     const user = await userManager.signinRedirectCallback();
-    const state = oidcUserToState(user);
-    setAuthState(state);
-    return state;
+    const auth = oidcUserToState(user);
+    setAuthState(auth);
+    const returnPath = (typeof user.state === 'string' && user.state.startsWith('/') && user.state !== '/' && !user.state.startsWith('/auth'))
+      ? user.state
+      : '/chat';
+    return { auth, returnPath };
   } catch (err) {
     console.error('OIDC callback error:', err);
     return null;

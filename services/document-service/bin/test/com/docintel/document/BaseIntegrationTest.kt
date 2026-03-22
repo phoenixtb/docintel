@@ -1,67 +1,91 @@
 package com.docintel.document
 
-import org.junit.jupiter.api.BeforeAll
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.test.util.TestPropertyValues
+import org.springframework.context.ApplicationContextInitializer
+import org.springframework.context.ConfigurableApplicationContext
 import org.springframework.test.context.ActiveProfiles
-import org.springframework.test.context.DynamicPropertyRegistry
-import org.springframework.test.context.DynamicPropertySource
+import org.springframework.test.context.ContextConfiguration
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.PostgreSQLContainer
-import org.testcontainers.junit.jupiter.Container
-import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
 
-/**
- * Base class for integration tests with Testcontainers.
- * Provides PostgreSQL and MinIO containers.
- */
+@Suppress("UNCHECKED_CAST")
+
 /**
  * Base class for integration tests that require Testcontainers (PostgreSQL, MinIO).
- * 
- * To run these tests, Docker must be running and properly configured.
- * If Docker is not available, tests extending this class will be skipped.
+ *
+ * Containers are started eagerly in the companion object init block (class-load time),
+ * then wired into the Spring Environment via [Initializer] — which runs before any
+ * bean is created, bypassing the @DynamicPropertySource/TestcontainersExtension
+ * ordering sensitivity.
+ *
+ * Set TESTCONTAINERS_ENABLED=true to run these tests.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-@Testcontainers
-@org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable(
-    named = "TESTCONTAINERS_ENABLED",
-    matches = "true",
-    disabledReason = "Testcontainers require Docker. Set TESTCONTAINERS_ENABLED=true to run."
-)
+@ContextConfiguration(initializers = [BaseIntegrationTest.Initializer::class])
 abstract class BaseIntegrationTest {
 
+    /**
+     * Wires container coordinates into the Spring Environment before any bean is instantiated.
+     * TestPropertyValues has the highest property-source priority (above application-test.yml).
+     */
+    class Initializer : ApplicationContextInitializer<ConfigurableApplicationContext> {
+        override fun initialize(ctx: ConfigurableApplicationContext) {
+            val username = postgres.username
+            val password = postgres.password
+            val minioEndpoint = "http://${minio.host}:${minio.getMappedPort(9000)}"
+            val redisHost = redis.host
+            val redisPort = redis.getMappedPort(6379)
+
+            // Embed credentials in the JDBC URL so the PostgreSQL driver reads them
+            // directly regardless of how HikariCP builds its connection Properties.
+            val jdbcUrl = postgres.jdbcUrl
+                .replace("?", "?user=$username&password=$password&")
+
+            System.setProperty("spring.datasource.url", jdbcUrl)
+            System.setProperty("spring.datasource.username", username)
+            System.setProperty("spring.datasource.password", password)
+            System.setProperty("spring.datasource.driver-class-name", "org.postgresql.Driver")
+            System.setProperty("minio.endpoint", minioEndpoint)
+
+            TestPropertyValues.of(
+                "spring.datasource.url=$jdbcUrl",
+                "spring.datasource.username=$username",
+                "spring.datasource.password=$password",
+                "spring.datasource.driver-class-name=org.postgresql.Driver",
+                "minio.endpoint=$minioEndpoint",
+                "minio.access-key=minioadmin",
+                "minio.secret-key=minioadmin",
+                "spring.data.redis.host=$redisHost",
+                "spring.data.redis.port=$redisPort",
+            ).applyTo(ctx.environment)
+        }
+    }
+
     companion object {
-        @Container
-        @JvmStatic
-        val postgresContainer: PostgreSQLContainer<*> = PostgreSQLContainer(DockerImageName.parse("postgres:15-alpine"))
-            .withDatabaseName("testdb")
-            .withUsername("test")
-            .withPassword("test")
+        val postgres: PostgreSQLContainer<*> =
+            PostgreSQLContainer(DockerImageName.parse("postgres:15-alpine"))
+                .withDatabaseName("testdb")
+                .withUsername("test")
+                .withPassword("test")
 
-        @Container
-        @JvmStatic
-        val minioContainer: GenericContainer<*> = GenericContainer(DockerImageName.parse("minio/minio:RELEASE.2024-01-16T16-07-38Z"))
-            .withExposedPorts(9000)
-            .withEnv("MINIO_ROOT_USER", "minioadmin")
-            .withEnv("MINIO_ROOT_PASSWORD", "minioadmin")
-            .withCommand("server /data")
+        val minio: GenericContainer<*> =
+            GenericContainer(DockerImageName.parse("minio/minio:RELEASE.2024-01-16T16-07-38Z"))
+                .withExposedPorts(9000)
+                .withEnv("MINIO_ROOT_USER", "minioadmin")
+                .withEnv("MINIO_ROOT_PASSWORD", "minioadmin")
+                .withCommand("server /data")
 
-        @DynamicPropertySource
-        @JvmStatic
-        fun configureProperties(registry: DynamicPropertyRegistry) {
-            // PostgreSQL
-            registry.add("spring.datasource.url") { postgresContainer.jdbcUrl }
-            registry.add("spring.datasource.username") { postgresContainer.username }
-            registry.add("spring.datasource.password") { postgresContainer.password }
-            registry.add("spring.datasource.driver-class-name") { "org.postgresql.Driver" }
+        val redis: GenericContainer<*> =
+            GenericContainer(DockerImageName.parse("redis:7.4.0-alpine"))
+                .withExposedPorts(6379)
 
-            // MinIO
-            registry.add("minio.endpoint") { 
-                "http://${minioContainer.host}:${minioContainer.getMappedPort(9000)}" 
-            }
-            registry.add("minio.access-key") { "minioadmin" }
-            registry.add("minio.secret-key") { "minioadmin" }
+        init {
+            postgres.start()
+            minio.start()
+            redis.start()
         }
     }
 }

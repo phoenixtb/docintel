@@ -6,15 +6,13 @@ spring:
       port: 6379
       password: ${SPRING_DATA_REDIS_PASSWORD:redissecret}
 
-  # OAuth2 Resource Server — JWT validation active in docker profile (not just prod).
-  # Using jwk-set-uri (internal Docker URL) instead of issuer-uri to avoid issuer mismatch:
-  # browsers authenticate via localhost:9090 so the JWT iss = http://localhost:9090
-  # but the gateway connects directly to zitadel-api:8080 to fetch JWKS (bypasses Traefik).
   security:
     oauth2:
       resourceserver:
         jwt:
-          jwk-set-uri: ${ZITADEL_JWK_SET_URI:http://zitadel-api:8080/oauth/v2/keys}
+          issuer-uri: ${ZITADEL_ISSUER_URI:http://localhost:9090}
+          jwk-set-uri: ${ZITADEL_JWK_SET_URI:http://zitadel-oidc/oauth/v2/keys}
+          audiences: ${ZITADEL_PROJECT_ID}
 
   cloud:
     gateway:
@@ -26,21 +24,25 @@ spring:
             key-resolver: "#{@tenantRateLimitKeyResolver}"
 
       routes:
+        # document-service SSE stream — must be before the generic document-service route.
+        # response-timeout=-1 prevents the gateway from closing the long-lived SSE connection.
+        - id: document-service-events
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents/events
+            - Method=GET
+          filters:
+            - RewritePath=/api/v1/documents/events, /internal/documents/events
+          metadata:
+            response-timeout: -1
+            connect-timeout: 5000
+
         - id: document-service
           uri: http://document-service:8081
           predicates:
             - Path=/api/v1/documents, /api/v1/documents/**
           filters:
             - RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents${segment}
-
-        - id: document-service-bulk-create
-          uri: http://document-service:8081
-          predicates:
-            - Path=/internal/documents/bulk-create
-          filters:
-            - name: RequestSize
-              args:
-                maxSize: 50MB
 
         - id: document-service-delete-all
           uri: http://document-service:8081
@@ -79,12 +81,24 @@ spring:
           filters:
             - RewritePath=/api/v1/ingest(?<segment>/?.*), /ingest${segment}
 
-        - id: ingestion-service-sample-datasets
-          uri: http://ingestion-service:8001
+        # data-loader: SSE progress stream — long-lived connection, no response timeout
+        - id: data-loader-dataset-progress
+          uri: ${DATA_LOADER_URL:http://data-loader:8002}
           predicates:
-            - Path=/api/v1/sample-datasets, /api/v1/sample-datasets/**
+            - Path=/api/v1/datasets/load/*/progress
           filters:
-            - RewritePath=/api/v1/sample-datasets(?<segment>/?.*), /ingest/dataset${segment}
+            - RewritePath=/api/v1/datasets/load/(?<jobId>[^/]+)/progress, /datasets/load/${jobId}/progress
+          metadata:
+            response-timeout: -1   # -1 = unlimited (SSE stream)
+            connect-timeout: 5000
+
+        # data-loader: dataset list + bulk load trigger
+        - id: data-loader-datasets
+          uri: ${DATA_LOADER_URL:http://data-loader:8002}
+          predicates:
+            - Path=/api/v1/datasets, /api/v1/datasets/**
+          filters:
+            - RewritePath=/api/v1/datasets(?<segment>/?.*), /datasets${segment}
 
         - id: rag-service-conversations
           uri: http://rag-service:8000
@@ -143,11 +157,10 @@ spring:
           filters:
             - RewritePath=/api/v1/analytics/(?<segment>.*), /analytics/${segment}
 
-# OPA URL for OpaAuthorizationFilter
+# DocIntel gateway config
 docintel:
   opa:
     url: ${OPA_URL:http://opa:8181}
-
 logging:
   level:
     com.docintel: DEBUG

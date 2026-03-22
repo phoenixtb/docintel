@@ -36,7 +36,8 @@ function redirectToLoginIfProtected() {
   if (!browser || !userManager) return;
   const path = window.location.pathname;
   if (!isPublicPath(path)) {
-    userManager.signinRedirect();
+    // Pass current path as OIDC state so the callback restores it after re-login.
+    userManager.signinRedirect({ state: path });
   }
   // On public routes (landing page): just clear auth state — user can click Sign In.
 }

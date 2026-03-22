@@ -3,22 +3,35 @@ Semantic Cache Components
 =========================
 
 Check and write to semantic response cache in Qdrant.
-Uses query embedding similarity to find cached responses.
+
+Cache entries are scoped by:
+  - tenant_id          (mandatory)
+  - max_classification_level (int) — max classification across retrieved chunks
+  - required_roles     (list[str]) — union of allowed_roles from retrieved chunks
+
+SemanticCacheChecker enforces that:
+  1. The user's clearance level covers the max classification of the cached response
+  2. The user holds at least one of the required_roles (or required_roles is empty)
+This prevents cross-user cache leakage of sensitive content.
 """
+
+import os
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
 
 from haystack import component
 from qdrant_client import QdrantClient, models
-from typing import Optional
-import uuid
-from datetime import datetime, timezone
-import os
+
+from docintel_common.security import CLASSIFICATION_ORDER, Classification, UserContext
 
 
 @component
 class SemanticCacheChecker:
     """
     Check Qdrant for semantically similar cached responses.
-    Returns cached response if similarity > threshold.
+
+    Enforces clearance and role-based access before returning a cache hit.
     Uses query_points() API (qdrant-client v1.16+).
     """
 
@@ -35,22 +48,24 @@ class SemanticCacheChecker:
         self._ensure_collection()
 
     def _ensure_collection(self):
-        """Create collection if it doesn't exist."""
         collections = self.client.get_collections().collections
         if not any(c.name == self.collection for c in collections):
             self.client.create_collection(
                 collection_name=self.collection,
                 vectors_config=models.VectorParams(
-                    size=768,  # nomic-embed-text dimension
+                    size=768,
                     distance=models.Distance.COSINE,
                 ),
             )
-            # Create tenant index
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="tenant_id",
-                field_schema=models.PayloadSchemaType.KEYWORD,
-            )
+            for field, schema in [
+                ("tenant_id", models.PayloadSchemaType.KEYWORD),
+                ("max_classification_level", models.PayloadSchemaType.INTEGER),
+            ]:
+                self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=field,
+                    field_schema=schema,
+                )
 
     @component.output_types(
         cache_hit=bool,
@@ -58,7 +73,20 @@ class SemanticCacheChecker:
         cached_sources=Optional[list],
         query_embedding=list[float],
     )
-    def run(self, query_embedding: list[float], tenant_id: str) -> dict:
+    def run(
+        self,
+        query_embedding: list[float],
+        tenant_id: str,
+        user_context: Optional[UserContext] = None,
+    ) -> dict:
+        user_clearance_int = (
+            CLASSIFICATION_ORDER.get(user_context.clearance, 0)
+            if user_context
+            else CLASSIFICATION_ORDER[Classification.INTERNAL]
+        )
+        user_roles = set(user_context.roles) if user_context else set()
+
+        # Pre-filter in Qdrant: tenant + clearance level
         results = self.client.query_points(
             collection_name=self.collection,
             query=query_embedding,
@@ -67,21 +95,30 @@ class SemanticCacheChecker:
                     models.FieldCondition(
                         key="tenant_id",
                         match=models.MatchValue(value=tenant_id),
-                    )
+                    ),
+                    models.FieldCondition(
+                        key="max_classification_level",
+                        range=models.Range(lte=user_clearance_int),
+                    ),
                 ]
             ),
-            limit=1,
+            limit=5,
             score_threshold=self.threshold,
         )
 
-        if results.points:
-            payload = results.points[0].payload
-            return {
-                "cache_hit": True,
-                "cached_response": payload.get("response"),
-                "cached_sources": payload.get("sources", []),
-                "query_embedding": query_embedding,
-            }
+        # Post-filter in Python: role check (Qdrant can't express "empty OR intersects" natively)
+        for point in results.points:
+            payload = point.payload or {}
+            required_roles: list[str] = payload.get("required_roles", [])
+
+            # open doc (no role restriction) OR user holds at least one required role
+            if not required_roles or (user_roles & set(required_roles)):
+                return {
+                    "cache_hit": True,
+                    "cached_response": payload.get("response"),
+                    "cached_sources": payload.get("sources", []),
+                    "query_embedding": query_embedding,
+                }
 
         return {
             "cache_hit": False,
@@ -93,7 +130,12 @@ class SemanticCacheChecker:
 
 @component
 class SemanticCacheWriter:
-    """Write successful responses to semantic cache."""
+    """
+    Write successful responses to semantic cache with ACL-scoped metadata.
+
+    Stores max_classification_level (int) and required_roles (list) so
+    SemanticCacheChecker can enforce access control on cache hits.
+    """
 
     def __init__(
         self,
@@ -112,7 +154,14 @@ class SemanticCacheWriter:
         response: str,
         sources: list[dict],
         tenant_id: str,
+        max_classification: str = "internal",
+        required_roles: Optional[list[str]] = None,
     ) -> dict:
+        max_classification_int = CLASSIFICATION_ORDER.get(
+            Classification(max_classification) if max_classification in Classification._value2member_map_ else Classification.INTERNAL,
+            CLASSIFICATION_ORDER[Classification.INTERNAL],
+        )
+
         self.client.upsert(
             collection_name=self.collection,
             points=[
@@ -124,6 +173,9 @@ class SemanticCacheWriter:
                         "response": response,
                         "sources": sources,
                         "tenant_id": tenant_id,
+                        "max_classification": max_classification,
+                        "max_classification_level": max_classification_int,
+                        "required_roles": required_roles or [],
                         "created_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )
@@ -139,27 +191,17 @@ def invalidate_cache_for_tenant(
 ) -> dict:
     """
     Invalidate (delete) all cached responses for a tenant.
-    
-    Should be called when documents are added/removed to ensure
-    fresh responses are generated with new content.
-    
-    Args:
-        tenant_id: Tenant ID to invalidate cache for
-        qdrant_url: Optional Qdrant URL
-        collection: Cache collection name
-        
-    Returns:
-        dict with invalidation status
+
+    Called when documents are added/removed to prevent stale cache hits
+    that reference deleted content.
     """
     url = qdrant_url or os.getenv("QDRANT_URL", "http://localhost:6333")
     client = QdrantClient(url=url)
-    
-    # Check if collection exists
+
     collections = client.get_collections().collections
     if not any(c.name == collection for c in collections):
         return {"invalidated": False, "reason": "collection_not_exists"}
-    
-    # Delete all cache entries for this tenant
+
     client.delete(
         collection_name=collection,
         points_selector=models.FilterSelector(
@@ -173,5 +215,5 @@ def invalidate_cache_for_tenant(
             )
         ),
     )
-    
+
     return {"invalidated": True, "tenant_id": tenant_id}

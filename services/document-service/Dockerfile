@@ -5,32 +5,22 @@ FROM eclipse-temurin:21-jdk-alpine AS build
 
 WORKDIR /app
 
-# Install curl for downloading gradle wrapper
-RUN apk add --no-cache curl
-
-# Copy Gradle files
+# gradle-wrapper.jar is committed — no curl needed.
 COPY build.gradle.kts settings.gradle.kts ./
 COPY gradle ./gradle
-
-# Download gradle wrapper jar if not present
-RUN mkdir -p gradle/wrapper && \
-    if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then \
-        curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
-        https://github.com/gradle/gradle/raw/v8.11.1/gradle/wrapper/gradle-wrapper.jar; \
-    fi
-
-# Copy gradlew script and make executable
 COPY gradlew ./
 RUN chmod +x gradlew
 
-# Download dependencies
-RUN ./gradlew dependencies --no-daemon || true
+# Resolve deps with a persistent Gradle cache (like ~/.gradle on the host).
+# The cache mount is shared across all builds; deps are only downloaded once,
+# even when build.gradle.kts changes — same behaviour as a local Gradle install.
+RUN --mount=type=cache,target=/root/.gradle \
+    ./gradlew dependencies --no-daemon || true
 
-# Copy source and build
 COPY src ./src
-RUN ./gradlew bootJar --no-daemon
+RUN --mount=type=cache,target=/root/.gradle \
+    ./gradlew bootJar --no-daemon
 
-# Runtime image
 FROM eclipse-temurin:21-jre-alpine
 
 WORKDIR /app

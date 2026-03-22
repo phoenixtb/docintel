@@ -29,6 +29,9 @@ def get_engine():
             pool_size=5,
             max_overflow=10,
         )
+        # docintel_ingestion role has BYPASSRLS at the PostgreSQL level —
+        # no session variable or application-level RLS workaround needed.
+
     return _engine
 
 
@@ -63,7 +66,7 @@ def persist_chunks(chunks: list[ChunkRecord]) -> int:
                     chunk_index, start_char, end_char, token_count, metadata
                 ) VALUES (
                     :id, :document_id, :tenant_id, :content,
-                    :chunk_index, :start_char, :end_char, :token_count, :metadata::jsonb
+                    :chunk_index, :start_char, :end_char, :token_count, CAST(:metadata AS jsonb)
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     content     = EXCLUDED.content,

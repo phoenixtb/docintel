@@ -1,0 +1,6 @@
+-- Baseline migration — marks the initial schema state that was previously
+-- managed by config/postgres/init.sql.
+-- No DDL here: the schema already exists on installations that ran init.sql
+-- before Flyway was introduced. On fresh installations, init.sql creates all
+-- base tables before this service starts; baseline-on-migrate skips this
+-- migration and records it as already applied.

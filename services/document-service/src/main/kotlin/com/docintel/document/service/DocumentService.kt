@@ -2,55 +2,183 @@ package com.docintel.document.service
 
 import com.docintel.document.dto.*
 import com.docintel.document.entity.Chunk
+import com.docintel.document.entity.DataSource
+import com.docintel.document.entity.DataSourceStatus
 import com.docintel.document.entity.Document
 import com.docintel.document.entity.ProcessingStatus
 import com.docintel.document.repository.ChunkRepository
+import com.docintel.document.repository.DataSourceRepository
 import com.docintel.document.repository.DocumentRepository
+import com.docintel.document.sse.DocumentStatusEvent
 import org.slf4j.LoggerFactory
+import org.springframework.context.ApplicationEventPublisher
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Pageable
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.multipart.MultipartFile
+import java.nio.ByteBuffer
+import java.security.MessageDigest
+import java.time.Instant
 import java.util.UUID
 
 @Service
 class DocumentService(
     private val documentRepository: DocumentRepository,
+    private val dataSourceRepository: DataSourceRepository,
     private val chunkRepository: ChunkRepository,
     private val storageService: StorageService,
-    private val ingestionServiceClient: IngestionServiceClient
+    private val ingestionServiceClient: IngestionServiceClient,
+    private val eventPublisher: ApplicationEventPublisher,
 ) {
     private val logger = LoggerFactory.getLogger(DocumentService::class.java)
 
+    companion object {
+        /**
+         * Derive a deterministic UUID and full content hash from SHA-256(tenantId + fileBytes).
+         *
+         * UUID uses the first 16 bytes of the digest (128-bit space; effectively collision-free).
+         * The full 64-char hex digest is returned separately and stored in content_hash
+         * for observability and secondary dedup lookups.
+         *
+         * @return Pair(documentId UUID, contentHash 64-char hex string)
+         */
+        fun computeContentId(tenantId: String, fileBytes: ByteArray): Pair<UUID, String> {
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update(tenantId.toByteArray(Charsets.UTF_8))
+            digest.update(fileBytes)
+            val hash = digest.digest()
+            val hex = hash.joinToString("") { "%02x".format(it) }
+            val uuid = uuidFromHashBytes(hash)
+            return Pair(uuid, hex)
+        }
+
+        /**
+         * Reconstruct a document UUID from its 64-char content_hash hex string.
+         * Used by from-path endpoint where the hash is provided by the data-loader.
+         */
+        fun uuidFromContentHash(contentHash: String): UUID {
+            require(contentHash.length >= 32) { "content_hash must be at least 32 hex chars" }
+            val bytes = ByteArray(16) { i ->
+                ((Character.digit(contentHash[i * 2], 16) shl 4) + Character.digit(contentHash[i * 2 + 1], 16)).toByte()
+            }
+            return uuidFromHashBytes(bytes)
+        }
+
+        private fun uuidFromHashBytes(hash: ByteArray): UUID = UUID(
+            ByteBuffer.wrap(hash, 0, 8).long,
+            ByteBuffer.wrap(hash, 8, 8).long
+        )
+    }
+
     /**
-     * Upload and store a document, then trigger async processing.
+     * Upload and store a document, then return the saved record.
+     * Caller is responsible for triggering ingestion via processDocument().
+     *
+     * Dedup semantics on content_hash collision:
+     *  - COMPLETED  → return existing (second value = true = deduplicated)
+     *  - PROCESSING → return in-flight record (deduplicated)
+     *  - FAILED     → re-upload (idempotent MinIO PUT) + return freshly saved record
+     *  - PENDING    → return existing (sweeper will re-trigger)
      */
     @Transactional
     fun uploadDocument(
         file: MultipartFile,
         tenantId: String,
         metadata: Map<String, String> = emptyMap()
-    ): DocumentResponse {
-        val documentId = UUID.randomUUID()
-        
-        val filePath = storageService.storeFile(file, tenantId, documentId)
-        
+    ): Pair<DocumentResponse, Boolean> {
+        val fileBytes = file.bytes
+        val (documentId, contentHash) = computeContentId(tenantId, fileBytes)
+
+        val existing = documentRepository.findByIdAndTenantId(documentId, tenantId)
+        if (existing != null) {
+            when (existing.status) {
+                ProcessingStatus.COMPLETED, ProcessingStatus.PROCESSING, ProcessingStatus.PENDING -> {
+                    logger.info(
+                        "Dedup hit ({}): document_id={} tenant={}",
+                        existing.status, documentId, tenantId
+                    )
+                    return Pair(existing.toResponse(), true)
+                }
+                ProcessingStatus.FAILED -> {
+                    logger.info("Re-processing FAILED document: document_id={} tenant={}", documentId, tenantId)
+                    // Fall through to re-upload and re-save below.
+                }
+            }
+        }
+
+        // MinIO PUT is idempotent for content-addressable paths.
+        val filePath = storageService.storeFile(file, tenantId, contentHash)
+        val safeFilename = java.nio.file.Paths.get(file.originalFilename ?: "unknown").fileName.toString()
+
         val document = Document(
             id = documentId,
             tenantId = tenantId,
-            filename = file.originalFilename ?: "unknown",
+            filename = safeFilename,
             contentType = file.contentType,
             fileSize = file.size,
             filePath = filePath,
             status = ProcessingStatus.PENDING,
-            metadata = metadata
+            metadata = metadata,
+            contentHash = contentHash,
+            dataSourceId = null
         )
-        
+
         val saved = documentRepository.save(document)
-        
-        return saved.toResponse()
+        eventPublisher.publishEvent(DocumentStatusEvent(
+            documentId = saved.id.toString(),
+            tenantId   = tenantId,
+            status     = "PENDING",
+            stage      = "Queued",
+            filename   = safeFilename,
+        ))
+        return Pair(saved.toResponse(), false)
+    }
+
+    /**
+     * Register a document that already exists in MinIO at the content-addressable path.
+     *
+     * Called internally by data-loader after it has uploaded file bytes. The document_id
+     * is derived from content_hash (same algorithm as uploadDocument) so dedup is automatic.
+     *
+     * Requires internal service token (enforced at gateway / GatewayAuthFilter level).
+     */
+    @Transactional
+    fun registerFromPath(request: FromPathRequest, tenantId: String): Pair<DocumentResponse, Boolean> {
+        val documentId = uuidFromContentHash(request.contentHash)
+
+        val existing = documentRepository.findByIdAndTenantId(documentId, tenantId)
+        if (existing != null) {
+            when (existing.status) {
+                ProcessingStatus.COMPLETED, ProcessingStatus.PROCESSING, ProcessingStatus.PENDING -> {
+                    logger.info(
+                        "Dedup hit ({}) from-path: document_id={} tenant={}",
+                        existing.status, documentId, tenantId
+                    )
+                    return Pair(existing.toResponse(), true)
+                }
+                ProcessingStatus.FAILED -> {
+                    logger.info("Re-processing FAILED document from-path: document_id={} tenant={}", documentId, tenantId)
+                }
+            }
+        }
+
+        val document = Document(
+            id = documentId,
+            tenantId = tenantId,
+            filename = request.filename,
+            contentType = request.contentType,
+            fileSize = request.fileSize,
+            filePath = request.minioPath,
+            status = ProcessingStatus.PENDING,
+            metadata = request.metadata,
+            contentHash = request.contentHash,
+            dataSourceId = request.dataSourceId
+        )
+
+        val saved = documentRepository.save(document)
+        return Pair(saved.toResponse(), false)
     }
 
     /**
@@ -58,10 +186,7 @@ class DocumentService(
      *
      * NOT annotated @Transactional because the function suspends inside triggerIngestion
      * (WebClient HTTP call), which would cause the Spring ThreadLocal transaction context
-     * to be lost when the coroutine resumes on a different thread. Instead, DB writes are
-     * performed in small, non-suspend @Transactional helper methods.
-     *
-     * @param domainHint: "auto" for zero-shot classification, or a specific domain name.
+     * to be lost when the coroutine resumes on a different thread.
      */
     suspend fun processDocument(
         documentId: UUID,
@@ -92,6 +217,11 @@ class DocumentService(
         } catch (e: Exception) {
             logger.error("Failed to trigger ingestion for document {}: {}", documentId, e.message, e)
             markDocumentFailed(documentId, tenantId, e.message)
+            try {
+                storageService.deleteDocumentFiles(tenantId, doc.filePath)
+            } catch (se: Exception) {
+                logger.warn("Could not clean up MinIO files for FAILED document {}: {}", documentId, se.message)
+            }
             ProcessingResult(documentId = documentId, chunkCount = 0, status = ProcessingStatus.FAILED, errorMessage = e.message)
         }
     }
@@ -105,6 +235,29 @@ class DocumentService(
         val doc = documentRepository.findByIdAndTenantId(documentId, tenantId) ?: return
         doc.status = ProcessingStatus.PROCESSING
         documentRepository.save(doc)
+        eventPublisher.publishEvent(DocumentStatusEvent(
+            documentId = documentId.toString(),
+            tenantId   = tenantId,
+            status     = "PROCESSING",
+            stage      = "Processing",
+            filename   = doc.filename,
+        ))
+    }
+
+    @Transactional
+    fun markDocumentCompleted(documentId: UUID, tenantId: String, chunkCount: Int) {
+        val doc = documentRepository.findByIdAndTenantId(documentId, tenantId) ?: return
+        doc.status = ProcessingStatus.COMPLETED
+        doc.chunkCount = chunkCount
+        documentRepository.save(doc)
+        eventPublisher.publishEvent(DocumentStatusEvent(
+            documentId = documentId.toString(),
+            tenantId   = tenantId,
+            status     = "COMPLETED",
+            stage      = "Indexed",
+            filename   = doc.filename,
+            chunkCount = chunkCount,
+        ))
     }
 
     @Transactional
@@ -113,26 +266,34 @@ class DocumentService(
         doc.status = ProcessingStatus.FAILED
         doc.errorMessage = message
         documentRepository.save(doc)
+        eventPublisher.publishEvent(DocumentStatusEvent(
+            documentId   = documentId.toString(),
+            tenantId     = tenantId,
+            status       = "FAILED",
+            stage        = "Failed",
+            filename     = doc.filename,
+            errorMessage = message,
+        ))
     }
 
-    /**
-     * Get document by ID.
-     */
+    @Transactional(readOnly = true)
+    fun listInFlight(tenantId: String): List<Document> =
+        documentRepository.findByTenantIdAndStatusIn(
+            tenantId, listOf(ProcessingStatus.PENDING, ProcessingStatus.PROCESSING)
+        )
+
     fun getDocument(id: UUID, tenantId: String, includeChunks: Boolean = false): DocumentDetailResponse? {
         val document = documentRepository.findByIdAndTenantId(id, tenantId) ?: return null
-        
+
         val chunks = if (includeChunks) {
             chunkRepository.findByDocumentIdOrderByChunkIndex(id).map { it.toResponse() }
         } else {
             null
         }
-        
+
         return document.toDetailResponse(chunks)
     }
 
-    /**
-     * List documents for a tenant.
-     */
     fun listDocuments(
         tenantId: String,
         status: ProcessingStatus? = null,
@@ -143,7 +304,6 @@ class DocumentService(
         } else {
             documentRepository.findByTenantId(tenantId, pageable)
         }
-        
         return page.map { it.toResponse() }
     }
 
@@ -151,13 +311,10 @@ class DocumentService(
      * Delete a document and all associated data.
      *
      * NOT annotated @Transactional — see processDocument for the rationale.
-     * DB deletions happen in a separate @Transactional helper after the HTTP call.
      */
     suspend fun deleteDocument(id: UUID, tenantId: String): Boolean {
-        val exists = documentExistsForTenant(id, tenantId)
-        if (!exists) return false
+        val doc = fetchDocumentForIngestion(id, tenantId) ?: return false
 
-        // Delete vectors first — prevents orphan vector/PG state mismatch.
         val vectorsDeleted = ingestionServiceClient.deleteDocumentVectors(tenantId, id)
         if (!vectorsDeleted) {
             throw IllegalStateException(
@@ -166,7 +323,7 @@ class DocumentService(
             )
         }
 
-        deleteDocumentRecords(id, tenantId)
+        deleteDocumentRecords(id, tenantId, doc.filePath)
         return true
     }
 
@@ -175,19 +332,16 @@ class DocumentService(
         documentRepository.findByIdAndTenantId(id, tenantId) != null
 
     @Transactional
-    fun deleteDocumentRecords(id: UUID, tenantId: String) {
+    fun deleteDocumentRecords(id: UUID, tenantId: String, filePath: String) {
         chunkRepository.deleteByDocumentId(id)
         try {
-            storageService.deleteDocumentFiles(tenantId, id)
+            storageService.deleteDocumentFiles(tenantId, filePath)
         } catch (e: Exception) {
             logger.warn("Failed to delete files for document $id (non-fatal): ${e.message}")
         }
         documentRepository.findByIdAndTenantId(id, tenantId)?.let { documentRepository.delete(it) }
     }
 
-    /**
-     * Get chunks for a document.
-     */
     fun getDocumentChunks(documentId: UUID, tenantId: String): List<ChunkResponse> {
         documentRepository.findByIdAndTenantId(documentId, tenantId)
             ?: throw IllegalArgumentException("Document not found")
@@ -197,50 +351,8 @@ class DocumentService(
     }
 
     /**
-     * Bulk create document records (for sample datasets).
-     */
-    @Transactional
-    fun bulkCreateDocuments(request: BulkDocumentCreateRequest): BulkDocumentCreateResponse {
-        val documentIds = mutableListOf<UUID>()
-        
-        for (item in request.documents) {
-            val documentId = UUID.randomUUID()
-            
-            val metadata = item.metadata.toMutableMap()
-            metadata["domain"] = item.domain
-            metadata["document_type"] = item.domain
-            metadata["source"] = "sample_dataset"
-            item.content?.let { metadata["content_preview"] = it.take(500) }
-            
-            val document = Document(
-                id = documentId,
-                tenantId = request.tenantId,
-                filename = item.filename,
-                contentType = "text/plain",
-                fileSize = item.content?.length?.toLong() ?: 0L,
-                filePath = "",
-                status = ProcessingStatus.COMPLETED,
-                chunkCount = item.chunkCount,
-                metadata = metadata
-            )
-            
-            documentRepository.save(document)
-            documentIds.add(documentId)
-        }
-        
-        logger.info("Bulk created ${documentIds.size} document records for tenant ${request.tenantId}")
-        
-        return BulkDocumentCreateResponse(
-            created = documentIds.size,
-            documentIds = documentIds
-        )
-    }
-
-    /**
-     * Delete all documents for a tenant in pages.
-     *
+     * Delete all documents for a tenant.
      * NOT annotated @Transactional — see processDocument for the rationale.
-     * Each batch delete is performed in its own @Transactional helper.
      */
     suspend fun deleteAllDocuments(tenantId: String): Int {
         try {
@@ -258,28 +370,72 @@ class DocumentService(
     fun deleteTenantDocumentBatches(tenantId: String): Int {
         val pageSize = 200
         var deleted = 0
-        var page = 0
 
         while (true) {
             val documents = documentRepository.findByTenantId(
-                tenantId, PageRequest.of(page, pageSize)
+                tenantId, PageRequest.of(0, pageSize)
             ).content
             if (documents.isEmpty()) break
 
             for (doc in documents) {
                 chunkRepository.deleteByDocumentId(doc.id)
                 try {
-                    storageService.deleteDocumentFiles(tenantId, doc.id)
+                    storageService.deleteDocumentFiles(tenantId, doc.filePath)
                 } catch (_: Exception) { }
             }
             documentRepository.deleteAll(documents)
             deleted += documents.size
-            page++
         }
         return deleted
     }
 
-    // Extension functions for mapping
+    // ==========================================================================
+    // DataSource lifecycle
+    // ==========================================================================
+
+    @Transactional
+    fun createDataSource(tenantId: String, request: DataSourceRequest): DataSourceResponse {
+        val dataSource = DataSource(
+            id = UUID.randomUUID(),
+            tenantId = tenantId,
+            sourceType = request.sourceType,
+            sourceConfig = request.sourceConfig,
+            status = DataSourceStatus.LOADING
+        )
+        return dataSourceRepository.save(dataSource).toResponse()
+    }
+
+    @Transactional
+    fun completeDataSource(id: UUID, tenantId: String, documentCount: Int): DataSourceResponse {
+        val dataSource = dataSourceRepository.findByIdAndTenantId(id, tenantId)
+            ?: throw IllegalArgumentException("DataSource not found: $id")
+        dataSource.status = DataSourceStatus.COMPLETED
+        dataSource.documentCount = documentCount
+        dataSource.completedAt = Instant.now()
+        return dataSourceRepository.save(dataSource).toResponse()
+    }
+
+    @Transactional
+    fun failDataSource(id: UUID, tenantId: String): DataSourceResponse {
+        val dataSource = dataSourceRepository.findByIdAndTenantId(id, tenantId)
+            ?: throw IllegalArgumentException("DataSource not found: $id")
+        dataSource.status = DataSourceStatus.FAILED
+        dataSource.completedAt = Instant.now()
+        return dataSourceRepository.save(dataSource).toResponse()
+    }
+
+    @Transactional(readOnly = true)
+    fun getDataSource(id: UUID, tenantId: String): DataSourceResponse? =
+        dataSourceRepository.findByIdAndTenantId(id, tenantId)?.toResponse()
+
+    @Transactional(readOnly = true)
+    fun listDataSources(tenantId: String): List<DataSourceResponse> =
+        dataSourceRepository.findByTenantId(tenantId).map { it.toResponse() }
+
+    // ==========================================================================
+    // Private mapping helpers
+    // ==========================================================================
+
     private fun Document.toResponse() = DocumentResponse(
         id = id,
         filename = filename,
@@ -314,5 +470,16 @@ class DocumentService(
         endChar = endChar,
         tokenCount = tokenCount,
         metadata = metadata
+    )
+
+    private fun DataSource.toResponse() = DataSourceResponse(
+        id = id,
+        tenantId = tenantId,
+        sourceType = sourceType,
+        sourceConfig = sourceConfig,
+        status = status,
+        documentCount = documentCount,
+        createdAt = createdAt,
+        completedAt = completedAt
     )
 }

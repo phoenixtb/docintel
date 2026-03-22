@@ -5,12 +5,13 @@ All injectable resources live here so endpoints declare what they need
 via Depends() rather than reaching into global state directly.
 """
 
-import base64
-import json
 import logging
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request
+
+from docintel_common.internal_auth import verify_internal_token
+from docintel_common.security import UserContext
 
 from ..config import Settings
 from ..pipelines.query import RAGService
@@ -35,78 +36,81 @@ def get_tracer(request: Request) -> LangfuseTracer:
 
 
 # ---------------------------------------------------------------------------
-# JWT claim extraction
+# Inter-service authentication + claim extraction
 # ---------------------------------------------------------------------------
 
-def _decode_jwt_payload(token: str) -> dict:
-    """Decode JWT payload without signature verification (gateway already validated it)."""
-    try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            return {}
-        payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        return json.loads(base64.urlsafe_b64decode(payload))
-    except Exception:
-        return {}
-
-
-def extract_jwt_claims(
-    authorization: Annotated[str | None, Header()] = None,
+def require_internal_token(
+    request: Request,
+    x_internal_service_token: Annotated[str | None, Header(alias="X-Internal-Service-Token")] = None,
+    x_request_id: Annotated[str | None, Header(alias="X-Request-Id")] = None,
     x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-Id")] = None,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
-) -> dict:
+) -> None:
     """
-    Extract tenant_id, user_id, user_roles from the forwarded JWT.
+    Verify X-Internal-Service-Token HMAC before trusting any X-* headers.
 
-    The API Gateway validates the JWT signature and forwards:
-      - The raw Authorization header (for claim extraction)
-      - X-Tenant-Id, X-User-Id, X-User-Role headers (extracted from JWT)
-
-    Defense-in-depth: reject any request that did not come through the gateway
-    (i.e., has neither a JWT nor the gateway-injected X-User-Id header).
-
-    Authentik claim layout (from docintel-setup.yaml scope mappings):
-      sub        → user UUID
-      tenant_id  → from 'tenant' scope mapping  (top-level claim)
-      role       → from 'role'   scope mapping  (top-level, singular string)
+    The API Gateway computes HMAC-SHA256("{requestId}:{tenantId}:{userId}", secret)
+    and attaches it as X-Internal-Service-Token. Any request without a valid token
+    bypassed the gateway — reject with 403.
     """
-    claims: dict = {"tenant_id": "default", "user_id": None, "user_roles": []}
+    settings: Settings = request.app.state.settings
+    secret = settings.internal_gateway_secret
 
-    # Primary: decode the JWT — authoritative source for all identity claims
-    if authorization and authorization.startswith("Bearer "):
-        payload = _decode_jwt_payload(authorization.removeprefix("Bearer "))
-        if payload:
-            tenant_id = payload.get("tenant_id")
-            if not tenant_id:
-                nested = payload.get("tenant", {})
-                tenant_id = nested.get("tenant_id") if isinstance(nested, dict) else None
-            if tenant_id:
-                claims["tenant_id"] = tenant_id
+    if not secret:
+        # Secret not configured — service misconfiguration, fail closed.
+        logger.error("INTERNAL_GATEWAY_SECRET is not set; rejecting all requests.")
+        raise HTTPException(status_code=403, detail="Service misconfiguration.")
 
-            claims["user_id"] = payload.get("sub")
+    token = x_internal_service_token or ""
+    if not verify_internal_token(
+        token=token,
+        request_id=x_request_id or "",
+        tenant_id=x_tenant_id or "",
+        user_id=x_user_id or "",
+        secret=secret,
+    ):
+        logger.warning(
+            "Invalid X-Internal-Service-Token — request may have bypassed the gateway "
+            "(request_id=%s, tenant=%s, user=%s)",
+            x_request_id, x_tenant_id, x_user_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Missing or invalid internal service token. All requests must pass through the API Gateway.",
+        )
 
-            role = payload.get("role")
-            if role:
-                claims["user_roles"] = [role] if isinstance(role, str) else list(role)
 
-            return claims
+def extract_user_context(
+    request: Request,
+    _: Annotated[None, Depends(require_internal_token)],
+    x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-Id")] = None,
+    x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
+    x_user_roles: Annotated[str | None, Header(alias="X-User-Roles")] = None,
+    x_user_clearance: Annotated[str | None, Header(alias="X-User-Clearance")] = None,
+    x_org_id: Annotated[str | None, Header(alias="X-Org-Id")] = None,
+    x_user_department: Annotated[str | None, Header(alias="X-User-Department")] = None,
+    x_user_region: Annotated[str | None, Header(alias="X-User-Region")] = None,
+) -> UserContext:
+    """
+    Build UserContext from gateway-forwarded headers.
 
-    # Fallback: gateway-forwarded headers (direct service calls in integration tests/dev)
-    if x_user_id:
-        claims["user_id"] = x_user_id
-        if x_tenant_id:
-            claims["tenant_id"] = x_tenant_id
-        return claims
-
-    # No JWT and no gateway headers — reject. This request bypassed the gateway.
-    raise HTTPException(
-        status_code=403,
-        detail="Missing authentication credentials. All requests must pass through the API Gateway.",
-    )
+    Requires a valid X-Internal-Service-Token (enforced via require_internal_token).
+    The JWT is NOT re-decoded — the gateway is the sole JWT validation point.
+    """
+    headers = {
+        "X-Tenant-Id": x_tenant_id or "default",
+        "X-User-Id": x_user_id or "",
+        "X-User-Roles": x_user_roles or "",
+        "X-User-Clearance": x_user_clearance or "internal",
+        "X-Org-Id": x_org_id or x_tenant_id or "default",
+        "X-User-Department": x_user_department,
+        "X-User-Region": x_user_region or "global",
+    }
+    return UserContext.from_gateway_headers(headers)
 
 
 # Type aliases for DI
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 RAGServiceDep = Annotated[RAGService, Depends(get_rag_service)]
 TracerDep = Annotated[LangfuseTracer, Depends(get_tracer)]
-JWTClaimsDep = Annotated[dict, Depends(extract_jwt_claims)]
+UserContextDep = Annotated[UserContext, Depends(extract_user_context)]

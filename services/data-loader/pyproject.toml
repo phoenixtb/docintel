@@ -1,0 +1,57 @@
+[project]
+name = "data-loader"
+version = "0.1.0"
+description = "DocIntel Data Loader — pluggable source adapters for bulk document loading"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    # Web Framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.0.0",
+    "httpx>=0.27.0",
+
+    # MinIO (content-addressable file upload)
+    "minio>=7.2.0",
+
+    # HuggingFace dataset loading
+    "datasets>=3.2.0",
+
+    # Redis Streams message bus
+    "redis>=5.0.0",
+
+    # Observability
+    "prometheus-fastapi-instrumentator>=7.0.0",
+    "prometheus-client>=0.21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=4.1.0",
+    "httpx>=0.27.0",
+    "ruff>=0.8.0",
+    "fakeredis>=2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

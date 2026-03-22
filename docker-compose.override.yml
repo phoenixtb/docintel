@@ -13,11 +13,28 @@ services:
   #   environment:
   #     - DEBUG=true
 
-  # Expose additional ports for debugging
-  postgres:
+  # MinIO host ports remapped to 19000/19001 to avoid conflict with OrbStack's
+  # internal services which occupy 9000 (cslistener) and 9001 (etlservicemgr).
+  # All DocIntel services connect via internal Docker network (minio:9000).
+  # Dev tooling (backup.sh, mc client, MinIO Console) uses 19000/19001 from the host.
+  minio:
     ports:
-      - "5432:5432"
-  
-  redis:
+      - "19000:9000"
+      - "19001:9001"
+
+  # Expose ingestion-service for seed-data.sh and local dev tooling.
+  # Bound to 0.0.0.0 (not 127.0.0.1) — explicit loopback bindings trigger a
+  # stuck-port bug in OrbStack's userspace networking on container restart.
+  # Security is provided by HMAC validation (X-Internal-Service-Token) on every
+  # request, not by IP binding.
+  ingestion-service:
     ports:
-      - "6379:6379"
+      - "8001:8001"
+
+  # Expose data-loader for E2E test setup (dataset seeding) and local dev tooling.
+  data-loader:
+    ports:
+      - "8002:8002"
+
+  # redis: not exposed to host — internal only (no auth equivalent to HMAC here)
+  # Access via: docker exec -it docintel-redis-1 redis-cli

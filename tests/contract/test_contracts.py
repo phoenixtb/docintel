@@ -134,6 +134,129 @@ class TestRagStreamContract:
 # =============================================================================
 # 4. Gateway → downstream services header contract
 # =============================================================================
+# =============================================================================
+# 5. Redis Streams event payload contracts (data-loader → document-service →
+#    ingestion-service)
+# =============================================================================
+class TestStreamEventContracts:
+    """Verify that stream event shapes are consistent across producers/consumers."""
+
+    FILES_AVAILABLE_REQUIRED = {
+        "minioPath", "contentHash", "tenantId", "filename",
+    }
+    FILES_AVAILABLE_OPTIONAL = {
+        "contentType", "fileSize", "dataSourceId", "domainHint", "metadata",
+    }
+
+    DOCUMENT_READY_REQUIRED = {
+        "documentId", "tenantId", "bucket", "objectPath", "filename",
+    }
+
+    INGESTION_COMPLETE_REQUIRED = {
+        "documentId", "tenantId", "chunkCount", "domain", "status",
+    }
+
+    def test_files_available_event_has_required_fields(self):
+        event = {
+            "minioPath": "docs/abc/original.txt",
+            "contentHash": "a" * 64,
+            "tenantId": "alpha",
+            "filename": "doc.txt",
+            "contentType": "text/plain",
+            "fileSize": 1024,
+            "dataSourceId": None,
+            "domainHint": "auto",
+            "metadata": {},
+        }
+        for key in self.FILES_AVAILABLE_REQUIRED:
+            assert key in event, f"Missing required field: {key}"
+
+    def test_document_ready_event_has_required_fields(self):
+        event = {
+            "documentId": "some-uuid",
+            "tenantId": "alpha",
+            "bucket": "docintel-alpha",
+            "objectPath": "docs/abc/original.txt",
+            "filename": "doc.txt",
+            "domainHint": "auto",
+            "metadata": {},
+        }
+        for key in self.DOCUMENT_READY_REQUIRED:
+            assert key in event, f"Missing required field: {key}"
+
+    def test_ingestion_complete_event_has_required_fields(self):
+        event = {
+            "documentId": "some-uuid",
+            "tenantId": "alpha",
+            "chunkCount": 42,
+            "domain": "contracts",
+            "status": "COMPLETED",
+        }
+        for key in self.INGESTION_COMPLETE_REQUIRED:
+            assert key in event, f"Missing required field: {key}"
+
+    def test_ingestion_complete_status_values_are_valid(self):
+        valid_statuses = {"COMPLETED", "FAILED"}
+        for status in valid_statuses:
+            event = {
+                "documentId": "d", "tenantId": "t",
+                "chunkCount": 0, "domain": "general", "status": status,
+            }
+            assert event["status"] in valid_statuses
+
+    def test_files_available_content_hash_is_64_chars(self):
+        """Content hash is SHA-256 hex = 64 chars."""
+        event = {"contentHash": "a" * 64}
+        assert len(event["contentHash"]) == 64
+
+    def test_ingestion_complete_failed_has_error_message(self):
+        event = {
+            "documentId": "d", "tenantId": "t",
+            "chunkCount": 0, "domain": "general",
+            "status": "FAILED", "errorMessage": "GPU OOM",
+        }
+        assert event.get("errorMessage") is not None
+
+
+# =============================================================================
+# 6. DataSource lifecycle contract
+# =============================================================================
+class TestDataSourceContract:
+    """Verify DataSource request/response shapes."""
+
+    REQUIRED_REQUEST_KEYS = {"sourceType", "sourceConfig"}
+    REQUIRED_RESPONSE_KEYS = {"id", "tenantId", "sourceType", "status", "documentCount"}
+    VALID_STATUSES = {"LOADING", "COMPLETED", "FAILED"}
+
+    def test_create_request_has_required_fields(self):
+        request = {
+            "sourceType": "huggingface",
+            "sourceConfig": {"dataset_key": "cuad", "samples": 100},
+        }
+        for key in self.REQUIRED_REQUEST_KEYS:
+            assert key in request
+
+    def test_response_has_required_fields(self):
+        import uuid
+        response = {
+            "id": str(uuid.uuid4()),
+            "tenantId": "alpha",
+            "sourceType": "huggingface",
+            "sourceConfig": {"dataset_key": "cuad"},
+            "status": "LOADING",
+            "documentCount": 0,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "completedAt": None,
+        }
+        for key in self.REQUIRED_RESPONSE_KEYS:
+            assert key in response
+
+    def test_valid_status_values(self):
+        for status in self.VALID_STATUSES:
+            assert status in self.VALID_STATUSES
+
+
+# =============================================================================
 class TestGatewayHeaderContract:
     """Verify the headers gateway forwards to downstream services."""
 

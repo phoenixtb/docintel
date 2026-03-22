@@ -16,6 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
 # Service definitions: name -> docker compose service name
 SERVICES=(
   "web-ui"
@@ -25,16 +28,18 @@ SERVICES=(
   "rag-service"
   "admin-service"
   "analytics-service"
+  "docintel-actions"
 )
 
 DESCRIPTIONS=(
-  "SvelteKit chat interface"
+  "SvelteKit SPA frontend"
   "Spring Cloud Gateway"
   "Document management (Kotlin)"
   "Docling parse + embed + index (Python)"
   "RAG query/retrieval (Python/Haystack)"
   "Admin operations (Kotlin)"
   "Analytics + ClickHouse ingestion (Python)"
+  "Zitadel Actions v2 custom claims webhook"
 )
 
 # Colors
@@ -51,12 +56,9 @@ NC='\033[0m'
 # Build all (non-interactive)
 # ==============================================================================
 if [[ "$1" == "--all" ]]; then
-    echo -e "${BOLD}Building all services...${NC}"
+    echo -e "${BOLD}Building all services in parallel...${NC}"
     echo ""
-    for i in "${!SERVICES[@]}"; do
-        echo -e "${BLUE}[${i+1}/${#SERVICES[@]}]${NC} Building ${BOLD}${SERVICES[$i]}${NC}..."
-        docker compose build "${SERVICES[$i]}"
-    done
+    docker compose build --parallel "${SERVICES[@]}"
     echo ""
     echo -e "${GREEN}All services built.${NC}"
     echo ""

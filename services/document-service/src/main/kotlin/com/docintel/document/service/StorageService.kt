@@ -24,6 +24,17 @@ class StorageService(private val minioClient: MinioClient) {
                 )
             }
         }
+
+        /**
+         * Content-addressable MinIO object path: {tenant_id}/docs/{content_hash}/original.{ext}
+         *
+         * - Encodes identity: same content → same path → MinIO PUT is idempotent
+         * - Tenant-scoped: no cross-tenant path collisions
+         */
+        fun contentAddressablePath(contentHash: String, filename: String): String {
+            val ext = filename.substringAfterLast('.', "bin")
+            return "docs/$contentHash/original.$ext"
+        }
     }
 
     private fun bucketFor(tenantId: String): String = "docintel-$tenantId"
@@ -41,11 +52,16 @@ class StorageService(private val minioClient: MinioClient) {
         }
     }
 
-    fun storeFile(file: MultipartFile, tenantId: String, documentId: UUID): String {
+    /**
+     * Upload a multipart file using the content-addressable path convention.
+     * Returns the MinIO object path (relative to bucket).
+     *
+     * MinIO PUT is idempotent: if the same hash already exists, this is a no-op.
+     */
+    fun storeFile(file: MultipartFile, tenantId: String, contentHash: String): String {
         validateFileExtension(file.originalFilename)
         ensureBucket(tenantId)
-        val extension = file.originalFilename?.substringAfterLast('.', "bin") ?: "bin"
-        val objectName = "$documentId/original.$extension"
+        val objectName = contentAddressablePath(contentHash, file.originalFilename ?: "upload.bin")
 
         minioClient.putObject(
             PutObjectArgs.builder()
@@ -78,9 +94,14 @@ class StorageService(private val minioClient: MinioClient) {
         )
     }
 
-    fun deleteDocumentFiles(tenantId: String, documentId: UUID) {
+    /**
+     * Delete all MinIO objects under the content-addressable prefix for a document.
+     * The prefix is derived from the document's file_path (which already encodes the hash).
+     */
+    fun deleteDocumentFiles(tenantId: String, filePath: String) {
         val bucket = bucketFor(tenantId)
-        val prefix = "$documentId/"
+        // file_path is e.g. "docs/{hash}/original.pdf" — strip the filename to get the directory
+        val prefix = filePath.substringBeforeLast('/', filePath) + "/"
 
         val objects = minioClient.listObjects(
             ListObjectsArgs.builder()

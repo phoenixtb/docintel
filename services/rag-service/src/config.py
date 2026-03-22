@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     analytics_service_url: str = "http://analytics-service:8001"
     postgres_url: str = "postgresql://docintel:docintel_secret@postgres:5432/docintel"
 
+    # ── OPA ───────────────────────────────────────────────────────────────────
+    opa_url: str = "http://opa:8181"
+
+    # ── Inter-service auth ────────────────────────────────────────────────────
+    # HMAC key shared with the API Gateway. Set by setup.sh, injected via docker-compose.
+    internal_gateway_secret: str = ""
+
     # ── Service metadata ──────────────────────────────────────────────────────
     service_version: str = "0.1.0"
 

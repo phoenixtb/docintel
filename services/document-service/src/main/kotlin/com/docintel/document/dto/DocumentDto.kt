@@ -1,5 +1,6 @@
 package com.docintel.document.dto
 
+import com.docintel.document.entity.DataSourceStatus
 import com.docintel.document.entity.ProcessingStatus
 import java.time.Instant
 import java.util.UUID
@@ -53,23 +54,43 @@ data class ProcessingResult(
 )
 
 /**
- * Request to bulk create documents (for sample datasets).
- * Creates document records without file upload.
+ * Request to register a document that already exists in MinIO.
+ * Used by data-loader after it has uploaded file bytes to the content-addressable path.
+ *
+ * Path convention: {tenant_id}/docs/{content_hash}/original.{ext}
  */
-data class BulkDocumentCreateRequest(
-    val tenantId: String,
-    val documents: List<BulkDocumentItem>
-)
-
-data class BulkDocumentItem(
+data class FromPathRequest(
+    val minioPath: String,
+    val contentHash: String,
     val filename: String,
-    val domain: String,
-    val chunkCount: Int,
+    val fileSize: Long = 0,
+    val contentType: String? = null,
+    val dataSourceId: UUID? = null,
     val metadata: Map<String, String> = emptyMap(),
-    val content: String? = null  // Optional: raw content for display purposes
+    val domainHint: String = "auto"
 )
 
-data class BulkDocumentCreateResponse(
-    val created: Int,
-    val documentIds: List<UUID>
+/**
+ * Response for dedup scenarios: wraps the existing or newly created document
+ * plus a flag indicating whether it was a dedup hit.
+ */
+data class FromPathResponse(
+    val document: DocumentResponse,
+    val deduplicated: Boolean
+)
+
+data class DataSourceRequest(
+    val sourceType: String,
+    val sourceConfig: Map<String, Any?> = emptyMap()
+)
+
+data class DataSourceResponse(
+    val id: UUID,
+    val tenantId: String,
+    val sourceType: String,
+    val sourceConfig: Map<String, Any?>,
+    val status: DataSourceStatus,
+    val documentCount: Int,
+    val createdAt: Instant,
+    val completedAt: Instant?
 )

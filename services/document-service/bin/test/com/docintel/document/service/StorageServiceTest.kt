@@ -1,18 +1,22 @@
 package com.docintel.document.service
 
 import com.docintel.document.BaseIntegrationTest
+import com.docintel.document.tenant.TenantContextHolder
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.mock.web.MockMultipartFile
-import java.util.UUID
-import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.assertEquals
 
 /**
- * Integration tests for StorageService with MinIO Testcontainer.
+ * Integration tests for StorageService against MinIO Testcontainer.
+ *
+ * Content-addressable path convention: docs/{content_hash}/original.{ext}
+ * Tenant isolation is at the MinIO bucket level: bucket = "docintel-{tenantId}".
  */
 class StorageServiceTest : BaseIntegrationTest() {
 
@@ -20,176 +24,139 @@ class StorageServiceTest : BaseIntegrationTest() {
     private lateinit var storageService: StorageService
 
     private val testTenantId = "test-tenant"
-    private lateinit var testDocumentId: UUID
+    private val testContentHash = "a".repeat(64)   // 64-char hex-like string for tests
 
     @BeforeEach
     fun setUp() {
-        testDocumentId = UUID.randomUUID()
+        TenantContextHolder.setTenantId(testTenantId)
+    }
+
+    @AfterEach
+    fun tearDown() {
+        TenantContextHolder.clear()
     }
 
     @Test
     fun `should store and retrieve text file`() {
-        // Given
         val content = "This is test content for storage"
-        val file = MockMultipartFile(
-            "file",
-            "test-document.txt",
-            "text/plain",
-            content.toByteArray()
-        )
+        val file = MockMultipartFile("file", "test-document.txt", "text/plain", content.toByteArray())
 
-        // When
-        val storedPath = storageService.storeFile(file, testTenantId, testDocumentId)
+        val storedPath = storageService.storeFile(file, testTenantId, testContentHash)
 
-        // Then
+        // Path follows content-addressable convention: docs/{hash}/original.txt
         assertNotNull(storedPath)
-        assertTrue(storedPath.contains(testTenantId))
-        assertTrue(storedPath.contains(testDocumentId.toString()))
+        assertTrue(storedPath.startsWith("docs/"))
+        assertTrue(storedPath.endsWith("original.txt"))
 
-        // Verify we can retrieve it
-        val retrieved = storageService.getFile(storedPath)
-        val retrievedContent = retrieved.bufferedReader().use { it.readText() }
+        val retrievedContent = storageService.getFile(storedPath).bufferedReader().use { it.readText() }
         assertEquals(content, retrievedContent)
     }
 
     @Test
-    fun `should store file with correct path structure`() {
-        // Given
-        val file = MockMultipartFile(
-            "file",
-            "document.txt",
-            "text/plain",
-            "content".toByteArray()
-        )
+    fun `should store file with correct content-addressable path structure`() {
+        val file = MockMultipartFile("file", "document.pdf", "application/pdf", "content".toByteArray())
 
-        // When
-        val storedPath = storageService.storeFile(file, testTenantId, testDocumentId)
+        val storedPath = storageService.storeFile(file, testTenantId, testContentHash)
 
-        // Then
-        // Path should be: tenantId/documentId/filename
-        assertTrue(storedPath.startsWith(testTenantId))
-        assertTrue(storedPath.contains(testDocumentId.toString()))
-        assertTrue(storedPath.endsWith("document.txt"))
+        // Structure: docs/{hash}/original.pdf
+        assertTrue(storedPath.startsWith("docs/$testContentHash/"))
+        assertTrue(storedPath.endsWith("original.pdf"))
     }
 
     @Test
-    fun `should store and retrieve binary file`() {
-        // Given
-        val binaryContent = byteArrayOf(0x00, 0x01, 0x02, 0x03, 0xFF.toByte())
-        val file = MockMultipartFile(
-            "file",
-            "binary.bin",
-            "application/octet-stream",
-            binaryContent
-        )
+    fun `should idempotently store same content at same path`() {
+        val content = "duplicate content"
+        val hash = "b".repeat(64)
+        val file1 = MockMultipartFile("file", "doc.txt", "text/plain", content.toByteArray())
+        val file2 = MockMultipartFile("file", "doc.txt", "text/plain", content.toByteArray())
 
-        // When
-        val storedPath = storageService.storeFile(file, testTenantId, testDocumentId)
+        val path1 = storageService.storeFile(file1, testTenantId, hash)
+        val path2 = storageService.storeFile(file2, testTenantId, hash)
 
-        // Then
-        val retrieved = storageService.getFile(storedPath)
-        val retrievedContent = retrieved.readBytes()
+        // Same hash → same path (idempotent MinIO PUT)
+        assertEquals(path1, path2)
+    }
+
+    @Test
+    fun `should store and retrieve allowed binary file`() {
+        val binaryContent = byteArrayOf(0x25, 0x50, 0x44, 0x46)  // "%PDF" magic bytes
+        val file = MockMultipartFile("file", "opaque.pdf", "application/pdf", binaryContent)
+
+        val storedPath = storageService.storeFile(file, testTenantId, testContentHash)
+        val retrievedContent = storageService.getFile(storedPath).readBytes()
+
         assertTrue(binaryContent.contentEquals(retrievedContent))
     }
 
     @Test
-    fun `should store large file`() {
-        // Given
-        val largeContent = "X".repeat(1_000_000)  // 1MB
-        val file = MockMultipartFile(
-            "file",
-            "large-file.txt",
-            "text/plain",
-            largeContent.toByteArray()
-        )
+    fun `should reject disallowed file extensions`() {
+        val file = MockMultipartFile("file", "script.exe", "application/octet-stream", "content".toByteArray())
 
-        // When
-        val storedPath = storageService.storeFile(file, testTenantId, testDocumentId)
-
-        // Then
-        assertNotNull(storedPath)
-        val retrieved = storageService.getFile(storedPath)
-        val retrievedContent = retrieved.bufferedReader().use { it.readText() }
-        assertEquals(largeContent.length, retrievedContent.length)
-    }
-
-    @Test
-    fun `should delete document files`() {
-        // Given
-        val file = MockMultipartFile(
-            "file",
-            "to-delete.txt",
-            "text/plain",
-            "content to delete".toByteArray()
-        )
-        storageService.storeFile(file, testTenantId, testDocumentId)
-
-        // When
-        storageService.deleteDocumentFiles(testTenantId, testDocumentId)
-
-        // Then - trying to get deleted file should fail
-        assertThrows<Exception> {
-            storageService.getFile("$testTenantId/$testDocumentId/to-delete.txt")
+        assertThrows<IllegalArgumentException> {
+            storageService.storeFile(file, testTenantId, testContentHash)
         }
     }
 
     @Test
-    fun `should handle multiple files for same document`() {
-        // Given
-        val docId = UUID.randomUUID()
-        val file1 = MockMultipartFile("file", "doc1.txt", "text/plain", "content1".toByteArray())
-        val file2 = MockMultipartFile("file", "doc2.txt", "text/plain", "content2".toByteArray())
+    fun `should store large file`() {
+        val largeContent = "X".repeat(1_000_000)
+        val file = MockMultipartFile("file", "large-file.txt", "text/plain", largeContent.toByteArray())
+        val hash = "c".repeat(64)
 
-        // When
-        val path1 = storageService.storeFile(file1, testTenantId, docId)
-        // Note: In real implementation, second file would overwrite or have different name
+        val storedPath = storageService.storeFile(file, testTenantId, hash)
 
-        // Then
-        assertNotNull(path1)
+        assertNotNull(storedPath)
+        val retrievedContent = storageService.getFile(storedPath).bufferedReader().use { it.readText() }
+        assertEquals(largeContent.length, retrievedContent.length)
+    }
+
+    @Test
+    fun `should delete document files by path`() {
+        val file = MockMultipartFile("file", "to-delete.txt", "text/plain", "content to delete".toByteArray())
+        val hash = "d".repeat(64)
+        val storedPath = storageService.storeFile(file, testTenantId, hash)
+
+        storageService.deleteDocumentFiles(testTenantId, storedPath)
+
+        assertThrows<Exception> {
+            storageService.getFile(storedPath)
+        }
     }
 
     @Test
     fun `should handle special characters in filename`() {
-        // Given
-        val file = MockMultipartFile(
-            "file",
-            "file with spaces (1).txt",
-            "text/plain",
-            "content".toByteArray()
-        )
+        val file = MockMultipartFile("file", "file with spaces (1).txt", "text/plain", "content".toByteArray())
 
-        // When
-        val storedPath = storageService.storeFile(file, testTenantId, testDocumentId)
+        val storedPath = storageService.storeFile(file, testTenantId, testContentHash)
 
-        // Then
         assertNotNull(storedPath)
-        // Should be able to retrieve
-        val retrieved = storageService.getFile(storedPath)
-        assertNotNull(retrieved)
+        assertTrue(storedPath.endsWith("original.txt"))
+        assertNotNull(storageService.getFile(storedPath))
     }
 
     @Test
     fun `should isolate files by tenant`() {
-        // Given
-        val tenant1 = "tenant-1"
-        val tenant2 = "tenant-2"
-        val docId = UUID.randomUUID()
-        
-        val file1 = MockMultipartFile("file", "doc.txt", "text/plain", "tenant1 content".toByteArray())
-        val file2 = MockMultipartFile("file", "doc.txt", "text/plain", "tenant2 content".toByteArray())
+        val tenant1 = "tenant-alpha"
+        val tenant2 = "tenant-beta"
+        val hash = "e".repeat(64)
 
-        // When
-        val path1 = storageService.storeFile(file1, tenant1, docId)
-        val path2 = storageService.storeFile(file2, tenant2, docId)
+        val file1 = MockMultipartFile("file", "doc.txt", "text/plain", "alpha content".toByteArray())
+        val file2 = MockMultipartFile("file", "doc.txt", "text/plain", "beta content".toByteArray())
 
-        // Then
-        assertTrue(path1.startsWith(tenant1))
-        assertTrue(path2.startsWith(tenant2))
-        
+        val path1 = storageService.storeFile(file1, tenant1, hash)
+        val path2 = storageService.storeFile(file2, tenant2, hash)
+
+        // Same hash → same path; isolation is at bucket level (docintel-{tenantId})
+        assertEquals(path1, path2)
+
+        TenantContextHolder.setTenantId(tenant1)
         val content1 = storageService.getFile(path1).bufferedReader().use { it.readText() }
+        assertEquals("alpha content", content1)
+
+        TenantContextHolder.setTenantId(tenant2)
         val content2 = storageService.getFile(path2).bufferedReader().use { it.readText() }
-        
-        assertEquals("tenant1 content", content1)
-        assertEquals("tenant2 content", content2)
+        assertEquals("beta content", content2)
+
+        TenantContextHolder.setTenantId(testTenantId)
     }
 }

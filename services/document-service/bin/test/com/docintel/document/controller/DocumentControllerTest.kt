@@ -3,6 +3,7 @@ package com.docintel.document.controller
 import com.docintel.document.BaseIntegrationTest
 import com.docintel.document.entity.ProcessingStatus
 import com.docintel.document.repository.ChunkRepository
+import com.docintel.document.repository.DataSourceRepository
 import com.docintel.document.repository.DocumentRepository
 import com.docintel.document.service.*
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -21,73 +22,48 @@ import java.util.UUID
 
 /**
  * Integration tests for DocumentController.
- * Uses Testcontainers for PostgreSQL and MinIO.
+ * Uses Testcontainers for PostgreSQL and MinIO (started in BaseIntegrationTest).
+ *
+ * - Controller reads the tenant from the X-Tenant-Id *header* (@RequestHeader), not a query param.
+ * - deleteDocument is a suspend fun so it returns a DeferredResult; MockMvc requires
+ *   an asyncDispatch round-trip to get the actual HTTP status.
  */
-@AutoConfigureMockMvc
+@AutoConfigureMockMvc(addFilters = false)
 class DocumentControllerTest : BaseIntegrationTest() {
 
-    @Autowired
-    private lateinit var mockMvc: MockMvc
+    @Autowired private lateinit var mockMvc: MockMvc
+    @Autowired private lateinit var objectMapper: ObjectMapper
+    @Autowired private lateinit var documentRepository: DocumentRepository
+    @Autowired private lateinit var chunkRepository: ChunkRepository
+    @Autowired private lateinit var dataSourceRepository: DataSourceRepository
 
-    @Autowired
-    private lateinit var objectMapper: ObjectMapper
-
-    @Autowired
-    private lateinit var documentRepository: DocumentRepository
-
-    @Autowired
-    private lateinit var chunkRepository: ChunkRepository
-
-    @MockkBean
-    private lateinit var ragServiceClient: RagServiceClient
+    @MockkBean private lateinit var ingestionServiceClient: IngestionServiceClient
 
     private val testTenantId = "integration-test-tenant"
 
     @BeforeEach
     fun setUp() {
-        // Clean up test data
         chunkRepository.deleteAll()
         documentRepository.deleteAll()
+        dataSourceRepository.deleteAll()
 
-        // Mock RAG service responses
-        coEvery { ragServiceClient.classifyDomain(any()) } returns 
-            ClassifyDomainResponse("general", 0.8, mapOf("general" to 0.8))
-        
-        coEvery { ragServiceClient.chunkText(any(), any(), any(), any(), any()) } answers {
-            val docId = arg<UUID>(1)
-            RagChunkResponse(
-                documentId = docId.toString(),
-                chunkCount = 2,
-                chunks = listOf(
-                    ChunkResponseItem(UUID.randomUUID().toString(), "chunk 1 content", 0, 100, 20, mapOf()),
-                    ChunkResponseItem(UUID.randomUUID().toString(), "chunk 2 content", 100, 200, 20, mapOf())
-                )
-            )
-        }
-        
-        coEvery { ragServiceClient.indexChunks(any(), any(), any()) } answers {
-            val docId = arg<UUID>(1)
-            IndexResponse("success", docId.toString(), 2, "documents")
-        }
-        
-        coEvery { ragServiceClient.deleteDocumentVectors(any(), any()) } returns true
+        coEvery { ingestionServiceClient.triggerIngestion(any(), any(), any(), any(), any(), any(), any()) } returns
+            IngestionTriggerResponse("accepted", "test-doc-id")
+        coEvery { ingestionServiceClient.deleteDocumentVectors(any(), any()) } returns true
+        coEvery { ingestionServiceClient.deleteTenantVectors(any()) } returns true
     }
+
+    // ─── Upload ───────────────────────────────────────────────────────────────
 
     @Test
     fun `POST should upload document and return 201`() {
-        // Given
-        val file = MockMultipartFile(
-            "file",
-            "test-document.txt",
-            "text/plain",
-            "This is test content for upload.".toByteArray()
-        )
+        val file = MockMultipartFile("file", "test-document.txt", "text/plain",
+            "This is test content for upload.".toByteArray())
 
-        // When & Then
         mockMvc.perform(
             multipart("/internal/documents")
                 .file(file)
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
         )
             .andExpect(status().isCreated)
             .andExpect(jsonPath("$.filename").value("test-document.txt"))
@@ -97,19 +73,13 @@ class DocumentControllerTest : BaseIntegrationTest() {
 
     @Test
     fun `POST should upload document with domain override`() {
-        // Given
-        val file = MockMultipartFile(
-            "file",
-            "hr-policy.txt",
-            "text/plain",
-            "HR Policy content".toByteArray()
-        )
+        val file = MockMultipartFile("file", "hr-policy.txt", "text/plain",
+            "HR Policy content".toByteArray())
 
-        // When & Then
         mockMvc.perform(
             multipart("/internal/documents")
                 .file(file)
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
                 .param("domain", "hr_policy")
         )
             .andExpect(status().isCreated)
@@ -118,34 +88,28 @@ class DocumentControllerTest : BaseIntegrationTest() {
 
     @Test
     fun `POST should upload document with metadata`() {
-        // Given
-        val file = MockMultipartFile(
-            "file",
-            "metadata-doc.txt",
-            "text/plain",
-            "Content".toByteArray()
-        )
+        val file = MockMultipartFile("file", "metadata-doc.txt", "text/plain",
+            "Content".toByteArray())
         val metadata = """{"author": "Test Author", "version": "1.0"}"""
 
-        // When & Then
         mockMvc.perform(
             multipart("/internal/documents")
                 .file(file)
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
                 .param("metadata", metadata)
         )
             .andExpect(status().isCreated)
     }
 
+    // ─── Get ──────────────────────────────────────────────────────────────────
+
     @Test
     fun `GET should return document by id`() {
-        // Given
         val docId = uploadTestDocument()
 
-        // When & Then
         mockMvc.perform(
             get("/internal/documents/$docId")
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
         )
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.id").value(docId.toString()))
@@ -154,39 +118,33 @@ class DocumentControllerTest : BaseIntegrationTest() {
 
     @Test
     fun `GET should return 404 for non-existent document`() {
-        // Given
-        val nonExistentId = UUID.randomUUID()
-
-        // When & Then
         mockMvc.perform(
-            get("/internal/documents/$nonExistentId")
-                .param("tenant_id", testTenantId)
+            get("/internal/documents/${UUID.randomUUID()}")
+                .header("X-Tenant-Id", testTenantId)
         )
             .andExpect(status().isNotFound)
     }
 
     @Test
     fun `GET should not return document for wrong tenant`() {
-        // Given
         val docId = uploadTestDocument()
 
-        // When & Then
         mockMvc.perform(
             get("/internal/documents/$docId")
-                .param("tenant_id", "different-tenant")
+                .header("X-Tenant-Id", "different-tenant")
         )
             .andExpect(status().isNotFound)
     }
 
+    // ─── List ─────────────────────────────────────────────────────────────────
+
     @Test
     fun `GET list should return paginated documents`() {
-        // Given
         repeat(5) { uploadTestDocument(filename = "doc-$it.txt") }
 
-        // When & Then
         mockMvc.perform(
             get("/internal/documents")
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
                 .param("size", "3")
         )
             .andExpect(status().isOk)
@@ -198,13 +156,11 @@ class DocumentControllerTest : BaseIntegrationTest() {
 
     @Test
     fun `GET list should filter by status`() {
-        // Given - upload and let some process (status changes are async)
         uploadTestDocument()
 
-        // When & Then
         mockMvc.perform(
             get("/internal/documents")
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
                 .param("status", "PENDING")
         )
             .andExpect(status().isOk)
@@ -213,102 +169,295 @@ class DocumentControllerTest : BaseIntegrationTest() {
 
     @Test
     fun `GET list should return empty for tenant with no documents`() {
-        // When & Then
         mockMvc.perform(
             get("/internal/documents")
-                .param("tenant_id", "empty-tenant")
+                .header("X-Tenant-Id", "empty-tenant")
         )
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.content").isEmpty)
             .andExpect(jsonPath("$.totalElements").value(0))
     }
 
+    // ─── Delete ───────────────────────────────────────────────────────────────
+
     @Test
     fun `DELETE should remove document and return 204`() {
-        // Given
         val docId = uploadTestDocument()
 
-        // When & Then
-        mockMvc.perform(
+        // deleteDocument is suspend → DeferredResult → needs asyncDispatch
+        val asyncResult = mockMvc.perform(
             delete("/internal/documents/$docId")
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
         )
+            .andExpect(request().asyncStarted())
+            .andReturn()
+
+        mockMvc.perform(asyncDispatch(asyncResult))
             .andExpect(status().isNoContent)
 
         // Verify document is gone
         mockMvc.perform(
             get("/internal/documents/$docId")
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
         )
             .andExpect(status().isNotFound)
     }
 
     @Test
     fun `DELETE should return 404 for non-existent document`() {
-        // Given
-        val nonExistentId = UUID.randomUUID()
-
-        // When & Then
-        mockMvc.perform(
-            delete("/internal/documents/$nonExistentId")
-                .param("tenant_id", testTenantId)
+        val asyncResult = mockMvc.perform(
+            delete("/internal/documents/${UUID.randomUUID()}")
+                .header("X-Tenant-Id", testTenantId)
         )
+            .andExpect(request().asyncStarted())
+            .andReturn()
+
+        mockMvc.perform(asyncDispatch(asyncResult))
             .andExpect(status().isNotFound)
     }
 
     @Test
+    fun `DELETE should return 503 when vector store is unavailable`() {
+        val docId = uploadTestDocument("vector-fail-doc.txt")
+
+        coEvery { ingestionServiceClient.deleteDocumentVectors(any(), any()) } returns false
+
+        val asyncResult = mockMvc.perform(
+            delete("/internal/documents/$docId")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(request().asyncStarted())
+            .andReturn()
+
+        mockMvc.perform(asyncDispatch(asyncResult))
+            .andExpect(status().isServiceUnavailable)
+            .andExpect(jsonPath("$.error").value("Vector store unavailable"))
+
+        coEvery { ingestionServiceClient.deleteDocumentVectors(any(), any()) } returns true
+    }
+
+    // ─── File content ─────────────────────────────────────────────────────────
+
+    @Test
     fun `should upload and retrieve actual test document`() {
-        // Given
         val content = javaClass.getResource("/documents/hr_policy_leave.txt")?.readText()
             ?: throw IllegalStateException("Test file not found")
-        
-        val file = MockMultipartFile(
-            "file",
-            "hr_policy_leave.txt",
-            "text/plain",
-            content.toByteArray()
-        )
 
-        // When - Upload
+        val file = MockMultipartFile("file", "hr_policy_leave.txt", "text/plain",
+            content.toByteArray())
+
         val uploadResult = mockMvc.perform(
             multipart("/internal/documents")
                 .file(file)
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
                 .param("domain", "hr_policy")
         )
             .andExpect(status().isCreated)
             .andReturn()
 
-        val response = objectMapper.readTree(uploadResult.response.contentAsString)
-        val docId = response["id"].asText()
+        val docId = objectMapper.readTree(uploadResult.response.contentAsString)["id"].asText()
 
-        // Then - Retrieve
         mockMvc.perform(
             get("/internal/documents/$docId")
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
         )
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.filename").value("hr_policy_leave.txt"))
     }
 
-    // Helper function to upload a test document
-    private fun uploadTestDocument(filename: String = "test.txt"): UUID {
-        val file = MockMultipartFile(
-            "file",
-            filename,
-            "text/plain",
-            "Test content for $filename".toByteArray()
+    // ─── From-path (stream-based registration) ────────────────────────────────
+
+    @Test
+    fun `POST from-path should register new document and return 201`() {
+        val contentHash = "1".repeat(64)
+        val body = mapOf(
+            "minioPath"   to "docs/$contentHash/original.txt",
+            "contentHash" to contentHash,
+            "filename"    to "stream-doc.txt",
+            "fileSize"    to 512,
+            "contentType" to "text/plain"
         )
+
+        mockMvc.perform(
+            post("/internal/documents/from-path")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(body))
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isCreated)
+            .andExpect(jsonPath("$.document.filename").value("stream-doc.txt"))
+            .andExpect(jsonPath("$.document.status").value("PENDING"))
+            .andExpect(jsonPath("$.deduplicated").value(false))
+            .andExpect(jsonPath("$.document.id").exists())
+    }
+
+    @Test
+    fun `POST from-path second call with same hash returns 200 deduplicated=true`() {
+        val contentHash = "2".repeat(64)
+        val body = mapOf(
+            "minioPath"   to "docs/$contentHash/original.txt",
+            "contentHash" to contentHash,
+            "filename"    to "dedup-doc.txt",
+            "fileSize"    to 256
+        )
+        val json = objectMapper.writeValueAsString(body)
+
+        mockMvc.perform(
+            post("/internal/documents/from-path")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json)
+                .header("X-Tenant-Id", testTenantId)
+        ).andExpect(status().isCreated)
+
+        mockMvc.perform(
+            post("/internal/documents/from-path")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json)
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.deduplicated").value(true))
+    }
+
+    @Test
+    fun `POST from-path isolates tenants — same hash different tenant returns 201`() {
+        val contentHash = "3".repeat(64)
+        val body = mapOf(
+            "minioPath"   to "docs/$contentHash/original.txt",
+            "contentHash" to contentHash,
+            "filename"    to "shared.txt",
+            "fileSize"    to 100
+        )
+        val json = objectMapper.writeValueAsString(body)
+
+        mockMvc.perform(
+            post("/internal/documents/from-path")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json)
+                .header("X-Tenant-Id", "tenant-alpha")
+        ).andExpect(status().isCreated)
+
+        // Same hash, different tenant → different document ID → new record
+        mockMvc.perform(
+            post("/internal/documents/from-path")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json)
+                .header("X-Tenant-Id", "tenant-beta")
+        )
+            .andExpect(status().isCreated)
+            .andExpect(jsonPath("$.deduplicated").value(false))
+    }
+
+    // ─── DataSource CRUD ──────────────────────────────────────────────────────
+
+    @Test
+    fun `POST data-sources should create and return 201`() {
+        mockMvc.perform(
+            post("/internal/documents/data-sources")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"sourceType":"huggingface","sourceConfig":{"dataset_key":"cuad"}}""")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isCreated)
+            .andExpect(jsonPath("$.id").exists())
+            .andExpect(jsonPath("$.status").value("LOADING"))
+            .andExpect(jsonPath("$.sourceType").value("huggingface"))
+            .andExpect(jsonPath("$.documentCount").value(0))
+    }
+
+    @Test
+    fun `GET data-sources should return list for tenant`() {
+        createTestDataSource()
+        createTestDataSource()
+
+        mockMvc.perform(
+            get("/internal/documents/data-sources")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.length()").value(2))
+    }
+
+    @Test
+    fun `GET data-sources by id should return datasource`() {
+        val dsId = createTestDataSource()
+
+        mockMvc.perform(
+            get("/internal/documents/data-sources/$dsId")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.id").value(dsId.toString()))
+            .andExpect(jsonPath("$.status").value("LOADING"))
+    }
+
+    @Test
+    fun `GET data-sources by id should return 404 for wrong tenant`() {
+        val dsId = createTestDataSource()
+
+        mockMvc.perform(
+            get("/internal/documents/data-sources/$dsId")
+                .header("X-Tenant-Id", "wrong-tenant")
+        )
+            .andExpect(status().isNotFound)
+    }
+
+    @Test
+    fun `POST data-sources complete should update status to COMPLETED`() {
+        val dsId = createTestDataSource()
+
+        mockMvc.perform(
+            post("/internal/documents/data-sources/$dsId/complete")
+                .header("X-Tenant-Id", testTenantId)
+                .param("document_count", "42")
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("COMPLETED"))
+            .andExpect(jsonPath("$.documentCount").value(42))
+    }
+
+    @Test
+    fun `POST data-sources fail should update status to FAILED`() {
+        val dsId = createTestDataSource()
+
+        mockMvc.perform(
+            post("/internal/documents/data-sources/$dsId/fail")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("FAILED"))
+    }
+
+    // ─── Helper ───────────────────────────────────────────────────────────────
+
+    private fun createTestDataSource(): UUID {
+        val result = mockMvc.perform(
+            post("/internal/documents/data-sources")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"sourceType":"huggingface","sourceConfig":{"dataset_key":"techqa"}}""")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isCreated)
+            .andReturn()
+        return UUID.fromString(
+            objectMapper.readTree(result.response.contentAsString)["id"].asText()
+        )
+    }
+
+    private fun uploadTestDocument(filename: String = "test.txt"): UUID {
+        val file = MockMultipartFile("file", filename, "text/plain",
+            "Test content for $filename".toByteArray())
 
         val result = mockMvc.perform(
             multipart("/internal/documents")
                 .file(file)
-                .param("tenant_id", testTenantId)
+                .header("X-Tenant-Id", testTenantId)
         )
             .andExpect(status().isCreated)
             .andReturn()
 
-        val response = objectMapper.readTree(result.response.contentAsString)
-        return UUID.fromString(response["id"].asText())
+        return UUID.fromString(
+            objectMapper.readTree(result.response.contentAsString)["id"].asText()
+        )
     }
 }

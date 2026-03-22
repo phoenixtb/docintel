@@ -27,6 +27,9 @@ zitadel:
   pat: ${ZITADEL_SERVICE_ACCOUNT_PAT:}
   project-id: ${ZITADEL_PROJECT_ID:}
 
+docintel:
+  default-llm-model: ${DEFAULT_LLM_MODEL:qwen3.5:4b}
+
 logging:
   level:
     com.docintel: INFO

@@ -1,116 +1,164 @@
 package docintel.authz
 
+import future.keywords.in
+
+# Route-level RBAC — evaluated by the API Gateway OpaAuthorizationFilter.
+#
+# Input shape (sent by OpaAuthorizationFilter):
+#   input.user.roles     = list of fine-grained permissions from docintel-actions
+#                          e.g. ["documents:rw", "query:execute", "conversations:rw"]
+#   input.user.clearance = "public" | "internal" | "confidential" | "restricted"
+#   input.user.tenant_id = tenant identifier
+#   input.user.user_id   = user UUID (sub)
+#   input.request.method = HTTP method ("GET", "POST", ...)
+#   input.request.path   = raw request path
+#
+# Evaluation:
+#   allow = true iff the route requires a role AND the user holds that role.
+#   Unknown / unmatched routes default to deny (fail-closed).
+
 default allow = false
 
-# Platform admin: unrestricted access to all routes
+# ---------------------------------------------------------------------------
+# Route → required role mapping
+# ---------------------------------------------------------------------------
+
+# Documents — read
+route_requires_role(method, path, "documents:r") {
+    method == "GET"
+    glob.match("/api/v1/documents*", [], path)
+}
+
+# Documents — write (create, bulk)
+route_requires_role(method, path, "documents:rw") {
+    method == "POST"
+    glob.match("/api/v1/documents*", [], path)
+}
+
+# Documents — delete single
+route_requires_role(method, path, "documents:delete") {
+    method == "DELETE"
+    glob.match("/api/v1/documents/*", [], path)
+    not glob.match("/api/v1/documents/all*", [], path)
+}
+
+# Documents — delete all (platform_admin only)
+route_requires_role(method, path, "documents:delete_all") {
+    method == "DELETE"
+    glob.match("/api/v1/documents/all*", [], path)
+}
+
+# Query
+route_requires_role(method, path, "query:execute") {
+    method == "POST"
+    glob.match("/api/v1/query*", [], path)
+}
+route_requires_role(method, path, "query:execute") {
+    method == "GET"
+    glob.match("/api/v1/query*", [], path)
+}
+
+# Conversations
+route_requires_role(method, path, "conversations:rw") {
+    glob.match("/api/v1/conversations*", [], path)
+}
+
+# Feedback
+route_requires_role(method, path, "analytics:feedback") {
+    method == "POST"
+    glob.match("/api/v1/feedback*", [], path)
+}
+
+# Analytics — read (tenant scoped)
+route_requires_role(method, path, "analytics:r") {
+    method == "GET"
+    glob.match("/api/v1/analytics*", [], path)
+}
+
+# Analytics — read all tenants (platform_admin)
+route_requires_role(method, path, "analytics:r_all") {
+    method == "GET"
+    glob.match("/api/v1/analytics*", [], path)
+}
+
+# Ingestion — trigger ingest / sample datasets
+route_requires_role(method, path, "ingestion:rw") {
+    method == "POST"
+    glob.match("/api/v1/ingest*", [], path)
+}
+route_requires_role(method, path, "ingestion:rw") {
+    method == "POST"
+    glob.match("/api/v1/sample-datasets*", [], path)
+}
+
+# Sample datasets — read list (all authenticated) — legacy path
+route_requires_role(method, path, "documents:r") {
+    method == "GET"
+    glob.match("/api/v1/sample-datasets*", [], path)
+}
+
+# data-loader dataset endpoints (replaces /api/v1/sample-datasets* in Phase 2)
+route_requires_role(method, path, "ingestion:rw") {
+    method == "POST"
+    glob.match("/api/v1/datasets*", [], path)
+}
+route_requires_role(method, path, "documents:r") {
+    method == "GET"
+    glob.match("/api/v1/datasets*", [], path)
+}
+
+# Vector stats — read
+route_requires_role(method, path, "vector_stats:r") {
+    method == "GET"
+    glob.match("/api/v1/vector-stats*", [], path)
+}
+
+# Models — read (all authenticated)
+route_requires_role(method, path, "models:r") {
+    method == "GET"
+    path == "/api/v1/models"
+}
+
+# Admin — full admin panel access
+route_requires_role(method, path, "admin:rw") {
+    glob.match("/api/v1/admin*", [], path)
+}
+
+# Tenant settings — read/write (tenant_admin + platform_admin)
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "GET"
+    glob.match("/api/v1/tenants/*/settings*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "PATCH"
+    glob.match("/api/v1/tenants/*/settings*", [], path)
+}
+
+# Tenant users + usage (tenant_admin can manage their own tenant)
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "GET"
+    glob.match("/api/v1/tenants/*/users*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "GET"
+    glob.match("/api/v1/tenants/*/usage", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "PUT"
+    glob.match("/api/v1/tenants/*/users/*/role", [], path)
+}
+
+# Tenant management (platform_admin only — list/create/delete tenants)
+route_requires_role(method, path, "admin:rw") {
+    glob.match("/api/v1/tenants*", [], path)
+}
+
+# ---------------------------------------------------------------------------
+# Allow rule — user must hold at least one matching role
+# ---------------------------------------------------------------------------
+
 allow {
-    input.role == "platform_admin"
-}
-
-# Tenant admin: all routes except platform-only management routes
-allow {
-    input.role == "tenant_admin"
-    not is_platform_only
-}
-
-# Tenant admin: access own tenant's usage stats
-allow {
-    input.role == "tenant_admin"
-    input.path == concat("", ["/api/v1/tenants/", input.tenant_id, "/usage"])
-}
-
-# Tenant admin: access and manage own tenant's users
-allow {
-    input.role == "tenant_admin"
-    startswith(input.path, concat("", ["/api/v1/tenants/", input.tenant_id, "/users"]))
-}
-
-# Tenant admin: read available Ollama models (for dropdown)
-allow {
-    input.role == "tenant_admin"
-    input.method == "GET"
-    input.path == "/api/v1/models"
-}
-
-# Tenant admin: read and update own tenant's model settings
-allow {
-    input.role == "tenant_admin"
-    input.method == "GET"
-    input.path == concat("", ["/api/v1/tenants/", input.tenant_id, "/settings"])
-}
-
-allow {
-    input.role == "tenant_admin"
-    input.method == "PATCH"
-    input.path == concat("", ["/api/v1/tenants/", input.tenant_id, "/settings"])
-}
-
-# Tenant user: documents (read), queries, conversations, feedback, analytics
-allow {
-    input.role == "tenant_user"
-    is_tenant_user_permitted
-}
-
-# Platform-only routes (admin management, tenant management)
-is_platform_only {
-    glob.match("/api/v1/admin*", [], input.path)
-}
-is_platform_only {
-    glob.match("/api/v1/tenants*", [], input.path)
-}
-
-# Tenant user permitted routes
-is_tenant_user_permitted {
-    input.method == "GET"
-    glob.match("/api/v1/documents*", [], input.path)
-}
-# Tenant users can upload and delete their own documents
-is_tenant_user_permitted {
-    input.method == "POST"
-    input.path == "/api/v1/documents"
-}
-is_tenant_user_permitted {
-    input.method == "DELETE"
-    glob.match("/api/v1/documents/*", [], input.path)
-    # Tenant-scoped: document-service enforces tenant ownership via tenantId path/header
-}
-# Tenant users can fetch model list (needed by settings/chat pages)
-is_tenant_user_permitted {
-    input.method == "GET"
-    input.path == "/api/v1/models"
-}
-is_tenant_user_permitted {
-    input.method == "POST"
-    glob.match("/api/v1/query*", [], input.path)
-}
-is_tenant_user_permitted {
-    input.method == "GET"
-    glob.match("/api/v1/query*", [], input.path)
-}
-is_tenant_user_permitted {
-    glob.match("/api/v1/conversations*", [], input.path)
-}
-is_tenant_user_permitted {
-    input.method == "POST"
-    glob.match("/api/v1/feedback*", [], input.path)
-}
-is_tenant_user_permitted {
-    input.method == "GET"
-    glob.match("/api/v1/analytics*", [], input.path)
-}
-is_tenant_user_permitted {
-    input.method == "GET"
-    glob.match("/api/v1/vector-stats*", [], input.path)
-}
-is_tenant_user_permitted {
-    input.method == "POST"
-    glob.match("/api/v1/classify-domain*", [], input.path)
-}
-is_tenant_user_permitted {
-    input.method == "GET"
-    glob.match("/api/v1/sample-datasets*", [], input.path)
-}
-is_tenant_user_permitted {
-    input.method == "POST"
-    glob.match("/api/v1/sample-datasets*", [], input.path)
+    some role
+    role = input.user.roles[_]
+    route_requires_role(input.request.method, input.request.path, role)
 }

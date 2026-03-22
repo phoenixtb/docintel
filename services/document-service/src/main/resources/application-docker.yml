@@ -7,7 +7,23 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: validate
+      ddl-auto: none
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: "1"
+    locations: classpath:db/migration
+
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+
+messaging:
+  streams:
+    enabled: true
+    consumer-name: document-service-1
 
 minio:
   endpoint: ${MINIO_ENDPOINT:http://minio:9000}

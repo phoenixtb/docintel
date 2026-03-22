@@ -6,6 +6,22 @@ from .domain import (
     DomainClassifier,
     get_domain_classifier,
 )
+from .internal_auth import compute_internal_token, get_internal_secret, verify_internal_token
+from .messaging import (
+    MessageBus,
+    RedisStreamBus,
+    TOPIC_FILES_AVAILABLE,
+    TOPIC_DOCUMENTS_READY,
+    TOPIC_INGESTION_COMPLETE,
+)
+from .security import (
+    CLASSIFICATION_ORDER,
+    Classification,
+    DocumentACL,
+    RetrievalAuditEvent,
+    UserContext,
+    clearance_permits,
+)
 
 __all__ = [
     "DOMAIN_LABELS",
@@ -14,4 +30,21 @@ __all__ = [
     "DomainClassifier",
     "get_domain_classifier",
     "detect_device",
+    # internal auth
+    "compute_internal_token",
+    "verify_internal_token",
+    "get_internal_secret",
+    # messaging
+    "MessageBus",
+    "RedisStreamBus",
+    "TOPIC_FILES_AVAILABLE",
+    "TOPIC_DOCUMENTS_READY",
+    "TOPIC_INGESTION_COMPLETE",
+    # security models
+    "Classification",
+    "CLASSIFICATION_ORDER",
+    "clearance_permits",
+    "DocumentACL",
+    "UserContext",
+    "RetrievalAuditEvent",
 ]

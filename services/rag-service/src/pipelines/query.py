@@ -42,10 +42,12 @@ from haystack_integrations.components.embedders.ollama import OllamaTextEmbedder
 
 from ..components.cache import SemanticCacheChecker, SemanticCacheWriter
 from ..components.embedders import BM25SparseTextEmbedder
+from ..components.opa import OpaChunkValidator
 from ..components.prompt import PromptBuilder
 from ..components.reranker import InfinityReranker
 from ..components.retrieval import SecureRetriever
 from docintel_common.domain import DOMAIN_LABELS
+from docintel_common.security import Classification, UserContext
 
 from ..components.routing import DomainFilterBuilder
 from ..config import Settings, get_settings
@@ -81,6 +83,10 @@ def build_query_pipeline(settings: Settings) -> AsyncPipeline:
         SecureRetriever(settings=settings),
     )
     pipeline.add_component(
+        "opa_validator",
+        OpaChunkValidator(opa_url=settings.opa_url),
+    )
+    pipeline.add_component(
         "reranker",
         InfinityReranker(
             url=settings.infinity_url,
@@ -107,7 +113,9 @@ def build_query_pipeline(settings: Settings) -> AsyncPipeline:
     )
 
     # Wire component outputs → inputs
-    pipeline.connect("retriever.documents", "reranker.documents")
+    # retriever → opa_validator → reranker → prompt_builder → llm
+    pipeline.connect("retriever.documents", "opa_validator.documents")
+    pipeline.connect("opa_validator.documents", "reranker.documents")
     pipeline.connect("reranker.documents", "prompt_builder.documents")
     pipeline.connect("prompt_builder.messages", "llm.messages")
 
@@ -313,6 +321,7 @@ class RAGService:
         top_k: int | None = None,
         conversation_id: str | None = None,
         min_score: float | None = None,
+        user_context: Optional[UserContext] = None,
     ) -> dict:
         """
         Execute the full RAG query.
@@ -354,12 +363,22 @@ class RAGService:
         )
         query_sparse_embedding = sparse_result.get("sparse_embedding")
 
+        # Build UserContext for OPA validation (use provided or construct from separate params)
+        effective_user_ctx = user_context or UserContext(
+            user_id=user_id or "",
+            org_id=tenant_id,
+            tenant_id=tenant_id,
+            roles=user_roles or [],
+            clearance=Classification.INTERNAL,
+        )
+
         # ── Step 2: Cache check ──────────────────────────────────────────────
         if cfg.use_cache and self._cache_checker:
             cache_result = await loop.run_in_executor(
                 None, lambda: self._cache_checker.run(  # type: ignore[union-attr]
                     query_embedding=query_embedding,
                     tenant_id=tenant_id,
+                    user_context=effective_user_ctx,
                 )
             )
             if cache_result["cache_hit"]:
@@ -391,9 +410,12 @@ class RAGService:
                 "query_embedding": query_embedding,
                 "query_sparse_embedding": query_sparse_embedding,
                 "tenant_id": tenant_id,
-                "user_roles": user_roles,
-                "user_id": user_id,
+                "user_roles": effective_user_ctx.roles,
+                "user_id": effective_user_ctx.user_id,
                 "domain_filter": domain_filter,
+            },
+            "opa_validator": {
+                "user_context": effective_user_ctx,
             },
             "reranker": {"query": question},
             "prompt_builder": {

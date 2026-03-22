@@ -11,13 +11,11 @@ CREATE DATABASE zitadel;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- =============================================================================
--- Application Role (non-superuser, used by all app services for RLS enforcement)
+-- Application Roles — created by 00-roles.sh (parameterized with env vars)
 -- =============================================================================
--- docintel (POSTGRES_USER) is a superuser — bypasses RLS
--- docintel_app is a non-superuser — RLS policies are enforced
-CREATE ROLE docintel_app WITH LOGIN PASSWORD 'docintel_app_secret';
-GRANT CONNECT ON DATABASE docintel TO docintel_app;
-GRANT USAGE ON SCHEMA public TO docintel_app;
+-- docintel         (POSTGRES_USER) — superuser, bypasses RLS; used by Flyway/Zitadel
+-- docintel_app     — non-superuser, RLS enforced; used by document/rag/admin services
+-- docintel_ingestion — BYPASSRLS; used by ingestion-service to write across all tenants
 
 -- =============================================================================
 -- Tenants Table
@@ -52,10 +50,29 @@ INSERT INTO platform_settings (key, value) VALUES ('llm_model', 'null');
 GRANT SELECT, INSERT, UPDATE ON platform_settings TO docintel_app;
 
 -- =============================================================================
+-- Data Sources Table
+-- Tracks external data source loads (HuggingFace, S3, etc.) as first-class
+-- lifecycle objects. Documents can be associated with a data source for bulk
+-- deletion, re-loading, and observability.
+-- =============================================================================
+CREATE TABLE data_sources (
+    id              UUID PRIMARY KEY,
+    tenant_id       VARCHAR(64)  NOT NULL REFERENCES tenants(id),
+    source_type     VARCHAR(64)  NOT NULL,  -- 'huggingface', 's3', 'manual', ...
+    source_config   JSONB,                  -- { dataset_key, samples, ... }
+    status          VARCHAR(32)  NOT NULL DEFAULT 'LOADING',
+    document_count  INT          NOT NULL DEFAULT 0,
+    created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    completed_at    TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_data_sources_tenant ON data_sources(tenant_id);
+
+-- =============================================================================
 -- Documents Table
 -- =============================================================================
 CREATE TABLE documents (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id),
     filename VARCHAR(255) NOT NULL,
     content_type VARCHAR(100),
@@ -66,6 +83,11 @@ CREATE TABLE documents (
     chunking_config JSONB,
     metadata JSONB DEFAULT '{}',
     error_message TEXT,
+    -- Content-addressed identity: full 64-char sha256 hex for observability/dedup queries.
+    -- The id column itself is UUID(sha256[:32]) — content_hash is the full digest.
+    content_hash VARCHAR(64),
+    -- Null for manual browser uploads; set for data-loader-originated documents.
+    data_source_id UUID REFERENCES data_sources(id) ON DELETE CASCADE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -73,6 +95,7 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_tenant ON documents(tenant_id);
 CREATE INDEX idx_documents_status ON documents(status);
 CREATE INDEX idx_documents_created ON documents(created_at);
+CREATE INDEX idx_documents_content_hash ON documents(tenant_id, content_hash);
 
 -- =============================================================================
 -- Chunks Table (metadata only - vectors stored in Qdrant)
@@ -182,12 +205,18 @@ CREATE TRIGGER conversations_updated_at
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- =============================================================================
--- Grant table permissions to docintel_app
+-- Grant table permissions
 -- =============================================================================
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO docintel_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO docintel_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO docintel_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO docintel_app;
+
+-- docintel_ingestion: full DML access (BYPASSRLS handles tenant isolation at role level)
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO docintel_ingestion;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO docintel_ingestion;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO docintel_ingestion;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO docintel_ingestion;
 
 -- =============================================================================
 -- Row-Level Security (RLS)
@@ -197,6 +226,8 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO do
 -- but docintel_app is never a superuser so RLS always applies to it)
 -- =============================================================================
 
+ALTER TABLE data_sources  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE data_sources  FORCE ROW LEVEL SECURITY;
 ALTER TABLE documents     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE documents     FORCE ROW LEVEL SECURITY;
 ALTER TABLE chunks        ENABLE ROW LEVEL SECURITY;
@@ -213,6 +244,13 @@ ALTER TABLE query_log     FORCE ROW LEVEL SECURITY;
 
 -- RLS policies: platform_admin sees all rows; others are scoped to their tenant.
 -- current_setting(..., true) returns NULL when not set — safe for boolean short-circuit.
+CREATE POLICY tenant_isolation_data_sources ON data_sources
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
+
 CREATE POLICY tenant_isolation_documents ON documents
     AS PERMISSIVE FOR ALL TO docintel_app
     USING (
@@ -273,3 +311,5 @@ INSERT INTO tenants (id, name) VALUES ('default', 'DocIntel Platform');
 INSERT INTO tenants (id, name) VALUES ('alpha', 'Alpha Corp');
 
 INSERT INTO tenants (id, name) VALUES ('beta', 'Beta Corp');
+
+INSERT INTO tenants (id, name) VALUES ('e2e', 'E2E Test Tenant');

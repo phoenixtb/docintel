@@ -2,18 +2,55 @@
 Qdrant document store factory for the ingestion-service.
 
 Creates per-tenant collections with hybrid search (dense + sparse) support.
+ACL payload indexes are created on every new collection to enable efficient
+chunk-level ABAC filtering by OpaChunkValidator and SecureRetriever.
 """
 
 import logging
-from functools import lru_cache
 
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
+from qdrant_client import QdrantClient
+from qdrant_client import models as qmodels
 
 from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
 _store_cache: dict[str, QdrantDocumentStore] = {}
+
+# ACL fields stored in every point payload; indexed for efficient ABAC filtering.
+_ACL_INDEXES: list[tuple[str, qmodels.PayloadSchemaType]] = [
+    ("meta.classification",  qmodels.PayloadSchemaType.KEYWORD),
+    ("meta.allowed_roles",   qmodels.PayloadSchemaType.KEYWORD),
+    ("meta.allowed_users",   qmodels.PayloadSchemaType.KEYWORD),
+    ("meta.department",      qmodels.PayloadSchemaType.KEYWORD),
+    ("meta.region",          qmodels.PayloadSchemaType.KEYWORD),
+    ("meta.expires_at",      qmodels.PayloadSchemaType.DATETIME),
+    ("meta.document_id",     qmodels.PayloadSchemaType.KEYWORD),
+]
+
+
+def _ensure_acl_indexes(client: QdrantClient, collection_name: str) -> None:
+    """Create ACL payload indexes if they don't already exist."""
+    try:
+        # payload_schema is a dict[field_name, FieldSchema] — keys are field names.
+        info = client.get_collection(collection_name)
+        existing: set[str] = set(info.payload_schema.keys()) if hasattr(info, "payload_schema") else set()
+    except Exception:
+        existing = set()
+
+    for field, schema in _ACL_INDEXES:
+        if field in existing:
+            continue
+        try:
+            client.create_payload_index(
+                collection_name=collection_name,
+                field_name=field,
+                field_schema=schema,
+            )
+            logger.debug("Created payload index: %s.%s", collection_name, field)
+        except Exception as e:
+            logger.warning("Could not create index %s on %s: %s", field, collection_name, e)
 
 
 def get_document_store(tenant_id: str, settings: Settings | None = None) -> QdrantDocumentStore:
@@ -23,6 +60,7 @@ def get_document_store(tenant_id: str, settings: Settings | None = None) -> Qdra
     Collection name: ``documents_{tenant_id}``
     Vectors: 768-dimensional (nomic-embed-text default).
     Sparse vectors enabled for BM25 hybrid search.
+    ACL payload indexes are ensured on every call.
     """
     if tenant_id in _store_cache:
         return _store_cache[tenant_id]
@@ -38,7 +76,16 @@ def get_document_store(tenant_id: str, settings: Settings | None = None) -> Qdra
         use_sparse_embeddings=True,
         sparse_idf=True,
         recreate_index=False,
+        prefer_grpc=True,
     )
+
+    # Ensure ACL indexes after the store (and collection) is initialized.
+    # Reuse the store's internal QdrantClient to avoid opening a second TCP connection.
+    try:
+        internal_client: QdrantClient = store.client  # type: ignore[attr-defined]
+        _ensure_acl_indexes(internal_client, collection_name)
+    except Exception as e:
+        logger.warning("ACL index creation failed (non-fatal): %s", e)
 
     _store_cache[tenant_id] = store
     logger.info("Qdrant store ready: collection=%s", collection_name)
@@ -66,11 +113,50 @@ def delete_tenant_from_store(
     cfg = settings or get_settings()
     collection_name = f"documents_{tenant_id}"
     try:
-        from qdrant_client import QdrantClient
-
         client = QdrantClient(url=cfg.qdrant_url, api_key=cfg.qdrant_api_key)
         client.delete_collection(collection_name)
         _store_cache.pop(tenant_id, None)
         logger.info("Deleted Qdrant collection: %s", collection_name)
     except Exception as e:
         logger.warning("Could not delete Qdrant collection %s: %s", collection_name, e)
+
+
+def evict_store_cache(tenant_id: str) -> None:
+    """Remove a tenant's store from the cache so the next call creates a fresh connection."""
+    _store_cache.pop(tenant_id, None)
+
+
+def invalidate_cache_for_tenant(
+    tenant_id: str,
+    settings: Settings | None = None,
+    collection: str = "response_cache",
+) -> dict:
+    """
+    Invalidate (delete) all cached responses for a tenant.
+
+    Called after document deletion to prevent stale cache hits referencing
+    deleted content. Thin wrapper around a direct Qdrant delete — no
+    cross-service import required since qdrant-client is already a dependency.
+    """
+    cfg = settings or get_settings()
+    client = QdrantClient(url=cfg.qdrant_url, api_key=cfg.qdrant_api_key)
+
+    collections = client.get_collections().collections
+    if not any(c.name == collection for c in collections):
+        return {"invalidated": False, "reason": "collection_not_exists"}
+
+    client.delete(
+        collection_name=collection,
+        points_selector=qmodels.FilterSelector(
+            filter=qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="tenant_id",
+                        match=qmodels.MatchValue(value=tenant_id),
+                    )
+                ]
+            )
+        ),
+    )
+    logger.info("Cache invalidated for tenant: %s", tenant_id)
+    return {"invalidated": True, "tenant_id": tenant_id}

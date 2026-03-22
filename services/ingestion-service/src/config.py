@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     # Minimum content length (chars) for a chunk to be indexed
     min_chunk_chars: int = Field(default=20, alias="MIN_CHUNK_CHARS")
 
+    # --- Redis Streams ---
+    redis_host: str = Field(default="redis", alias="REDIS_HOST")
+    redis_port: int = Field(default=6379, alias="REDIS_PORT")
+    redis_password: str | None = Field(default=None, alias="REDIS_PASSWORD")
+
+    # Disable stream consumer in local dev / tests
+    stream_consumer_enabled: bool = Field(default=True, alias="STREAM_CONSUMER_ENABLED")
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

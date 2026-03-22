@@ -25,7 +25,7 @@ from ..config import Settings
 from ..context import _tenant_ctx, _role_ctx
 from ..pipelines import RAGService
 from ..tracing import LangfuseTracer
-from .dependencies import JWTClaimsDep, RAGServiceDep, SettingsDep, TracerDep
+from .dependencies import RAGServiceDep, SettingsDep, TracerDep, UserContextDep
 
 logger = logging.getLogger(__name__)
 
@@ -336,14 +336,20 @@ async def list_models(settings: SettingsDep):
     List all Ollama models available on the host.
     Used by the UI to populate the model selection dropdown.
     """
+    _EMBED_KEYWORDS = {"embed", "nomic", "mxbai", "bge", "gte", "e5-"}
+
     models: list[ModelInfo] = []
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(f"{settings.ollama_base_url}/api/tags")
             if r.status_code == 200:
                 for m in r.json().get("models", []):
+                    name: str = m.get("name", "")
+                    name_lower = name.lower()
+                    if any(kw in name_lower for kw in _EMBED_KEYWORDS):
+                        continue
                     models.append(ModelInfo(
-                        name=m.get("name", ""),
+                        name=name,
                         size=m.get("size"),
                         modified_at=m.get("modified_at"),
                     ))
@@ -361,11 +367,11 @@ async def list_models(settings: SettingsDep):
 # =============================================================================
 
 @app.get("/vector-stats", response_model=VectorStatsResponse)
-async def get_vector_stats(settings: SettingsDep, claims: JWTClaimsDep):
+async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep):
     from qdrant_client import QdrantClient
     from qdrant_client.http import models
 
-    tenant_id = claims["tenant_id"]
+    tenant_id = user_ctx.tenant_id
     collection = f"documents_{tenant_id}"
     client = QdrantClient(url=settings.qdrant_url)
     collections: dict[str, int] = {}
@@ -411,16 +417,16 @@ async def get_vector_stats(settings: SettingsDep, claims: JWTClaimsDep):
 async def query_documents(
     request: QueryRequest,
     rag_service: RAGServiceDep,
-    claims: JWTClaimsDep,
+    user_ctx: UserContextDep,
     settings: SettingsDep,
 ):
     """
     RAG query with tenant isolation and RBAC.
     Gateway claims always take precedence — clients cannot override tenant_id.
     """
-    tenant_id = claims["tenant_id"]
-    user_roles = claims["user_roles"] or request.user_roles
-    user_id = claims["user_id"] or request.user_id
+    tenant_id = user_ctx.tenant_id
+    user_roles = user_ctx.roles
+    user_id = user_ctx.user_id
 
     try:
         result = await rag_service.query(
@@ -432,6 +438,7 @@ async def query_documents(
             top_k=request.top_k,
             conversation_id=request.conversation_id,
             min_score=request.min_score,
+            user_context=user_ctx,
         )
         _fire_and_forget(_emit_query_event(
             query_id=str(uuid.uuid4()),
@@ -460,7 +467,7 @@ async def query_documents(
 async def query_documents_stream(
     request: QueryRequest,
     rag_service: RAGServiceDep,
-    claims: JWTClaimsDep,
+    user_ctx: UserContextDep,
     settings: SettingsDep,
     http_request: Request,
 ):
@@ -476,9 +483,9 @@ async def query_documents_stream(
 
     from ..pipelines.query import _build_section_label
 
-    tenant_id = claims["tenant_id"]
-    user_roles = claims["user_roles"] or request.user_roles
-    user_id = claims["user_id"] or request.user_id
+    tenant_id = user_ctx.tenant_id
+    user_roles = user_ctx.roles
+    user_id = user_ctx.user_id
 
     llm_semaphore: asyncio.Semaphore = http_request.app.state.llm_semaphore
     model_resolver: TenantModelResolver = http_request.app.state.model_resolver
@@ -772,30 +779,30 @@ class UpdateConversationRequest(BaseModel):
 
 
 @app.post("/conversations")
-async def create_conversation(request: CreateConversationRequest, claims: JWTClaimsDep):
+async def create_conversation(request: CreateConversationRequest, user_ctx: UserContextDep):
     from ..db import create_conversation as _create
-    tenant_id = claims["tenant_id"]
+    tenant_id = user_ctx.tenant_id
     return await _run_db(
-        lambda: _create(tenant_id=tenant_id, user_id=claims["user_id"] or request.user_id, title=request.title)
+        lambda: _create(tenant_id=tenant_id, user_id=user_ctx.user_id or request.user_id, title=request.title)
     )
 
 
 @app.get("/conversations")
 async def list_conversations(
-    claims: JWTClaimsDep,
+    user_ctx: UserContextDep,
     limit: int = 50,
     offset: int = 0,
 ):
     from ..db import list_conversations as _list
     return await _run_db(
-        lambda: _list(tenant_id=claims["tenant_id"], user_id=claims["user_id"], limit=limit, offset=offset)
+        lambda: _list(tenant_id=user_ctx.tenant_id, user_id=user_ctx.user_id, limit=limit, offset=offset)
     )
 
 
 @app.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str, claims: JWTClaimsDep):
+async def get_conversation(conversation_id: str, user_ctx: UserContextDep):
     from ..db import get_conversation as _get
-    conv = await _run_db(lambda: _get(conversation_id, claims["tenant_id"]))
+    conv = await _run_db(lambda: _get(conversation_id, user_ctx.tenant_id))
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
@@ -805,19 +812,19 @@ async def get_conversation(conversation_id: str, claims: JWTClaimsDep):
 async def update_conversation(
     conversation_id: str,
     request: UpdateConversationRequest,
-    claims: JWTClaimsDep,
+    user_ctx: UserContextDep,
 ):
     from ..db import update_conversation_title
-    conv = await _run_db(lambda: update_conversation_title(conversation_id, claims["tenant_id"], request.title))
+    conv = await _run_db(lambda: update_conversation_title(conversation_id, user_ctx.tenant_id, request.title))
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
 
 
 @app.delete("/conversations/{conversation_id}")
-async def delete_conversation_endpoint(conversation_id: str, claims: JWTClaimsDep):
+async def delete_conversation_endpoint(conversation_id: str, user_ctx: UserContextDep):
     from ..db import delete_conversation
-    deleted = await _run_db(lambda: delete_conversation(conversation_id, claims["tenant_id"]))
+    deleted = await _run_db(lambda: delete_conversation(conversation_id, user_ctx.tenant_id))
     if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"status": "deleted"}

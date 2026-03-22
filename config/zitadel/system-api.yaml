@@ -1,0 +1,3 @@
+SystemAPIUsers:
+  docintel-terraform:
+    Path: /zitadel/config/system-api-public.pem
