@@ -10,10 +10,9 @@ spring:
       ddl-auto: none
 
   flyway:
-    enabled: true
-    baseline-on-migrate: true
-    baseline-version: "1"
-    locations: classpath:db/migration
+    # Disabled — document-service manages Flyway programmatically in TenantDataSourceConfig
+    # (targeting the documents schema so history is isolated from admin-service)
+    enabled: false
 
   data:
     redis:
@@ -33,6 +32,10 @@ rag-service:
 
 ingestion-service:
   url: ${INGESTION_SERVICE_URL:http://ingestion-service:8001}
+
+internal:
+  gateway:
+    secret: ${INTERNAL_GATEWAY_SECRET:}
 
 logging:
   level:

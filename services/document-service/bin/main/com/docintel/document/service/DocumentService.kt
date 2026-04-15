@@ -390,6 +390,54 @@ class DocumentService(
     }
 
     // ==========================================================================
+    // Chunk bulk persist — called by ingestion-service instead of direct DB write
+    // ==========================================================================
+
+    /**
+     * Persist a batch of chunks produced by ingestion-service.
+     *
+     * Validates document ownership, upserts chunks via JPA saveAll,
+     * and updates the document's chunk_count in one transaction.
+     * Replaces the direct psycopg2 INSERT that ingestion-service used to perform.
+     */
+    @Transactional
+    fun bulkPersistChunks(documentId: UUID, tenantId: String, requests: List<ChunkPersistRequest>): Int {
+        val doc = documentRepository.findByIdAndTenantId(documentId, tenantId)
+            ?: throw IllegalArgumentException("Document not found or tenant mismatch: $documentId")
+
+        val entities = requests.map { req ->
+            Chunk(
+                id          = req.chunkId,
+                documentId  = documentId,
+                tenantId    = tenantId,
+                content     = req.content,
+                chunkIndex  = req.chunkIndex,
+                startChar   = req.startChar,
+                endChar     = req.endChar,
+                tokenCount  = req.tokenCount,
+                metadata    = req.metadata,
+            )
+        }
+        chunkRepository.saveAll(entities)
+
+        doc.chunkCount = requests.size
+        doc.status = ProcessingStatus.COMPLETED
+        documentRepository.save(doc)
+
+        eventPublisher.publishEvent(DocumentStatusEvent(
+            documentId = documentId.toString(),
+            tenantId   = tenantId,
+            status     = "COMPLETED",
+            stage      = "Indexed",
+            filename   = doc.filename,
+            chunkCount = requests.size,
+        ))
+
+        logger.info("Bulk persisted {} chunks for document {} (tenant={})", requests.size, documentId, tenantId)
+        return requests.size
+    }
+
+    // ==========================================================================
     // DataSource lifecycle
     // ==========================================================================
 

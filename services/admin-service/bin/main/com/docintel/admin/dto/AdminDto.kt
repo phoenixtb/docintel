@@ -65,6 +65,13 @@ data class ClearCacheResponse(
     val tenantId: String?
 )
 
+/** Query statistics sourced from analytics-service (ClickHouse). Replaces dead query_log reads. */
+data class TenantQueryStats(
+    val totalQueries: Long = 0L,
+    val queriesLast24h: Long = 0L,
+    val cacheHitRate: Double = 0.0,
+)
+
 // ---- Tenant Management DTOs ----
 
 data class CreateTenantRequest(
@@ -114,10 +121,12 @@ data class UpdatePlatformSettingsRequest(
 )
 
 data class UpdateTenantSettingsRequest(
-    val llmModel: String?          // null = clear preference (use platform default)
+    val llmModel: String?,         // null = clear preference (use platform default)
+    val thinkingMode: Boolean?     // null = no change; true/false = update
 )
 
 data class TenantSettings(
     val llmModel: String?,         // null = using platform default / no preference set
-    val effectiveModel: String?    // what actually resolves (platform override or own pref)
+    val effectiveModel: String?,   // what actually resolves (platform override or own pref)
+    val thinkingMode: Boolean = false
 )

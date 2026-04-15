@@ -38,8 +38,11 @@ _DEFAULT_EMBED_MODEL = _DEFAULTS.get("DEFAULT_EMBED_MODEL", "nomic-embed-text")
 # Set test environment before imports
 os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("EMBEDDING_MODEL", "nomic-ai/nomic-embed-text-v1.5")
-os.environ.setdefault("LITELLM_MODEL", f"ollama/{_DEFAULT_LLM_MODEL}")
-os.environ.setdefault("OLLAMA_BASE_URL", "http://localhost:11434")
+os.environ.setdefault("LLM_CHAT_URL", "http://localhost:11434/v1")
+os.environ.setdefault("LLM_EMBED_URL", "http://localhost:7997/v1")
+os.environ.setdefault("LLM_MODEL", _DEFAULT_LLM_MODEL)
+os.environ.setdefault("LLM_EMBED_MODEL", _DEFAULT_EMBED_MODEL)
+os.environ.setdefault("LLM_API_KEY", "none")
 
 
 # =============================================================================

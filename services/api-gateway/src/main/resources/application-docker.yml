@@ -52,6 +52,14 @@ spring:
           filters:
             - RewritePath=/api/v1/documents/all, /internal/documents/all
 
+        - id: rag-service-settings-cache
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/tenants/*/settings/invalidate-cache
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tid>[^/]+)/settings/invalidate-cache, /internal/settings-cache/${tid}
+
         - id: rag-service-query
           uri: http://rag-service:8000
           predicates:

@@ -42,6 +42,10 @@ messaging:
     enabled: true
     consumer-name: document-service-test
 
+internal:
+  gateway:
+    secret: test-internal-secret
+
 logging:
   level:
     com.docintel: DEBUG

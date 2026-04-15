@@ -6,13 +6,18 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# ── Layer 1: service deps (only reruns when pyproject.toml changes) ────────────
+# ── Layer 1: local common lib ─────────────────────────────────────────────────
+COPY lib/docintel-common/ /app/lib/docintel-common/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /app/lib/docintel-common/
+
+# ── Layer 2: service deps (only reruns when pyproject.toml changes) ────────────
 COPY services/data-loader/pyproject.toml services/data-loader/README.md ./
 RUN mkdir -p src && touch src/__init__.py
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system .
+    uv pip install --system --no-sources .
 
-# ── Layer 2: actual source ─────────────────────────────────────────────────────
+# ── Layer 3: actual source ─────────────────────────────────────────────────────
 COPY services/data-loader/src/ ./src/
 
 RUN useradd -r -u 1001 -g root -m appuser

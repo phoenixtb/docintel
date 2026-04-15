@@ -26,8 +26,8 @@ dependencies = [
     "qdrant-haystack>=6.0.0",
     "qdrant-client>=1.16.0",
 
-    # Embeddings via Ollama (GPU/Metal-accelerated)
-    "ollama-haystack>=6.0.0",
+    # Embeddings via OpenAI-compatible endpoint (Infinity, LMForge, Ollama, etc.)
+    "openai>=1.0.0",
 
     # Hybrid search — BM25 sparse vectors (query side uses same model in rag-service)
     # fastembed-haystack provides the Haystack component; fastembed is the underlying library

@@ -16,20 +16,20 @@ class Settings(BaseSettings):
     qdrant_url: str = Field(default="http://qdrant:6333", alias="QDRANT_URL")
     qdrant_api_key: str | None = Field(default=None, alias="QDRANT_API_KEY")
 
-    # --- Ollama ---
-    ollama_base_url: str = Field(default="http://host.docker.internal:11434", alias="OLLAMA_BASE_URL")
-    ollama_embedding_model: str = Field(default="nomic-embed-text", alias="OLLAMA_EMBEDDING_MODEL")
+    # --- LLM Engine (OpenAI-compatible) ---
+    # Embeddings endpoint — Infinity (Docker) by default; can point to any OpenAI-compat embed server.
+    llm_embed_url: str = Field(default="http://infinity:7997/v1", alias="LLM_EMBED_URL")
+    llm_embed_model: str = Field(default="nomic-embed-text", alias="LLM_EMBED_MODEL")
+    llm_api_key: str = Field(default="none", alias="LLM_API_KEY")
 
-    # --- PostgreSQL ---
-    database_url: str = Field(
-        default="postgresql://docintel:docintel@postgres:5432/docintel",
-        alias="DATABASE_URL",
-    )
-
-    # --- Document service (status callback) ---
+    # --- Document service (chunk persist + status callback) ---
     document_service_url: str = Field(
         default="http://document-service:8081",
         alias="DOCUMENT_SERVICE_URL",
+    )
+    internal_gateway_secret: str = Field(
+        default="",
+        alias="INTERNAL_GATEWAY_SECRET",
     )
 
     # --- Docling ---

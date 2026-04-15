@@ -27,7 +27,7 @@ from docintel_common.security import DocumentACL
 
 from .adapters import MinIOAdapter
 from .config import Settings
-from .db import ChunkRecord, persist_chunks
+from .document_client import ChunkPayload, DocumentServiceClient
 from .pipeline import run_ingestion
 
 logger = logging.getLogger(__name__)
@@ -110,21 +110,22 @@ async def _handle_message(
             DocumentACL(),  # default ACL for stream-originated documents
         )
 
-        chunk_records = [
-            ChunkRecord(
-                chunk_id   = c["chunk_id"],
-                document_id = document_id,
-                tenant_id  = tenant_id,
-                content    = c["content"],
+        chunk_payloads = [
+            ChunkPayload(
+                chunk_id    = c["chunk_id"],
                 chunk_index = c["chunk_index"],
-                start_char = c["start_char"],
-                end_char   = c["end_char"],
+                content     = c["content"],
+                start_char  = c["start_char"],
+                end_char    = c["end_char"],
                 token_count = c["token_count"],
-                metadata   = c["metadata"],
+                metadata    = c["metadata"],
             )
             for c in result["chunks"]
         ]
-        persist_chunks(chunk_records)
+        doc_client = DocumentServiceClient()
+        await loop.run_in_executor(
+            None, doc_client.persist_chunks, document_id, tenant_id, chunk_payloads
+        )
 
         await bus.publish(TOPIC_INGESTION_COMPLETE, {
             "documentId": document_id,

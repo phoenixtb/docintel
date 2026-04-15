@@ -11,6 +11,7 @@ import io.mockk.junit5.MockKExtension
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
+import org.springframework.context.ApplicationEventPublisher
 import org.springframework.data.redis.connection.stream.MapRecord
 import org.springframework.data.redis.connection.stream.RecordId
 import org.springframework.data.redis.core.StreamOperations
@@ -33,6 +34,7 @@ class StreamConsumerTest {
     @MockK private lateinit var streamPublisher: DocumentStreamPublisher
     @MockK private lateinit var redisTemplate: StringRedisTemplate
     @MockK private lateinit var streamOps: StreamOperations<String, String, String>
+    @MockK private lateinit var eventPublisher: ApplicationEventPublisher
 
     private val objectMapper = jacksonObjectMapper()
 
@@ -43,12 +45,14 @@ class StreamConsumerTest {
     fun setUp() {
         every { redisTemplate.opsForStream<String, String>() } returns streamOps
         every { streamOps.acknowledge(any(), any(), any<RecordId>()) } returns 1L
+        every { eventPublisher.publishEvent(any()) } just Runs
 
         filesConsumer = FilesAvailableConsumer(
             documentService = documentService,
             streamPublisher = streamPublisher,
             redisTemplate = redisTemplate,
-            objectMapper = objectMapper
+            objectMapper = objectMapper,
+            eventPublisher = eventPublisher,
         )
         ingestionConsumer = IngestionCompleteConsumer(
             documentService = documentService,

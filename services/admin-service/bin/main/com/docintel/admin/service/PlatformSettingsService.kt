@@ -60,31 +60,37 @@ class PlatformSettingsService(
     // ------------------------------------------------------------------
 
     fun getTenantSettings(tenantId: String): TenantSettings {
-        data class Row(val tenantModel: String?, val platformModel: String?)
+        data class Row(val tenantModel: String?, val platformModel: String?, val thinkingMode: Boolean?)
 
         val row = jdbcTemplate.queryForObject(
             """
             SELECT
-                t.settings->>'llm_model' AS tenant_model,
-                (SELECT value FROM platform_settings WHERE key = 'llm_model') AS platform_model
+                t.settings->>'llm_model'                        AS tenant_model,
+                (SELECT value FROM platform_settings WHERE key = 'llm_model') AS platform_model,
+                (t.settings->>'thinking_mode')::boolean         AS thinking_mode
             FROM tenants t
             WHERE t.id = ?
             """.trimIndent(),
             { rs, _ ->
                 Row(
-                    tenantModel = rs.getString("tenant_model"),
-                    platformModel = rs.getString("platform_model")
+                    tenantModel   = rs.getString("tenant_model"),
+                    platformModel = rs.getString("platform_model"),
+                    thinkingMode  = rs.getObject("thinking_mode") as? Boolean
                 )
             },
             tenantId
-        ) ?: return TenantSettings(llmModel = null, effectiveModel = null)
+        ) ?: return TenantSettings(llmModel = null, effectiveModel = null, thinkingMode = false)
 
         val platformOverride = if (row.platformModel == null || row.platformModel == "null") null
                                else row.platformModel.trim('"')
         val tenantPref = row.tenantModel
+        val effective  = platformOverride ?: tenantPref
 
-        val effective = platformOverride ?: tenantPref
-        return TenantSettings(llmModel = tenantPref, effectiveModel = effective)
+        return TenantSettings(
+            llmModel      = tenantPref,
+            effectiveModel = effective,
+            thinkingMode  = row.thinkingMode ?: false,
+        )
     }
 
     @Transactional
@@ -95,13 +101,20 @@ class PlatformSettingsService(
                 tenantId
             )
         } else {
-            // Use to_jsonb() with a parameterized bind to avoid SQL injection
             jdbcTemplate.update(
                 "UPDATE tenants SET settings = jsonb_set(COALESCE(settings, '{}'), '{llm_model}', to_jsonb(?::text)), updated_at = NOW() WHERE id = ?",
                 req.llmModel, tenantId
             )
         }
-        log.info("Tenant {} llm_model updated → {}", tenantId, req.llmModel ?: "cleared")
+
+        if (req.thinkingMode != null) {
+            jdbcTemplate.update(
+                "UPDATE tenants SET settings = jsonb_set(COALESCE(settings, '{}'), '{thinking_mode}', to_jsonb(?::boolean)), updated_at = NOW() WHERE id = ?",
+                req.thinkingMode, tenantId
+            )
+        }
+
+        log.info("Tenant {} settings updated — llm_model={}, thinking_mode={}", tenantId, req.llmModel ?: "unchanged", req.thinkingMode ?: "unchanged")
         return getTenantSettings(tenantId)
     }
 }

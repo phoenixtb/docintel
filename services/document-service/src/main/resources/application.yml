@@ -58,6 +58,10 @@ management:
     health:
       show-details: when_authorized
 
+internal:
+  gateway:
+    secret: ${INTERNAL_GATEWAY_SECRET:}
+
 # Logging
 logging:
   level:

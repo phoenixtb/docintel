@@ -18,6 +18,9 @@ class Settings(BaseSettings):
         alias="DOCUMENT_SERVICE_URL",
     )
 
+    # --- Internal auth ---
+    internal_gateway_secret: str = Field(default="", alias="INTERNAL_GATEWAY_SECRET")
+
     # --- Redis Streams ---
     redis_host: str = Field(default="redis", alias="REDIS_HOST")
     redis_port: int = Field(default=6379, alias="REDIS_PORT")

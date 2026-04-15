@@ -8,7 +8,7 @@ Two-stage pipeline design:
     Both branches merge via DocumentJoiner → raw Document objects with clean text
 
   Stage 2 — Ingestion (Embed + Index):
-    MetadataEnricher → BM25SparseDocumentEmbedder → OllamaDocumentEmbedder → DocumentWriter
+    MetadataEnricher → BM25SparseDocumentEmbedder → OpenAIDocumentEmbedder → DocumentWriter
 
 Splitting into two stages allows domain classification to run between them:
   conversion → classify domain → build full metadata → ingestion
@@ -69,13 +69,13 @@ class SourcesToPaths:
     ByteStream entries are dropped — DoclingConverter requires on-disk paths.
     """
 
-    @component.output_types(paths=Iterable[Union[Path, str]])
+    @component.output_types(paths=Optional[List[Union[str, Path]]])
     def run(self, sources: Optional[List[Union[str, Path, ByteStream]]]) -> dict:
-        paths: list[Union[str, Path]] = [
+        paths: List[Union[str, Path]] = [
             s for s in (sources or [])
             if not isinstance(s, ByteStream)
         ]
-        return {"paths": paths}
+        return {"paths": paths or None}
 
 
 # ---------------------------------------------------------------------------
@@ -350,9 +350,10 @@ def _build_conversion_pipeline(cfg: Settings) -> Pipeline:
 
 
 def _build_ingestion_pipeline(tenant_id: str, cfg: Settings) -> Pipeline:
-    """Stage 2: enriched Documents → split → BM25 + Ollama embed → Qdrant write."""
+    """Stage 2: enriched Documents → split → BM25 + dense embed → Qdrant write."""
+    from haystack.components.embedders.openai_document_embedder import OpenAIDocumentEmbedder
+    from haystack.utils import Secret
     from haystack_integrations.components.embedders.fastembed import FastembedSparseDocumentEmbedder
-    from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder
 
     document_store = get_document_store(tenant_id, cfg)
 
@@ -367,14 +368,15 @@ def _build_ingestion_pipeline(tenant_id: str, cfg: Settings) -> Pipeline:
     )
     pipeline.add_component(
         "sparse_embedder",
-        # Must match rag-service BM25SparseTextEmbedder(model_name="Qdrant/bm25")
+        # model must match rag-service BM25SparseTextEmbedder(model_name="Qdrant/bm25")
         FastembedSparseDocumentEmbedder(model="Qdrant/bm25"),
     )
     pipeline.add_component(
         "embedder",
-        OllamaDocumentEmbedder(
-            model=cfg.ollama_embedding_model,
-            url=cfg.ollama_base_url,
+        OpenAIDocumentEmbedder(
+            model=cfg.llm_embed_model,
+            api_base_url=cfg.llm_embed_url,
+            api_key=Secret.from_token(cfg.llm_api_key),
         ),
     )
     pipeline.add_component(

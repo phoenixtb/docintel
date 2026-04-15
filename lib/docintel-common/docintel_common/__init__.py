@@ -6,7 +6,8 @@ from .domain import (
     DomainClassifier,
     get_domain_classifier,
 )
-from .internal_auth import compute_internal_token, get_internal_secret, verify_internal_token
+from .internal_auth import compute_internal_token, compute_service_token, get_internal_secret, verify_internal_token
+from .tracing import TraceContext, TraceLogFilter, configure_trace_logging
 from .messaging import (
     MessageBus,
     RedisStreamBus,
@@ -32,8 +33,13 @@ __all__ = [
     "detect_device",
     # internal auth
     "compute_internal_token",
+    "compute_service_token",
     "verify_internal_token",
     "get_internal_secret",
+    # tracing
+    "TraceContext",
+    "TraceLogFilter",
+    "configure_trace_logging",
     # messaging
     "MessageBus",
     "RedisStreamBus",

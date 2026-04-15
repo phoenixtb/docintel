@@ -153,6 +153,28 @@ class DocumentController(
         return ResponseEntity.ok(result)
     }
 
+    /**
+     * Bulk chunk persist — called by ingestion-service after embedding.
+     *
+     * Replaces the direct psycopg2 INSERT that ingestion-service used to perform
+     * against the chunks table. Validates document ownership and persists atomically.
+     *
+     * Auth: X-Internal-Service-Token (gateway-injected or direct internal call).
+     */
+    @PostMapping("/{id}/chunks/bulk")
+    fun bulkPersistChunks(
+        @PathVariable id: UUID,
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
+        @RequestBody chunks: List<ChunkPersistRequest>
+    ): ResponseEntity<Map<String, Any>> {
+        return try {
+            val saved = documentService.bulkPersistChunks(id, tenantId, chunks)
+            ResponseEntity.ok(mapOf("saved" to saved, "documentId" to id.toString()))
+        } catch (e: IllegalArgumentException) {
+            ResponseEntity.notFound().build()
+        }
+    }
+
     @DeleteMapping("/all")
     suspend fun deleteAllDocuments(
         @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String

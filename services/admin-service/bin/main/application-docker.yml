@@ -27,8 +27,22 @@ zitadel:
   pat: ${ZITADEL_SERVICE_ACCOUNT_PAT:}
   project-id: ${ZITADEL_PROJECT_ID:}
 
+document-service:
+  url: ${DOCUMENT_SERVICE_URL:http://document-service:8081}
+
+rag-service:
+  url: ${RAG_SERVICE_URL:http://rag-service:8000}
+
+analytics-service:
+  url: ${ANALYTICS_SERVICE_URL:http://analytics-service:8001}
+
+internal:
+  gateway:
+    secret: ${INTERNAL_GATEWAY_SECRET:}
+
 docintel:
   default-llm-model: ${DEFAULT_LLM_MODEL:qwen3.5:4b}
+  internal-gateway-secret: ${INTERNAL_GATEWAY_SECRET:}
 
 logging:
   level:

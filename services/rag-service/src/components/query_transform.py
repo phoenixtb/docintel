@@ -25,14 +25,17 @@ class QueryExpander:
 
     Addresses vocabulary gap: "WFH" vs "remote work".
     Disabled by default — enable with use_query_expansion=True in settings.
+
+    Uses the generic openai/ LiteLLM prefix so any OpenAI-compatible engine
+    (LMForge, Ollama, vLLM, LM Studio) works without code changes.
     """
 
     def __init__(self, llm_model: str | None = None, enabled: bool = True):
-        self.llm_model = llm_model or os.getenv(
-            "LITELLM_EXPANSION_MODEL", "ollama/qwen3:1.7b"
-        )
+        # Use openai/ prefix — LiteLLM routes to any OpenAI-compatible base URL
+        base_model = llm_model or os.getenv("LLM_EXPANSION_MODEL", "qwen3:1.7b")
+        self.llm_model = f"openai/{base_model}" if not base_model.startswith("openai/") else base_model
         self.enabled = enabled
-        self.api_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.api_base = os.getenv("LLM_CHAT_URL", "http://host.docker.internal:11434/v1")
 
     @component.output_types(
         original_query=str,
@@ -60,7 +63,7 @@ class QueryExpander:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=50,
-                api_base=self.api_base if self.llm_model.startswith("ollama/") else None,
+                api_base=self.api_base,
             )
 
             alternatives = response.choices[0].message.content.strip()

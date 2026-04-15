@@ -43,7 +43,20 @@ check_cmd docker   "https://www.docker.com/products/docker-desktop/"
 check_cmd tofu     "macOS: brew install opentofu | Linux: https://opentofu.org/docs/intro/install/"
 check_cmd jq       "macOS: brew install jq | Linux: apt install jq / yum install jq"
 check_cmd openssl  "macOS: brew install openssl | Linux: apt install openssl"
-check_cmd ollama   "macOS: brew install ollama | https://ollama.ai/download"
+
+# LLM engine prerequisite — depends on LLM_ENGINE value (default: ollama)
+LLM_ENGINE="${LLM_ENGINE:-ollama}"
+case "$LLM_ENGINE" in
+    ollama)
+        check_cmd ollama "macOS: brew install ollama | https://ollama.ai/download"
+        ;;
+    lmforge)
+        check_cmd lmforge "See: https://github.com/yourorg/lmforge | or run ./scripts/setup-lmforge.sh"
+        ;;
+    vllm|external)
+        echo "  ℹ LLM_ENGINE=$LLM_ENGINE — skipping local engine prerequisite check"
+        ;;
+esac
 
 if [ "$prereq_ok" = false ]; then
     echo ""
@@ -62,57 +75,65 @@ echo ""
 
 
 # =============================================================================
-# Check Ollama (Native Installation Required)
+# Check LLM Engine (varies by LLM_ENGINE setting)
 # =============================================================================
 
 echo ""
-echo "Checking Ollama..."
+echo "================================================"
+echo "Checking LLM Engine (LLM_ENGINE=${LLM_ENGINE:-ollama})"
+echo "================================================"
 
-OLLAMA_RUNNING=false
+LLM_ENGINE="${LLM_ENGINE:-ollama}"
 
-# Check if Ollama is installed
-if command -v ollama &> /dev/null; then
-    echo "Ollama is installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
-    
-    # Check if Ollama is running by trying to reach its API
-    if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-        echo "Ollama is running."
-        OLLAMA_RUNNING=true
-    else
-        echo "Ollama is installed but not running."
-        echo ""
-        echo "Please start Ollama:"
-        echo "  - On macOS: Open the Ollama app from Applications"
-        echo "  - On Linux: Run 'ollama serve' in a separate terminal"
-        echo ""
-        read -p "Press Enter once Ollama is running, or Ctrl+C to abort..."
-        
-        # Verify again
+case "$LLM_ENGINE" in
+# ── Ollama (default, any platform) ──────────────────────────────────────────
+ollama)
+    OLLAMA_RUNNING=false
+    if command -v ollama &> /dev/null; then
+        echo "Ollama is installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
         if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+            echo "Ollama is running."
             OLLAMA_RUNNING=true
         else
-            echo "Error: Ollama is still not responding on http://localhost:11434"
-            exit 1
+            echo "Ollama is installed but not running."
+            echo ""
+            echo "Please start Ollama:"
+            echo "  - On macOS: Open the Ollama app from Applications"
+            echo "  - On Linux: Run 'ollama serve' in a separate terminal"
+            echo ""
+            read -p "Press Enter once Ollama is running, or Ctrl+C to abort..."
+            if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+                OLLAMA_RUNNING=true
+            else
+                echo "Error: Ollama is still not responding on http://localhost:11434"
+                exit 1
+            fi
         fi
+    else
+        echo ""
+        echo "Ollama Not Found"
+        echo ""
+        echo "Install Ollama:"
+        echo "  macOS:   brew install ollama  OR  https://ollama.ai/download"
+        echo "  Linux:   curl -fsSL https://ollama.ai/install.sh | sh"
+        echo ""
+        echo "After installation, start Ollama and run this script again."
+        echo "OR: set LLM_ENGINE=lmforge and run ./scripts/setup-lmforge.sh"
+        exit 1
     fi
-else
-    echo ""
-    echo "================================================"
-    echo "Ollama Not Found"
-    echo "================================================"
-    echo ""
-    echo "Ollama is required for running LLMs locally."
-    echo "Native installation is recommended for best performance."
-    echo ""
-    echo "Install Ollama:"
-    echo "  macOS:   brew install ollama"
-    echo "           OR download from https://ollama.ai/download"
-    echo ""
-    echo "  Linux:   curl -fsSL https://ollama.ai/install.sh | sh"
-    echo ""
-    echo "After installation, start Ollama and run this script again."
-    exit 1
-fi
+    ;;
+
+# ── LMForge (macOS Apple Silicon) ───────────────────────────────────────────
+lmforge)
+    echo "LMForge engine selected — running ./scripts/setup-lmforge.sh for model setup."
+    echo "  (This script handles LMForge-specific model pulls and .env configuration.)"
+    ;;
+
+# ── vLLM / External (user-managed) ──────────────────────────────────────────
+vllm|external)
+    echo "LLM_ENGINE=$LLM_ENGINE — assuming engine is user-managed at LLM_CHAT_URL=${LLM_CHAT_URL:-<not set>}"
+    ;;
+esac
 
 # =============================================================================
 # Generate RSA key pair for Zitadel System API authentication
@@ -203,31 +224,35 @@ docker compose pull
 echo "Docker images pulled."
 
 # =============================================================================
-# Pull Ollama Models
+# Pull Models (Ollama only; LMForge handled by setup-lmforge.sh)
 # =============================================================================
 
-echo ""
-echo "================================================"
-echo "Pulling Ollama Models"
-echo "================================================"
-echo "This will download ~8-10GB of models. Please wait..."
-echo ""
+if [ "${LLM_ENGINE:-ollama}" = "ollama" ]; then
+    echo ""
+    echo "================================================"
+    echo "Pulling Ollama Models"
+    echo "================================================"
+    echo "This will download ~8-10GB of models. Please wait..."
+    echo ""
 
-# List of required models
-MODELS=("$DEFAULT_LLM_MODEL" "$DEFAULT_FALLBACK_MODEL" "$DEFAULT_EMBED_MODEL")
+    MODELS=("$DEFAULT_LLM_MODEL" "$DEFAULT_FALLBACK_MODEL" "$DEFAULT_EMBED_MODEL")
 
-for model in "${MODELS[@]}"; do
-    echo "Pulling ${model}..."
-    if ollama list | grep -q "^${model}"; then
-        echo "  ${model} already exists, skipping."
-    else
-        ollama pull "${model}"
-        echo "  ${model} pulled successfully."
-    fi
-done
+    for model in "${MODELS[@]}"; do
+        echo "Pulling ${model}..."
+        if ollama list | grep -q "^${model}"; then
+            echo "  ${model} already exists, skipping."
+        else
+            ollama pull "${model}"
+            echo "  ${model} pulled successfully."
+        fi
+    done
 
-echo ""
-echo "All models ready!"
+    echo ""
+    echo "All Ollama models ready!"
+elif [ "${LLM_ENGINE:-ollama}" = "lmforge" ]; then
+    echo ""
+    echo "Run './scripts/setup-lmforge.sh' to pull LMForge models."
+fi
 
 # =============================================================================
 # Setup Complete

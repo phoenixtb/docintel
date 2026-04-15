@@ -3,8 +3,8 @@ LLM Generation Components
 ==========================
 
 LiteLLMStreamingGenerator: async token-by-token streaming for SSE endpoints.
-OllamaChatGenerator is used for standard (non-streaming) generation via the
-Haystack Pipeline — import it directly from haystack_integrations.
+OpenAIChatGenerator is used for standard (non-streaming) generation via the
+Haystack Pipeline — import it directly from haystack.components.generators.openai.
 
 Note: LiteLLMStreamingGenerator is NOT a Haystack @component because it uses
 async generator semantics that don't fit Haystack's synchronous Pipeline model.
@@ -24,19 +24,24 @@ class LiteLLMStreamingGenerator:
 
     Yields string tokens as they arrive from the model.
     Use with asyncio task + queue pattern in the streaming endpoint.
+
+    Uses the generic openai/ LiteLLM prefix so any OpenAI-compatible engine
+    (LMForge, Ollama, vLLM, LM Studio) works without code changes.
     """
 
     def __init__(
         self,
-        model: str = "ollama/qwen3.5:4b",
+        model: str = "qwen3.5:4b",
         temperature: float = 0.1,
         max_tokens: int = 1024,
         api_base: str | None = None,
     ):
-        self.model = model
+        base_model = model
+        # Normalise to openai/ prefix for LiteLLM generic routing
+        self.model = f"openai/{base_model}" if not base_model.startswith("openai/") else base_model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.api_base = api_base or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.api_base = api_base or os.getenv("LLM_CHAT_URL", "http://host.docker.internal:11434/v1")
 
     async def stream(self, prompt: str):
         """Async generator that yields tokens."""
@@ -46,7 +51,7 @@ class LiteLLMStreamingGenerator:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             stream=True,
-            api_base=self.api_base if self.model.startswith("ollama/") else None,
+            api_base=self.api_base,
         )
 
         async for chunk in response:

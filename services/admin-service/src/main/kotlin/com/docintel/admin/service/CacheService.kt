@@ -38,11 +38,10 @@ class CacheService(
             (result?.get("points_count") as? Number)?.toLong() ?: 0L
         } catch (e: Exception) { 0L }
 
-        val hitRate = try {
-            val total = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM query_log", Long::class.java) ?: 0L
-            val cached = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM query_log WHERE cached = true", Long::class.java) ?: 0L
-            if (total > 0) cached.toDouble() / total else 0.0
-        } catch (e: Exception) { 0.0 }
+        // query_log has been removed; cache hit rate is sourced from analytics-service.
+        // Return 0.0 as a safe default here — the admin dashboard uses AnalyticsServiceClient
+        // for the detailed tenant-level stats.
+        val hitRate = 0.0
 
         return CacheStats(
             totalEntries = pointsCount,

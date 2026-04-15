@@ -11,6 +11,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
     create_engine,
@@ -49,11 +50,14 @@ class Base(DeclarativeBase):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = {"schema": "conversations"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(String(64), nullable=False)
     user_id = Column(String(64))
     title = Column(String(500), nullable=False, default="New Conversation")
+    session_summary = Column(Text, nullable=True)
+    summary_upto_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -62,9 +66,10 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = {"schema": "conversations"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.conversations.id", ondelete="CASCADE"), nullable=False)
     role = Column(String(20), nullable=False)  # user, assistant, system
     content = Column(Text, nullable=False)
     sources = Column(JSONB, nullable=True)
@@ -175,6 +180,111 @@ def add_message(
         return _msg_to_dict(msg)
 
 
+def get_conversation_summary_state(conversation_id: str, tenant_id: str) -> dict:
+    """
+    Lightweight fetch: returns summary state + total user/assistant message count.
+    Does NOT load all message content — avoids the N+1 problem on large conversations.
+    """
+    with get_db() as db:
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
+            .first()
+        )
+        if not conv:
+            return {"session_summary": None, "summary_upto_count": 0, "total_message_count": 0}
+
+        total = (
+            db.query(func.count(Message.id))
+            .filter(
+                Message.conversation_id == conv.id,
+                Message.role.in_(["user", "assistant"]),
+            )
+            .scalar()
+        ) or 0
+
+        return {
+            "session_summary": conv.session_summary,
+            "summary_upto_count": conv.summary_upto_count,
+            "total_message_count": total,
+        }
+
+
+def get_messages_slice(
+    conversation_id: str,
+    tenant_id: str,
+    offset: int,
+    limit: int,
+) -> list[dict]:
+    """Fetch a slice of user/assistant messages by position (oldest-first)."""
+    with get_db() as db:
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
+            .first()
+        )
+        if not conv:
+            return []
+        msgs = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id == conv.id,
+                Message.role.in_(["user", "assistant"]),
+            )
+            .order_by(Message.created_at)
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return [{"role": m.role, "content": m.content} for m in msgs]
+
+
+def update_conversation_summary(
+    conversation_id: str,
+    tenant_id: str,
+    summary: str,
+    upto_count: int,
+) -> None:
+    """Persist the updated rolling summary and the message count it covers."""
+    with get_db() as db:
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
+            .first()
+        )
+        if conv:
+            conv.session_summary = summary
+            conv.summary_upto_count = upto_count
+            db.commit()
+
+
+def get_recent_messages(
+    conversation_id: str,
+    tenant_id: str,
+    limit: int,
+) -> list[dict]:
+    """Fetch the most recent N user/assistant messages (newest-last order)."""
+    with get_db() as db:
+        conv = (
+            db.query(Conversation)
+            .filter(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id)
+            .first()
+        )
+        if not conv:
+            return []
+        msgs = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id == conv.id,
+                Message.role.in_(["user", "assistant"]),
+            )
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return [{"role": m.role, "content": m.content} for m in reversed(msgs)]
+
+
 def update_conversation_title(conversation_id: str, tenant_id: str, title: str) -> Optional[dict]:
     """Update a conversation's title."""
     with get_db() as db:
@@ -201,6 +311,7 @@ def _conv_to_dict(conv: Conversation, include_messages: bool = False) -> dict:
         "tenant_id": conv.tenant_id,
         "user_id": conv.user_id,
         "title": conv.title,
+        "summary_upto_count": conv.summary_upto_count,
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
         "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
     }

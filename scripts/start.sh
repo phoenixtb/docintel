@@ -11,6 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 source "$PROJECT_DIR/config/defaults.env"
+# .env overrides defaults (LLM_ENGINE, LLM_MODEL, LLM_CHAT_URL, etc.)
+[ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
 cd "$PROJECT_DIR"
 
 DO_BUILD=false
@@ -46,32 +48,76 @@ if [ ! -f "config/zitadel/system-api-private.pem" ] || [ ! -f "config/zitadel/sy
     fail "Zitadel System API key pair missing. Run ./scripts/setup.sh first."
 fi
 
-# Check Ollama
-if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-    echo "Warning: Ollama is not running!"
-    if command -v ollama &> /dev/null; then
-        echo "  - On macOS: Open the Ollama app from Applications"
-        echo "  - On Linux: Run 'ollama serve' in a separate terminal"
-        echo ""
-        read -p "Press Enter once Ollama is running, or Ctrl+C to abort..."
-        if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-            fail "Ollama still not responding. Aborting."
+# Check LLM Engine
+LLM_ENGINE="${LLM_ENGINE:-ollama}"
+case "$LLM_ENGINE" in
+# ── Ollama (default) ─────────────────────────────────────────────────────────
+ollama)
+    if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+        echo "Warning: Ollama is not running!"
+        if command -v ollama &> /dev/null; then
+            echo "  - On macOS: Open the Ollama app from Applications"
+            echo "  - On Linux: Run 'ollama serve' in a separate terminal"
+            echo ""
+            read -p "Press Enter once Ollama is running, or Ctrl+C to abort..."
+            if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+                fail "Ollama still not responding. Aborting."
+            fi
+        else
+            fail "Ollama not installed. Run ./scripts/setup.sh first."
         fi
-    else
-        fail "Ollama not installed. Run ./scripts/setup.sh first."
     fi
-fi
+    REQUIRED_MODELS=("$DEFAULT_LLM_MODEL" "$DEFAULT_EMBED_MODEL")
+    MISSING_MODELS=()
+    for model in "${REQUIRED_MODELS[@]}"; do
+        if ! ollama list 2>/dev/null | grep -q "^${model}"; then
+            MISSING_MODELS+=("$model")
+        fi
+    done
+    if [ ${#MISSING_MODELS[@]} -gt 0 ]; then
+        fail "Missing required Ollama models: ${MISSING_MODELS[*]}. Run ./scripts/setup.sh to pull them."
+    fi
+    ;;
 
-REQUIRED_MODELS=("$DEFAULT_LLM_MODEL" "$DEFAULT_EMBED_MODEL")
-MISSING_MODELS=()
-for model in "${REQUIRED_MODELS[@]}"; do
-    if ! ollama list 2>/dev/null | grep -q "^${model}"; then
-        MISSING_MODELS+=("$model")
+# ── LMForge ──────────────────────────────────────────────────────────────────
+lmforge)
+    if ! command -v lmforge &> /dev/null; then
+        fail "lmforge binary not found. Run ./scripts/setup-lmforge.sh first."
     fi
-done
-if [ ${#MISSING_MODELS[@]} -gt 0 ]; then
-    fail "Missing required Ollama models: ${MISSING_MODELS[*]}. Run ./scripts/setup.sh to pull them."
-fi
+    if ! curl -s http://localhost:11430/health > /dev/null 2>&1; then
+        log "LMForge not running — starting daemon..."
+        lmforge start &
+        # Wait up to 20s for the daemon to be ready
+        for i in $(seq 1 20); do
+            if curl -s http://localhost:11430/health > /dev/null 2>&1; then
+                ok "LMForge daemon ready at :11430"; break
+            fi
+            [ $i -eq 20 ] && fail "LMForge did not start in time. Check: lmforge logs"
+            sleep 1
+        done
+    else
+        ok "LMForge already running at :11430"
+    fi
+    # Verify the configured LLM_MODEL is known to LMForge
+    _LLM_MODEL="${LLM_MODEL:-}"
+    if [ -n "$_LLM_MODEL" ]; then
+        if curl -s http://localhost:11430/v1/models 2>/dev/null | grep -q "$_LLM_MODEL"; then
+            ok "Model '$_LLM_MODEL' available in LMForge"
+        else
+            echo ""
+            echo "  ⚠  Model '$_LLM_MODEL' not found in LMForge."
+            echo "     Run ./scripts/setup-lmforge.sh to pull it."
+            echo ""
+            read -p "  Press Enter to continue anyway, or Ctrl+C to abort..."
+        fi
+    fi
+    ;;
+
+# ── vLLM / External ──────────────────────────────────────────────────────────
+vllm|external)
+    log "LLM_ENGINE=$LLM_ENGINE — skipping local engine check. Ensure your engine is running at LLM_CHAT_URL=${LLM_CHAT_URL:-<not set>}"
+    ;;
+esac
 
 # =============================================================================
 # Build (optional)

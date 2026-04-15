@@ -19,6 +19,7 @@ service which uses content-addressed dedup and proper data source lifecycle trac
 import asyncio
 import logging
 import shutil
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Optional
@@ -31,17 +32,12 @@ from ..job_registry import JobRegistry
 
 from docintel_common.internal_auth import verify_internal_token
 from docintel_common.security import CLASSIFICATION_ORDER, Classification, DocumentACL
+from docintel_common.tracing import TraceContext, configure_trace_logging
 
 from ..adapters import MinIOAdapter
 from ..config import get_settings
 from ..stream_worker import run_stream_worker
-from ..db import (
-    ChunkRecord,
-    delete_document_chunks,
-    delete_tenant_chunks,
-    persist_chunks,
-    update_document_status,
-)
+from ..document_client import ChunkPayload, DocumentServiceClient
 from ..pipeline import invalidate_pipeline_cache, run_ingestion
 from ..stores import delete_document_from_store, delete_tenant_from_store, invalidate_cache_for_tenant
 
@@ -100,10 +96,18 @@ app = FastAPI(
 if _METRICS_ENABLED:
     Instrumentator().instrument(app).expose(app)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-)
+configure_trace_logging()
+
+
+@app.middleware("http")
+async def tracing_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    tenant_id  = request.headers.get("X-Tenant-Id", "-")
+    user_id    = request.headers.get("X-User-Id", "-")
+    TraceContext.set(request_id, tenant_id, user_id)
+    response = await call_next(request)
+    response.headers["X-Request-Id"] = request_id
+    return response
 
 
 # =============================================================================
@@ -244,13 +248,11 @@ async def _ingest_document_background(
             acl or request.acl,
         )
 
-        chunk_records = [
-            ChunkRecord(
+        chunk_payloads = [
+            ChunkPayload(
                 chunk_id=c["chunk_id"],
-                document_id=request.document_id,
-                tenant_id=effective_tenant_id,
-                content=c["content"],
                 chunk_index=c["chunk_index"],
+                content=c["content"],
                 start_char=c["start_char"],
                 end_char=c["end_char"],
                 token_count=c["token_count"],
@@ -258,12 +260,15 @@ async def _ingest_document_background(
             )
             for c in result["chunks"]
         ]
-        persist_chunks(chunk_records)
 
-        update_document_status(
-            document_id=request.document_id,
-            status="COMPLETED",
-            chunk_count=result["chunk_count"],
+        doc_client = DocumentServiceClient()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            doc_client.persist_chunks,
+            request.document_id,
+            effective_tenant_id,
+            chunk_payloads,
         )
 
         logger.info(
@@ -275,11 +280,9 @@ async def _ingest_document_background(
 
     except Exception as e:
         logger.exception("Ingestion failed for document %s", request.document_id)
-        update_document_status(
-            document_id=request.document_id,
-            status="FAILED",
-            error_message=str(e),
-        )
+        # Status update on failure is handled by document-service via the Redis
+        # ingestion.complete stream consumer (IngestionCompleteConsumer).
+        # We still log here but no longer write directly to the DB.
     finally:
         for p in tmp_paths:
             try:
@@ -348,7 +351,6 @@ async def delete_document_vectors(
         )
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, delete_document_from_store, tenant_id, document_id)
-    await loop.run_in_executor(None, delete_document_chunks, document_id)
     await loop.run_in_executor(None, invalidate_cache_for_tenant, tenant_id)
     return VectorDeleteResponse(deleted=True, document_id=document_id)
 
@@ -367,7 +369,6 @@ async def delete_tenant_vectors(
         )
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, delete_tenant_from_store, tenant_id)
-    await loop.run_in_executor(None, delete_tenant_chunks, tenant_id)
     await loop.run_in_executor(None, invalidate_cache_for_tenant, tenant_id)
     invalidate_pipeline_cache(tenant_id)
     return VectorDeleteResponse(deleted=True, tenant_id=tenant_id)

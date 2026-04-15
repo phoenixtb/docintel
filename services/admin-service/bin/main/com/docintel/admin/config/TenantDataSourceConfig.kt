@@ -5,6 +5,7 @@ import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import org.flywaydb.core.Flyway
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Primary
@@ -22,17 +23,29 @@ class TenantDataSourceConfig(
 ) {
 
     @Bean("hikariDataSource")
-    fun hikariDataSource(): HikariDataSource =
-        HikariDataSource(HikariConfig().apply {
-            jdbcUrl = url
-            this.username = username
-            this.password = password
-            maximumPoolSize = 10
-            minimumIdle = 2
+    fun hikariDataSource(): HikariDataSource {
+        // Capture outer-class fields into locals before entering the apply block.
+        // Inside HikariConfig.apply { }, unqualified 'username'/'password' would
+        // resolve to HikariConfig's own (null) getter rather than TenantDataSourceConfig's
+        // constructor parameters — causing SCRAM auth failures when the URL has no
+        // embedded credentials (e.g. test containers).
+        val dsUrl      = url
+        val dsUsername = username
+        val dsPassword = password
+        return HikariDataSource(HikariConfig().apply {
+            jdbcUrl           = dsUrl
+            this.username     = dsUsername
+            this.password     = dsPassword
+            maximumPoolSize   = 10
+            minimumIdle       = 2
             connectionTimeout = 30_000
-            idleTimeout = 600_000
-            maxLifetime = 1_800_000
+            idleTimeout       = 600_000
+            maxLifetime       = 1_800_000
+            // Ensure every connection resolves unqualified names in the right schemas.
+            // Production roles have this set via ALTER ROLE; this covers test roles too.
+            connectionInitSql = "SET search_path = admin, documents, conversations, public"
         })
+    }
 
     @Bean
     @Primary
@@ -47,21 +60,27 @@ class TenantDataSourceConfig(
     // Those params take priority over HikariCP's username/password setters in the
     // PostgreSQL driver, so we strip them and pass credentials separately.
     @Bean
+    @ConditionalOnProperty(name = ["spring.flyway.enabled"], havingValue = "true", matchIfMissing = true)
     fun flyway(): Flyway {
         val baseUrl = url
             .replace(Regex("[?&]user=[^&]*"), "")
             .replace(Regex("[?&]password=[^&]*"), "")
             .replace(Regex("\\?$"), "")  // clean trailing '?' if all params stripped
 
+        val fwUsername = flywayUsername
+        val fwPassword = flywayPassword
         val flywayDs = HikariDataSource(HikariConfig().apply {
-            jdbcUrl = baseUrl
-            this.username = flywayUsername
-            this.password = flywayPassword
-            maximumPoolSize = 2
+            jdbcUrl           = baseUrl
+            this.username     = fwUsername
+            this.password     = fwPassword
+            maximumPoolSize   = 2
             connectionTimeout = 30_000
+            connectionInitSql = "SET search_path = admin, documents, conversations, public"
         })
         return Flyway.configure()
             .dataSource(flywayDs)
+            .schemas("admin")
+            .defaultSchema("admin")
             .locations("classpath:db/migration")
             .baselineOnMigrate(true)
             .baselineVersion("0")

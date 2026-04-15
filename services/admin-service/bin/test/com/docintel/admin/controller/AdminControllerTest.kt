@@ -3,6 +3,8 @@ package com.docintel.admin.controller
 import com.docintel.admin.BaseIntegrationTest
 import com.docintel.admin.dto.CacheStats
 import com.docintel.admin.dto.ClearCacheResponse
+import com.docintel.admin.dto.TenantQueryStats
+import com.docintel.admin.service.AnalyticsServiceClient
 import com.docintel.admin.service.CacheService
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.ninjasquad.springmockk.MockkBean
@@ -13,38 +15,29 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.*
 import java.time.Instant
 import java.util.UUID
 
-/**
- * Integration tests for AdminController.
- */
+private const val TEST_SECRET = "test-internal-secret"
+
 @AutoConfigureMockMvc
 class AdminControllerTest : BaseIntegrationTest() {
 
-    @Autowired
-    private lateinit var mockMvc: MockMvc
+    @Autowired private lateinit var mockMvc: MockMvc
+    @Autowired private lateinit var objectMapper: ObjectMapper
+    @Autowired private lateinit var jdbcTemplate: JdbcTemplate
 
-    @Autowired
-    private lateinit var objectMapper: ObjectMapper
-
-    @Autowired
-    private lateinit var jdbcTemplate: JdbcTemplate
-
-    @MockkBean
-    private lateinit var cacheService: CacheService
+    @MockkBean private lateinit var cacheService: CacheService
+    @MockkBean private lateinit var analyticsServiceClient: AnalyticsServiceClient
 
     @BeforeEach
     fun setUp() {
-        // Clean up test data
-        jdbcTemplate.execute("DELETE FROM query_log")
-        jdbcTemplate.execute("DELETE FROM chunks")
-        jdbcTemplate.execute("DELETE FROM documents")
-        jdbcTemplate.execute("DELETE FROM tenants")
+        jdbcTemplate.execute("DELETE FROM documents.documents")
+        jdbcTemplate.execute("DELETE FROM admin.tenants")
 
-        // Mock cache service responses with correct field names
         every { cacheService.getCacheStats() } returns CacheStats(
             totalEntries = 100,
             hitRate = 0.75,
@@ -52,21 +45,31 @@ class AdminControllerTest : BaseIntegrationTest() {
             oldestEntry = Instant.now().minusSeconds(3600),
             newestEntry = Instant.now()
         )
-        
         every { cacheService.clearAllCache() } returns ClearCacheResponse(
-            success = true,
-            entriesCleared = 100,
-            tenantId = null
+            success = true, entriesCleared = 100, tenantId = null
         )
-        
         every { cacheService.clearTenantCache(any()) } answers {
-            ClearCacheResponse(
-                success = true,
-                entriesCleared = 10,
-                tenantId = firstArg()
-            )
+            ClearCacheResponse(success = true, entriesCleared = 10, tenantId = firstArg())
         }
+        every { analyticsServiceClient.getTenantStats(any()) } returns TenantQueryStats(
+            totalQueries = 3L, queriesLast24h = 1L, cacheHitRate = 0.0
+        )
     }
+
+    // All test endpoints are /internal/**, which InternalAuthFilter validates via HMAC.
+    // Token = HMAC(":tenantId:", secret) matching the service-token convention.
+    private fun internalToken(tenantId: String = "") =
+        com.docintel.admin.filter.HmacUtils.compute(":$tenantId:", TEST_SECRET)
+
+    private fun get(url: String, tenantId: String = "") =
+        MockMvcRequestBuilders.get(url)
+            .header("X-Internal-Service-Token", internalToken(tenantId))
+            .apply { if (tenantId.isNotBlank()) header("X-Tenant-Id", tenantId) }
+
+    private fun post(url: String, tenantId: String = "") =
+        MockMvcRequestBuilders.post(url)
+            .header("X-Internal-Service-Token", internalToken(tenantId))
+            .apply { if (tenantId.isNotBlank()) header("X-Tenant-Id", tenantId) }
 
     @Test
     fun `GET health should return system health status`() {
@@ -76,16 +79,14 @@ class AdminControllerTest : BaseIntegrationTest() {
     }
 
     @Test
-    fun `GET stats should return system statistics`() {
-        // Given - Insert some test data
+    fun `GET stats should return correct counts`() {
         insertTestData()
 
-        // When & Then
         mockMvc.perform(get("/internal/stats"))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.totalDocuments").value(3))
-            .andExpect(jsonPath("$.totalChunks").value(6))
-            .andExpect(jsonPath("$.totalQueries").value(5))
+            .andExpect(jsonPath("$.totalChunks").value(6))   // SUM(chunk_count) = 2+2+2
+            .andExpect(jsonPath("$.totalQueries").value(0))  // always 0 at system level
     }
 
     @Test
@@ -123,10 +124,8 @@ class AdminControllerTest : BaseIntegrationTest() {
 
     @Test
     fun `GET tenants should return list of tenants`() {
-        // Given
         insertTestData()
 
-        // When & Then
         mockMvc.perform(get("/internal/tenants"))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$").isArray)
@@ -141,16 +140,14 @@ class AdminControllerTest : BaseIntegrationTest() {
     }
 
     @Test
-    fun `GET tenant usage should return usage statistics`() {
-        // Given
+    fun `GET tenant usage delegates query stats to analytics-service`() {
         insertTestData()
 
-        // When & Then
         mockMvc.perform(get("/internal/tenants/tenant-1/usage"))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.tenantId").value("tenant-1"))
             .andExpect(jsonPath("$.documentCount").value(2))
-            .andExpect(jsonPath("$.chunkCount").value(4))
+            .andExpect(jsonPath("$.chunkCount").value(4))  // SUM(chunk_count) for tenant-1
             .andExpect(jsonPath("$.totalQueries").value(3))
     }
 
@@ -159,81 +156,37 @@ class AdminControllerTest : BaseIntegrationTest() {
         mockMvc.perform(get("/internal/tenants/non-existent/usage"))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.documentCount").value(0))
-            .andExpect(jsonPath("$.totalQueries").value(0))
+            .andExpect(jsonPath("$.totalQueries").value(3))  // from mocked analytics client
     }
 
     @Test
-    fun `GET tenant usage should include cache hit rate`() {
-        // Given
+    fun `GET tenant usage includes cacheHitRate from analytics-service`() {
         insertTestData()
-        // Add cached query
-        jdbcTemplate.update(
-            "INSERT INTO query_log (tenant_id, query, cached) VALUES (?, ?, ?)",
-            "tenant-1", "cached query", true
+        every { analyticsServiceClient.getTenantStats("tenant-1") } returns TenantQueryStats(
+            totalQueries = 10L, queriesLast24h = 5L, cacheHitRate = 0.5
         )
 
-        // When & Then
         mockMvc.perform(get("/internal/tenants/tenant-1/usage"))
             .andExpect(status().isOk)
-            .andExpect(jsonPath("$.cacheHitRate").exists())
+            .andExpect(jsonPath("$.cacheHitRate").value(0.5))
     }
 
-    // Helper to insert test data
     private fun insertTestData() {
-        // Insert tenants
-        jdbcTemplate.update("INSERT INTO tenants (id, name) VALUES (?, ?)", "tenant-1", "Tenant One")
-        jdbcTemplate.update("INSERT INTO tenants (id, name) VALUES (?, ?)", "tenant-2", "Tenant Two")
+        jdbcTemplate.update("INSERT INTO admin.tenants (id, name) VALUES (?, ?)", "tenant-1", "Tenant One")
+        jdbcTemplate.update("INSERT INTO admin.tenants (id, name) VALUES (?, ?)", "tenant-2", "Tenant Two")
 
-        // Insert documents
-        val doc1Id = UUID.randomUUID()
-        val doc2Id = UUID.randomUUID()
-        val doc3Id = UUID.randomUUID()
-        
+        // chunk_count stored directly in documents.documents
         jdbcTemplate.update(
-            "INSERT INTO documents (id, tenant_id, filename, status) VALUES (?, ?, ?, ?)",
-            doc1Id, "tenant-1", "doc1.txt", "COMPLETED"
+            "INSERT INTO documents.documents (id, tenant_id, filename, status, chunk_count) VALUES (?, ?, ?, ?, ?)",
+            UUID.randomUUID(), "tenant-1", "doc1.txt", "COMPLETED", 2
         )
         jdbcTemplate.update(
-            "INSERT INTO documents (id, tenant_id, filename, status) VALUES (?, ?, ?, ?)",
-            doc2Id, "tenant-1", "doc2.txt", "COMPLETED"
+            "INSERT INTO documents.documents (id, tenant_id, filename, status, chunk_count) VALUES (?, ?, ?, ?, ?)",
+            UUID.randomUUID(), "tenant-1", "doc2.txt", "COMPLETED", 2
         )
         jdbcTemplate.update(
-            "INSERT INTO documents (id, tenant_id, filename, status) VALUES (?, ?, ?, ?)",
-            doc3Id, "tenant-2", "doc3.txt", "PENDING"
+            "INSERT INTO documents.documents (id, tenant_id, filename, status, chunk_count) VALUES (?, ?, ?, ?, ?)",
+            UUID.randomUUID(), "tenant-2", "doc3.txt", "PENDING", 2
         )
-
-        // Insert chunks
-        repeat(2) { i ->
-            jdbcTemplate.update(
-                "INSERT INTO chunks (id, document_id, tenant_id, content, chunk_index) VALUES (?, ?, ?, ?, ?)",
-                UUID.randomUUID(), doc1Id, "tenant-1", "Chunk $i content", i
-            )
-        }
-        repeat(2) { i ->
-            jdbcTemplate.update(
-                "INSERT INTO chunks (id, document_id, tenant_id, content, chunk_index) VALUES (?, ?, ?, ?, ?)",
-                UUID.randomUUID(), doc2Id, "tenant-1", "Chunk $i content", i
-            )
-        }
-        repeat(2) { i ->
-            jdbcTemplate.update(
-                "INSERT INTO chunks (id, document_id, tenant_id, content, chunk_index) VALUES (?, ?, ?, ?, ?)",
-                UUID.randomUUID(), doc3Id, "tenant-2", "Chunk $i content", i
-            )
-        }
-
-        // Insert query logs
-        repeat(3) {
-            jdbcTemplate.update(
-                "INSERT INTO query_log (tenant_id, query, cached) VALUES (?, ?, ?)",
-                "tenant-1", "Query $it", false
-            )
-        }
-        repeat(2) {
-            jdbcTemplate.update(
-                "INSERT INTO query_log (tenant_id, query, cached) VALUES (?, ?, ?)",
-                "tenant-2", "Query $it", false
-            )
-        }
     }
 }

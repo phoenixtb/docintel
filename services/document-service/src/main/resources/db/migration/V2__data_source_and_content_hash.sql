@@ -1,21 +1,16 @@
--- Phase 1 data-pipeline redesign:
---   1. Add data_sources table for tracking external data source loads as
---      first-class lifecycle objects (HuggingFace, S3, etc.).
---   2. Add content_hash and data_source_id to documents for content-addressed
---      dedup and data-source cascading deletes.
---
--- Uses IF NOT EXISTS / ADD COLUMN IF NOT EXISTS so this migration is safe to
--- apply on fresh installs where init.sql has already created these objects.
+-- Flyway V2: data_sources table and content_hash column
+-- IF NOT EXISTS / ADD COLUMN IF NOT EXISTS — safe on installations where
+-- V1 or init.sql already created these objects.
 
 CREATE TABLE IF NOT EXISTS data_sources (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(64)  NOT NULL REFERENCES tenants(id),
-    source_type     VARCHAR(64)  NOT NULL,
-    source_config   JSONB,
-    status          VARCHAR(32)  NOT NULL DEFAULT 'LOADING',
-    document_count  INT          NOT NULL DEFAULT 0,
-    created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    completed_at    TIMESTAMP WITH TIME ZONE
+    id             UUID PRIMARY KEY,
+    tenant_id      VARCHAR(64) NOT NULL,
+    source_type    VARCHAR(64) NOT NULL,
+    source_config  JSONB,
+    status         VARCHAR(32) NOT NULL DEFAULT 'LOADING',
+    document_count INT         NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at   TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_data_sources_tenant ON data_sources(tenant_id);
@@ -26,12 +21,13 @@ ALTER TABLE documents
 
 CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(tenant_id, content_hash);
 
--- RLS policy for data_sources (docintel_ingestion has BYPASSRLS so no policy needed for it)
+-- RLS for data_sources
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
-        WHERE tablename = 'data_sources'
+        WHERE schemaname = 'documents'
+          AND tablename  = 'data_sources'
           AND policyname = 'tenant_isolation_data_sources'
     ) THEN
         ALTER TABLE data_sources ENABLE ROW LEVEL SECURITY;
@@ -46,5 +42,12 @@ BEGIN
     END IF;
 END$$;
 
--- Ensure docintel_ingestion has DML access to the new table
-GRANT SELECT, INSERT, UPDATE, DELETE ON data_sources TO docintel_ingestion;
+-- docintel_documents service role access
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'docintel_documents') THEN
+        EXECUTE 'GRANT ALL ON data_sources TO docintel_documents';
+        EXECUTE 'GRANT ALL ON documents TO docintel_documents';
+        EXECUTE 'GRANT ALL ON chunks TO docintel_documents';
+    END IF;
+END $$;

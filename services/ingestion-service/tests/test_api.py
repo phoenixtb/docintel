@@ -92,7 +92,6 @@ def test_delete_document_vectors_returns_200(client: TestClient) -> None:
     did = str(uuid.uuid4())
     with (
         patch("src.api.main.delete_document_from_store") as mock_store,
-        patch("src.api.main.delete_document_chunks") as mock_chunks,
         patch("src.api.main.invalidate_cache_for_tenant") as mock_cache,
     ):
         response = client.delete(f"/vectors/{tid}/{did}")
@@ -102,7 +101,6 @@ def test_delete_document_vectors_returns_200(client: TestClient) -> None:
     assert body["deleted"] is True
     assert body["document_id"] == did
     mock_store.assert_called_once_with(tid, did)
-    mock_chunks.assert_called_once_with(did)
     mock_cache.assert_called_once_with(tid)
 
 
@@ -111,7 +109,6 @@ def test_delete_document_vectors_cross_tenant_rejected(client: TestClient) -> No
     app.dependency_overrides[get_tenant_id] = lambda: "tenant-a"
     with (
         patch("src.api.main.delete_document_from_store"),
-        patch("src.api.main.delete_document_chunks"),
         patch("src.api.main.invalidate_cache_for_tenant"),
     ):
         response = client.delete(f"/vectors/tenant-b/{uuid.uuid4()}")
@@ -128,7 +125,6 @@ def test_delete_tenant_vectors_returns_200(client: TestClient) -> None:
     tid = "test-tenant"
     with (
         patch("src.api.main.delete_tenant_from_store") as mock_store,
-        patch("src.api.main.delete_tenant_chunks") as mock_chunks,
         patch("src.api.main.invalidate_cache_for_tenant") as mock_cache,
         patch("src.api.main.invalidate_pipeline_cache") as mock_pipeline,
     ):
@@ -139,6 +135,5 @@ def test_delete_tenant_vectors_returns_200(client: TestClient) -> None:
     assert body["deleted"] is True
     assert body["tenant_id"] == tid
     mock_store.assert_called_once_with(tid)
-    mock_chunks.assert_called_once_with(tid)
     mock_cache.assert_called_once_with(tid)
     mock_pipeline.assert_called_once_with(tid)

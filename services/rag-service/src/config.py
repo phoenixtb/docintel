@@ -1,15 +1,19 @@
 """
 Service configuration — single source of truth for all env vars.
 
-All model inference runs through Ollama (GPU/Metal on Apple Silicon, vLLM-compatible in prod).
-To switch to vLLM or any OpenAI-compatible endpoint, update OLLAMA_BASE_URL and model names.
+All model inference runs through an OpenAI-compatible endpoint.
+Switch engines by updating LLM_CHAT_URL / LLM_EMBED_URL:
+  LMForge (macOS/Apple Silicon):  LLM_CHAT_URL=http://host.docker.internal:11430/v1
+  Ollama (any platform):          LLM_CHAT_URL=http://host.docker.internal:11434/v1
+  vLLM (Linux/NVIDIA):            LLM_CHAT_URL=http://host:8000/v1
+  LM Studio (Windows/macOS):      LLM_CHAT_URL=http://host.docker.internal:1234/v1
 
 Model tiers:
-  LLM          → OLLAMA_LLM_MODEL         (chat generation, streaming)
-  Embeddings   → OLLAMA_EMBED_MODEL       (dense vectors, Metal-accelerated via Ollama)
-  Sparse (BM25)→ fastembed local          (no server, CPU, lightweight)
-  Reranker     → RERANKER_MODEL           (cross-encoder, CPU-local — no Ollama reranker API)
-  Domain router→ RAG_DOMAIN_ROUTER_MODEL  (optional, disabled by default)
+  LLM          → LLM_MODEL            (chat generation, streaming)
+  Embeddings   → LLM_EMBED_MODEL      (dense vectors via Infinity or engine embed endpoint)
+  Sparse (BM25)→ fastembed local       (no server, CPU, lightweight)
+  Reranker     → RERANKER_MODEL        (cross-encoder, CPU-local via Infinity)
+  Domain router→ RAG_DOMAIN_ROUTER_MODEL (optional, disabled by default)
 """
 
 from functools import lru_cache
@@ -28,26 +32,44 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "documents"
     qdrant_cache_collection: str = "response_cache"
-    # Must match ollama_embed_dim. Update both together when switching embed model.
+    # Must match llm_embed_dim. Update both together when switching embed model.
     qdrant_embedding_dim: int = 768
     # Set QDRANT_QUANTIZATION=false to disable INT8 scalar quantization (e.g. during benchmarking).
     qdrant_quantization: bool = True
 
-    # ── Ollama (all inference runs through Ollama) ────────────────────────────
-    # In prod: point to vLLM or any OpenAI-compatible endpoint via these env vars.
-    ollama_base_url: str = "http://host.docker.internal:11434"
+    # ── LLM Engine — OpenAI-compatible endpoint ───────────────────────────────
+    # Chat completions (generation, streaming, thinking mode)
+    llm_chat_url: str = "http://host.docker.internal:11434/v1"  # Ollama default
+    # Embeddings — split from chat so LMForge (chat) + Infinity (embed) is first-class
+    llm_embed_url: str = "http://infinity:7997/v1"              # Infinity (Docker)
+    # API key — ignored by local engines; set for hosted APIs (OpenAI, Anthropic, etc.)
+    llm_api_key: str = "none"
 
     # LLM — chat generation and streaming
-    ollama_llm_model: str = "qwen3.5:4b"
-    ollama_llm_fallback: str = "phi3:mini"
+    llm_model: str = "qwen3.5:4b"
+    llm_fallback_model: str = "phi3:mini"
 
     # Embeddings — dense vectors (768-dim). Must match qdrant_embedding_dim.
-    ollama_embed_model: str = "nomic-embed-text"
-    ollama_embed_dim: int = 768
+    llm_embed_model: str = "nomic-embed-text"
+    llm_embed_dim: int = 768
 
     # LLM generation settings
-    ollama_llm_temperature: float = 0.1
-    ollama_llm_max_tokens: int = 4096
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 4096
+    # Fast model used only for async conversation summarization (not main queries).
+    llm_expansion_model: str = "qwen3:1.7b"
+
+    # ── Conversation context compression ──────────────────────────────────────
+    # Anchored iterative summarization — compresses evicted turns into a rolling
+    # summary, keeping only the last N messages verbatim for the LLM.
+    conversation_summary_threshold: int = 8   # compress when total messages exceed this
+    conversation_verbatim_recent: int = 4     # always keep last N messages verbatim
+
+    # Context windows.
+    #   system prompt + 5-10 retrieved chunks (~3k tokens) + history + question + answer.
+    # Override via LLM_CTX / LLM_THINKING_CTX in .env.
+    llm_ctx: int = 16384          # standard queries
+    llm_thinking_ctx: int = 32768  # thinking mode (thinking block eats extra context)
 
     # ── Reranker — Infinity server ────────────────────────────────────────────
     # Infinity serves cross-encoder models via OpenAI-compatible API.
@@ -68,10 +90,9 @@ class Settings(BaseSettings):
 
     # ── Concurrency ───────────────────────────────────────────────────────────
     # Max concurrent LLM generation tasks across ALL tenants.
-    # Ollama (single GPU, serial queue): 2-4 is optimal — more just queues at Ollama.
-    # OpenAI / Anthropic API: set to 20-50+ (they handle concurrency server-side;
-    #   rate limits are TPM/RPM-based, not connection-count-based).
-    # vLLM with tensor-parallelism: set to (gpu_count * 4) or so.
+    # Local engines (single GPU, serial): 2-4 is optimal.
+    # Hosted APIs (OpenAI, Anthropic): 20-50+ (rate-limited server-side by TPM/RPM).
+    # vLLM with tensor-parallelism: gpu_count * 4 or higher.
     llm_concurrency_limit: int = 3
 
     # ── Semantic caching ──────────────────────────────────────────────────────
@@ -84,7 +105,6 @@ class Settings(BaseSettings):
 
     # ── Query expansion (optional, disabled by default) ───────────────────────
     use_query_expansion: bool = False
-    ollama_expansion_model: str = "qwen3:1.7b"
 
     # ── Langfuse tracing ──────────────────────────────────────────────────────
     langfuse_public_key: str = ""
@@ -107,15 +127,6 @@ class Settings(BaseSettings):
     service_version: str = "0.1.0"
 
     # ── Derived properties ────────────────────────────────────────────────────
-
-    @property
-    def litellm_model(self) -> str:
-        """LiteLLM-prefixed model name (for any litellm usage)."""
-        return f"ollama/{self.ollama_llm_model}"
-
-    @property
-    def litellm_fallbacks_list(self) -> list[str]:
-        return [f"ollama/{self.ollama_llm_fallback}"]
 
     @property
     def langfuse_enabled(self) -> bool:

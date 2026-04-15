@@ -1,190 +1,27 @@
 -- DocIntel PostgreSQL Initialization
--- ==================================
+-- ====================================
+-- Runs once when the postgres container initializes a fresh volume.
+-- Creates schemas, tables, roles, RLS policies, and seed data.
+-- Service-specific schema evolution is handled by each service's Flyway migrations.
 
--- Create Langfuse database (separate from main app)
+-- Separate databases for third-party services (Zitadel, Langfuse manage their own schemas)
 CREATE DATABASE langfuse;
-
--- Create Zitadel database (identity provider — Zitadel manages its own schema)
 CREATE DATABASE zitadel;
 
--- Enable extensions
+-- Extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- =============================================================================
--- Application Roles — created by 00-roles.sh (parameterized with env vars)
+-- Schemas — one per service domain
 -- =============================================================================
--- docintel         (POSTGRES_USER) — superuser, bypasses RLS; used by Flyway/Zitadel
--- docintel_app     — non-superuser, RLS enforced; used by document/rag/admin services
--- docintel_ingestion — BYPASSRLS; used by ingestion-service to write across all tenants
+CREATE SCHEMA IF NOT EXISTS admin;
+CREATE SCHEMA IF NOT EXISTS documents;
+CREATE SCHEMA IF NOT EXISTS conversations;
 
 -- =============================================================================
--- Tenants Table
+-- Shared utility — triggers in each schema call this function
 -- =============================================================================
-CREATE TABLE tenants (
-    id VARCHAR(64) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    quota_documents INT DEFAULT 1000,
-    quota_queries_per_day INT DEFAULT 10000,
-    settings JSONB DEFAULT '{}',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- =============================================================================
--- Platform Settings Table
--- =============================================================================
--- Key-value store for platform-wide configuration.
--- llm_model = null (JSON null) means "Tenant Choice" — each tenant uses its own preference.
--- llm_model = "qwen3.5:4b" overrides all tenants unconditionally.
-CREATE TABLE platform_settings (
-    key        VARCHAR(128) PRIMARY KEY,
-    value      JSONB        NOT NULL DEFAULT 'null',
-    updated_at TIMESTAMPTZ  DEFAULT NOW()
-);
-
--- Seed: null = "Tenant Choice" (no global override)
-INSERT INTO platform_settings (key, value) VALUES ('llm_model', 'null');
-
--- platform_settings is not tenant-scoped — only the superuser (docintel) and
--- admin-service (connecting as docintel_app with platform_admin role) may write it.
-GRANT SELECT, INSERT, UPDATE ON platform_settings TO docintel_app;
-
--- =============================================================================
--- Data Sources Table
--- Tracks external data source loads (HuggingFace, S3, etc.) as first-class
--- lifecycle objects. Documents can be associated with a data source for bulk
--- deletion, re-loading, and observability.
--- =============================================================================
-CREATE TABLE data_sources (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(64)  NOT NULL REFERENCES tenants(id),
-    source_type     VARCHAR(64)  NOT NULL,  -- 'huggingface', 's3', 'manual', ...
-    source_config   JSONB,                  -- { dataset_key, samples, ... }
-    status          VARCHAR(32)  NOT NULL DEFAULT 'LOADING',
-    document_count  INT          NOT NULL DEFAULT 0,
-    created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    completed_at    TIMESTAMP WITH TIME ZONE
-);
-
-CREATE INDEX idx_data_sources_tenant ON data_sources(tenant_id);
-
--- =============================================================================
--- Documents Table
--- =============================================================================
-CREATE TABLE documents (
-    id UUID PRIMARY KEY,
-    tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id),
-    filename VARCHAR(255) NOT NULL,
-    content_type VARCHAR(100),
-    file_size BIGINT NOT NULL,
-    file_path VARCHAR(500) NOT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
-    chunk_count INT DEFAULT 0,
-    chunking_config JSONB,
-    metadata JSONB DEFAULT '{}',
-    error_message TEXT,
-    -- Content-addressed identity: full 64-char sha256 hex for observability/dedup queries.
-    -- The id column itself is UUID(sha256[:32]) — content_hash is the full digest.
-    content_hash VARCHAR(64),
-    -- Null for manual browser uploads; set for data-loader-originated documents.
-    data_source_id UUID REFERENCES data_sources(id) ON DELETE CASCADE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_documents_tenant ON documents(tenant_id);
-CREATE INDEX idx_documents_status ON documents(status);
-CREATE INDEX idx_documents_created ON documents(created_at);
-CREATE INDEX idx_documents_content_hash ON documents(tenant_id, content_hash);
-
--- =============================================================================
--- Chunks Table (metadata only - vectors stored in Qdrant)
--- =============================================================================
-CREATE TABLE chunks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id),
-    content TEXT NOT NULL,
-    chunk_index INT NOT NULL,
-    start_char INT,
-    end_char INT,
-    token_count INT,
-    metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_chunks_document ON chunks(document_id);
-CREATE INDEX idx_chunks_tenant ON chunks(tenant_id);
-
--- =============================================================================
--- Query Audit Log
--- =============================================================================
-CREATE TABLE query_log (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id),
-    user_id VARCHAR(64),
-    question TEXT NOT NULL,
-    answer TEXT,
-    source_chunk_ids UUID[],
-    cached BOOLEAN DEFAULT FALSE,
-    latency_ms INT,
-    model_used VARCHAR(100),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_query_log_tenant ON query_log(tenant_id);
-CREATE INDEX idx_query_log_created ON query_log(created_at);
-CREATE INDEX idx_query_log_tenant_created ON query_log(tenant_id, created_at);
-
--- =============================================================================
--- Users Table (simplified for demo)
--- =============================================================================
-CREATE TABLE users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(64) REFERENCES tenants(id),
-    email VARCHAR(255) NOT NULL UNIQUE,
-    roles TEXT[] DEFAULT '{}',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_users_tenant ON users(tenant_id);
-
--- =============================================================================
--- Conversations Table (chat history)
--- =============================================================================
-CREATE TABLE conversations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(id),
-    user_id VARCHAR(64),
-    title VARCHAR(500) NOT NULL DEFAULT 'New Conversation',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_conversations_tenant ON conversations(tenant_id);
-CREATE INDEX idx_conversations_user ON conversations(tenant_id, user_id);
-CREATE INDEX idx_conversations_updated ON conversations(updated_at DESC);
-
--- =============================================================================
--- Messages Table (conversation messages)
--- =============================================================================
-CREATE TABLE messages (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
-    content TEXT NOT NULL,
-    sources JSONB,
-    metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_messages_conversation ON messages(conversation_id);
-CREATE INDEX idx_messages_created ON messages(conversation_id, created_at);
-
--- =============================================================================
--- Update Triggers
--- =============================================================================
-CREATE OR REPLACE FUNCTION update_updated_at()
+CREATE OR REPLACE FUNCTION public.update_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
     NEW.updated_at = CURRENT_TIMESTAMP;
@@ -192,124 +29,318 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER documents_updated_at
-    BEFORE UPDATE ON documents
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+-- =============================================================================
+-- admin schema — owned by admin-service
+-- Holds multi-tenant identity and platform-wide configuration.
+-- =============================================================================
+
+CREATE TABLE admin.tenants (
+    id                    VARCHAR(64) PRIMARY KEY,
+    name                  VARCHAR(255) NOT NULL,
+    quota_documents       INT DEFAULT 1000,
+    quota_queries_per_day INT DEFAULT 10000,
+    settings              JSONB DEFAULT '{}',
+    created_at            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE admin.platform_settings (
+    key        VARCHAR(128) PRIMARY KEY,
+    value      JSONB        NOT NULL DEFAULT 'null',
+    updated_at TIMESTAMPTZ  DEFAULT NOW()
+);
+
+-- null = "Tenant Choice" (no global LLM override)
+INSERT INTO admin.platform_settings (key, value) VALUES ('llm_model', 'null');
+
+CREATE TABLE admin.users (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id  VARCHAR(64) REFERENCES admin.tenants(id),
+    email      VARCHAR(255) NOT NULL UNIQUE,
+    roles      TEXT[] DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_admin_users_tenant ON admin.users(tenant_id);
 
 CREATE TRIGGER tenants_updated_at
-    BEFORE UPDATE ON tenants
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+    BEFORE UPDATE ON admin.tenants
+    FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+-- =============================================================================
+-- documents schema — owned by document-service
+-- Tracks ingested files and their chunks (metadata only; vectors in Qdrant).
+-- =============================================================================
+
+CREATE TABLE documents.data_sources (
+    id             UUID PRIMARY KEY,
+    tenant_id      VARCHAR(64) NOT NULL REFERENCES admin.tenants(id),
+    source_type    VARCHAR(64) NOT NULL,
+    source_config  JSONB,
+    status         VARCHAR(32) NOT NULL DEFAULT 'LOADING',
+    document_count INT         NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at   TIMESTAMPTZ
+);
+
+CREATE INDEX idx_data_sources_tenant ON documents.data_sources(tenant_id);
+
+CREATE TABLE documents.documents (
+    id             UUID PRIMARY KEY,
+    tenant_id      VARCHAR(64)  NOT NULL REFERENCES admin.tenants(id),
+    filename       VARCHAR(255) NOT NULL,
+    content_type   VARCHAR(100),
+    file_size      BIGINT       NOT NULL,
+    file_path      VARCHAR(500) NOT NULL,
+    status         VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
+    chunk_count    INT DEFAULT 0,
+    chunking_config JSONB,
+    metadata       JSONB DEFAULT '{}',
+    error_message  TEXT,
+    content_hash   VARCHAR(64),
+    data_source_id UUID REFERENCES documents.data_sources(id) ON DELETE CASCADE,
+    created_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_documents_tenant       ON documents.documents(tenant_id);
+CREATE INDEX idx_documents_status       ON documents.documents(status);
+CREATE INDEX idx_documents_created      ON documents.documents(created_at);
+CREATE INDEX idx_documents_content_hash ON documents.documents(tenant_id, content_hash);
+
+CREATE TABLE documents.chunks (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID        NOT NULL REFERENCES documents.documents(id) ON DELETE CASCADE,
+    tenant_id   VARCHAR(64) NOT NULL REFERENCES admin.tenants(id),
+    content     TEXT        NOT NULL,
+    chunk_index INT         NOT NULL,
+    start_char  INT,
+    end_char    INT,
+    token_count INT,
+    metadata    JSONB DEFAULT '{}',
+    created_at  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_chunks_document ON documents.chunks(document_id);
+CREATE INDEX idx_chunks_tenant   ON documents.chunks(tenant_id);
+
+CREATE TRIGGER documents_updated_at
+    BEFORE UPDATE ON documents.documents
+    FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+-- =============================================================================
+-- conversations schema — owned by rag-service
+-- Holds chat sessions and their messages.
+-- =============================================================================
+
+CREATE TABLE conversations.conversations (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id           VARCHAR(64) NOT NULL REFERENCES admin.tenants(id),
+    user_id             VARCHAR(64),
+    title               VARCHAR(500) NOT NULL DEFAULT 'New Conversation',
+    session_summary     TEXT,
+    summary_upto_count  INTEGER NOT NULL DEFAULT 0,
+    created_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_conversations_tenant  ON conversations.conversations(tenant_id);
+CREATE INDEX idx_conversations_user    ON conversations.conversations(tenant_id, user_id);
+CREATE INDEX idx_conversations_updated ON conversations.conversations(updated_at DESC);
+
+CREATE TABLE conversations.messages (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id UUID NOT NULL REFERENCES conversations.conversations(id) ON DELETE CASCADE,
+    role            VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'context_summary')),
+    content         TEXT NOT NULL,
+    sources         JSONB,
+    metadata        JSONB DEFAULT '{}',
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_messages_conversation ON conversations.messages(conversation_id);
+CREATE INDEX idx_messages_created      ON conversations.messages(conversation_id, created_at);
 
 CREATE TRIGGER conversations_updated_at
-    BEFORE UPDATE ON conversations
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+    BEFORE UPDATE ON conversations.conversations
+    FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
 
 -- =============================================================================
--- Grant table permissions
--- =============================================================================
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO docintel_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO docintel_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO docintel_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO docintel_app;
-
--- docintel_ingestion: full DML access (BYPASSRLS handles tenant isolation at role level)
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO docintel_ingestion;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO docintel_ingestion;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO docintel_ingestion;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO docintel_ingestion;
-
--- =============================================================================
--- Row-Level Security (RLS)
--- All tenant-scoped tables enforce isolation via SET LOCAL app.current_tenant
--- FORCE ROW LEVEL SECURITY applies even to table owners (docintel superuser bypasses
--- only if they are a PostgreSQL superuser AND the table was created by them,
--- but docintel_app is never a superuser so RLS always applies to it)
+-- RLS policies — tenant isolation enforced for all service roles
+-- current_setting('app.current_tenant') is set per-transaction by the application.
+-- platform_admin role bypasses isolation to see all tenants.
 -- =============================================================================
 
-ALTER TABLE data_sources  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE data_sources  FORCE ROW LEVEL SECURITY;
-ALTER TABLE documents     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE documents     FORCE ROW LEVEL SECURITY;
-ALTER TABLE chunks        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE chunks        FORCE ROW LEVEL SECURITY;
-ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE conversations FORCE ROW LEVEL SECURITY;
-ALTER TABLE messages      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE messages      FORCE ROW LEVEL SECURITY;
-ALTER TABLE query_log     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE query_log     FORCE ROW LEVEL SECURITY;
+-- admin schema
+ALTER TABLE admin.tenants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin.tenants FORCE ROW LEVEL SECURITY;
 
--- Messages isolation is via conversation (JOIN), but add direct policy too
--- For messages we check via the conversations table through the FK
-
--- RLS policies: platform_admin sees all rows; others are scoped to their tenant.
--- current_setting(..., true) returns NULL when not set — safe for boolean short-circuit.
-CREATE POLICY tenant_isolation_data_sources ON data_sources
-    AS PERMISSIVE FOR ALL TO docintel_app
-    USING (
-        current_setting('app.user_role', true) = 'platform_admin'
-        OR tenant_id = current_setting('app.current_tenant', true)
-    );
-
-CREATE POLICY tenant_isolation_documents ON documents
-    AS PERMISSIVE FOR ALL TO docintel_app
-    USING (
-        current_setting('app.user_role', true) = 'platform_admin'
-        OR tenant_id = current_setting('app.current_tenant', true)
-    );
-
-CREATE POLICY tenant_isolation_chunks ON chunks
-    AS PERMISSIVE FOR ALL TO docintel_app
-    USING (
-        current_setting('app.user_role', true) = 'platform_admin'
-        OR tenant_id = current_setting('app.current_tenant', true)
-    );
-
-CREATE POLICY tenant_isolation_conversations ON conversations
-    AS PERMISSIVE FOR ALL TO docintel_app
-    USING (
-        current_setting('app.user_role', true) = 'platform_admin'
-        OR tenant_id = current_setting('app.current_tenant', true)
-    );
-
--- Messages don't have tenant_id directly; isolate by JOIN to conversations
-CREATE POLICY tenant_isolation_messages ON messages
-    AS PERMISSIVE FOR ALL TO docintel_app
-    USING (
-        current_setting('app.user_role', true) = 'platform_admin'
-        OR EXISTS (
-            SELECT 1 FROM conversations c
-            WHERE c.id = messages.conversation_id
-              AND c.tenant_id = current_setting('app.current_tenant', true)
-        )
-    );
-
-CREATE POLICY tenant_isolation_query_log ON query_log
-    AS PERMISSIVE FOR ALL TO docintel_app
-    USING (
-        current_setting('app.user_role', true) = 'platform_admin'
-        OR tenant_id = current_setting('app.current_tenant', true)
-    );
-
--- tenants table: platform_admin sees all; others see their own tenant row only
-ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
-ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
-
-CREATE POLICY tenant_isolation_tenants ON tenants
+CREATE POLICY tenant_isolation_tenants ON admin.tenants
     AS PERMISSIVE FOR ALL TO docintel_app
     USING (
         current_setting('app.user_role', true) = 'platform_admin'
         OR id = current_setting('app.current_tenant', true)
     );
 
+CREATE POLICY tenant_isolation_tenants_admin ON admin.tenants
+    AS PERMISSIVE FOR ALL TO docintel_admin
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR id = current_setting('app.current_tenant', true)
+    );
+
+-- documents schema
+ALTER TABLE documents.data_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents.data_sources FORCE ROW LEVEL SECURITY;
+ALTER TABLE documents.documents    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents.documents    FORCE ROW LEVEL SECURITY;
+ALTER TABLE documents.chunks       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents.chunks       FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation_data_sources ON documents.data_sources
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
+
+CREATE POLICY tenant_isolation_data_sources_doc ON documents.data_sources
+    AS PERMISSIVE FOR ALL TO docintel_documents
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
+
+CREATE POLICY tenant_isolation_documents ON documents.documents
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
+
+CREATE POLICY tenant_isolation_documents_doc ON documents.documents
+    AS PERMISSIVE FOR ALL TO docintel_documents
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
+
+CREATE POLICY tenant_isolation_chunks ON documents.chunks
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
+
+CREATE POLICY tenant_isolation_chunks_doc ON documents.chunks
+    AS PERMISSIVE FOR ALL TO docintel_documents
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
+
+-- conversations schema
+ALTER TABLE conversations.conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations.conversations FORCE ROW LEVEL SECURITY;
+ALTER TABLE conversations.messages      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations.messages      FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation_conversations ON conversations.conversations
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
+
+CREATE POLICY tenant_isolation_conversations_rag ON conversations.conversations
+    AS PERMISSIVE FOR ALL TO docintel_rag
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR tenant_id = current_setting('app.current_tenant', true)
+    );
+
+CREATE POLICY tenant_isolation_messages ON conversations.messages
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR EXISTS (
+            SELECT 1 FROM conversations.conversations c
+            WHERE c.id = messages.conversation_id
+              AND c.tenant_id = current_setting('app.current_tenant', true)
+        )
+    );
+
+CREATE POLICY tenant_isolation_messages_rag ON conversations.messages
+    AS PERMISSIVE FOR ALL TO docintel_rag
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR EXISTS (
+            SELECT 1 FROM conversations.conversations c
+            WHERE c.id = messages.conversation_id
+              AND c.tenant_id = current_setting('app.current_tenant', true)
+        )
+    );
+
 -- =============================================================================
--- Seed Tenants
+-- Role grants
+-- Roles are created by 00-roles.sh (parameterized with env var passwords).
 -- =============================================================================
--- 'default' is the fallback tenant_id for platform admins (no real tenant scope)
-INSERT INTO tenants (id, name) VALUES ('default', 'DocIntel Platform');
 
-INSERT INTO tenants (id, name) VALUES ('alpha', 'Alpha Corp');
+-- docintel_admin: owns admin schema, read-only on documents.documents for stats
+GRANT USAGE ON SCHEMA admin, documents, public TO docintel_admin;
+GRANT ALL   ON ALL TABLES    IN SCHEMA admin TO docintel_admin;
+GRANT ALL   ON ALL SEQUENCES IN SCHEMA admin TO docintel_admin;
+GRANT SELECT ON documents.documents TO docintel_admin;
+ALTER DEFAULT PRIVILEGES IN SCHEMA admin GRANT ALL ON TABLES    TO docintel_admin;
+ALTER DEFAULT PRIVILEGES IN SCHEMA admin GRANT ALL ON SEQUENCES TO docintel_admin;
+GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_admin;
 
-INSERT INTO tenants (id, name) VALUES ('beta', 'Beta Corp');
+-- docintel_documents: owns documents schema, reads admin.tenants for FK validation
+GRANT USAGE ON SCHEMA documents, admin, public TO docintel_documents;
+GRANT ALL   ON ALL TABLES    IN SCHEMA documents TO docintel_documents;
+GRANT ALL   ON ALL SEQUENCES IN SCHEMA documents TO docintel_documents;
+GRANT SELECT ON admin.tenants TO docintel_documents;
+ALTER DEFAULT PRIVILEGES IN SCHEMA documents GRANT ALL ON TABLES    TO docintel_documents;
+ALTER DEFAULT PRIVILEGES IN SCHEMA documents GRANT ALL ON SEQUENCES TO docintel_documents;
+GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_documents;
 
-INSERT INTO tenants (id, name) VALUES ('e2e', 'E2E Test Tenant');
+-- docintel_rag: owns conversations schema, reads admin for model resolver
+GRANT USAGE ON SCHEMA conversations, admin, public TO docintel_rag;
+GRANT ALL   ON ALL TABLES    IN SCHEMA conversations TO docintel_rag;
+GRANT ALL   ON ALL SEQUENCES IN SCHEMA conversations TO docintel_rag;
+GRANT SELECT ON admin.tenants, admin.platform_settings TO docintel_rag;
+ALTER DEFAULT PRIVILEGES IN SCHEMA conversations GRANT ALL ON TABLES    TO docintel_rag;
+ALTER DEFAULT PRIVILEGES IN SCHEMA conversations GRANT ALL ON SEQUENCES TO docintel_rag;
+GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_rag;
+
+-- docintel_app: backward-compat role used during service role transition
+GRANT USAGE ON SCHEMA admin, documents, conversations, public TO docintel_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA admin         TO docintel_app;
+GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA admin         TO docintel_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA documents     TO docintel_app;
+GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA documents     TO docintel_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA conversations TO docintel_app;
+GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA conversations TO docintel_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA admin         GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES    TO docintel_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA admin         GRANT USAGE, SELECT ON SEQUENCES TO docintel_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA documents     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES    TO docintel_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA documents     GRANT USAGE, SELECT ON SEQUENCES TO docintel_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA conversations GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES    TO docintel_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA conversations GRANT USAGE, SELECT ON SEQUENCES TO docintel_app;
+GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_app;
+
+-- =============================================================================
+-- Default search paths per role — unqualified table names resolve in order
+-- =============================================================================
+ALTER ROLE docintel_admin     SET search_path = admin, documents, public;
+ALTER ROLE docintel_documents SET search_path = documents, admin, public;
+ALTER ROLE docintel_rag       SET search_path = conversations, admin, public;
+ALTER ROLE docintel_app       SET search_path = admin, documents, conversations, public;
+
+-- =============================================================================
+-- Seed tenants
+-- =============================================================================
+INSERT INTO admin.tenants (id, name) VALUES ('default', 'DocIntel Platform');
+INSERT INTO admin.tenants (id, name) VALUES ('alpha',   'Alpha Corp');
+INSERT INTO admin.tenants (id, name) VALUES ('beta',    'Beta Corp');
+INSERT INTO admin.tenants (id, name) VALUES ('e2e',     'E2E Test Tenant');

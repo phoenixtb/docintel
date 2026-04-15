@@ -15,8 +15,10 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Callable, Optional
 
+from docintel_common.tracing import TraceContext, configure_trace_logging
+
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -84,21 +86,23 @@ async def _run_db(fn: Callable):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_trace_logging()
     settings = Settings()
     app.state.settings = settings
 
     logger.info("RAG Service starting (version=%s)", settings.service_version)
     logger.info("QDRANT_URL=%s", settings.qdrant_url)
-    logger.info("OLLAMA_BASE_URL=%s", settings.ollama_base_url)
-    logger.info("OLLAMA_LLM_MODEL=%s", settings.ollama_llm_model)
-    logger.info("OLLAMA_EMBED_MODEL=%s", settings.ollama_embed_model)
+    logger.info("LLM_CHAT_URL=%s", settings.llm_chat_url)
+    logger.info("LLM_EMBED_URL=%s", settings.llm_embed_url)
+    logger.info("LLM_MODEL=%s", settings.llm_model)
+    logger.info("LLM_EMBED_MODEL=%s", settings.llm_embed_model)
 
     # Tracing
     tracer = LangfuseTracer(settings)
     app.state.tracer = tracer
 
-    # Ensure required Ollama models are available (pull if missing)
-    await _ensure_ollama_models(settings)
+    # Probe LLM engines — log reachability and available models (non-fatal)
+    await _probe_llm_engine(settings)
 
     # Ensure Qdrant collection and payload indexes exist
     _ensure_qdrant_ready(settings)
@@ -110,11 +114,21 @@ async def lifespan(app: FastAPI):
     # Model resolver — resolves effective LLM per tenant from PostgreSQL (60s TTL cache)
     app.state.model_resolver = TenantModelResolver(
         postgres_url=settings.postgres_url,
-        default_model=settings.ollama_llm_model,
+        default_model=settings.llm_model,
     )
 
+    # Anchored iterative summarizer — compresses evicted conversation turns using the
+    # fast expansion model. Runs async fire-and-forget after each conversation persist.
+    from ..components.summarizer import AnchoredSummarizer
+    app.state.summarizer = AnchoredSummarizer(
+        llm_chat_url=settings.llm_chat_url,
+        model=settings.llm_expansion_model,
+        api_key=settings.llm_api_key,
+    )
+    logger.info("AnchoredSummarizer ready (model=%s)", settings.llm_expansion_model)
+
     # LLM concurrency gate — configurable via LLM_CONCURRENCY_LIMIT env var.
-    # Ollama (serial GPU): 2-4. OpenAI/Anthropic API: 20-50+. vLLM: gpu_count * 4.
+    # Local serial engines (LMForge, Ollama): 2-4. Hosted APIs: 20-50+. vLLM: gpu_count * 4.
     app.state.llm_semaphore = asyncio.Semaphore(settings.llm_concurrency_limit)
     logger.info("LLM concurrency limit: %d", settings.llm_concurrency_limit)
 
@@ -124,33 +138,28 @@ async def lifespan(app: FastAPI):
     tracer.shutdown()
 
 
-async def _ensure_ollama_models(settings: Settings) -> None:
+async def _probe_llm_engine(settings: Settings) -> None:
     """
-    Verify required Ollama models are available; pull them if missing.
-    Required models: LLM + embed. Reranker is CPU-local (not via Ollama).
+    Probe chat and embed engine endpoints at startup.
+
+    Non-fatal — a missing engine only degrades functionality; it does not
+    prevent the service from starting (engines may start after rag-service).
+    Model pull is the responsibility of the engine-specific setup script.
     """
-    required = [settings.ollama_llm_model, settings.ollama_embed_model]
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(f"{settings.ollama_base_url}/api/tags", timeout=10.0)
-            if r.status_code != 200:
-                logger.warning("Ollama not reachable at %s — skipping model check", settings.ollama_base_url)
-                return
-            pulled = {m["name"].split(":")[0] for m in r.json().get("models", [])}
-            for model in required:
-                name = model.split(":")[0]
-                if name not in pulled:
-                    logger.info("Pulling Ollama model: %s", model)
-                    await client.post(
-                        f"{settings.ollama_base_url}/api/pull",
-                        json={"name": model},
-                        timeout=600.0,
-                    )
-                    logger.info("Pulled: %s", model)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for label, url in [
+            ("chat", settings.llm_chat_url),
+            ("embed", settings.llm_embed_url),
+        ]:
+            try:
+                r = await client.get(f"{url}/models")
+                if r.status_code == 200:
+                    model_ids = [m.get("id", "") for m in r.json().get("data", [])]
+                    logger.info("LLM engine [%s] ready at %s — models: %s", label, url, model_ids)
                 else:
-                    logger.info("Ollama model ready: %s", model)
-    except Exception as e:
-        logger.warning("Ollama model check failed (non-fatal): %s", e)
+                    logger.warning("LLM engine [%s] at %s returned HTTP %s", label, url, r.status_code)
+            except Exception as e:
+                logger.warning("LLM engine [%s] not reachable at %s (non-fatal): %s", label, url, e)
 
 
 def _ensure_qdrant_ready(settings: Settings) -> None:
@@ -181,25 +190,16 @@ app = FastAPI(
 
 @app.middleware("http")
 async def tenant_context_middleware(request: Request, call_next):
-    """Set tenant ContextVars and request-correlation logging context for every request."""
-    request_id = request.headers.get("X-Request-Id", str(uuid.uuid4()))
+    """Set tenant ContextVars and distributed trace context for every request."""
+    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
     tenant_id  = request.headers.get("X-Tenant-Id", "default")
     user_id    = request.headers.get("X-User-Id", "")
+
+    TraceContext.set(request_id, tenant_id, user_id)
 
     token_t = _tenant_ctx.set(tenant_id)
     token_r = _role_ctx.set(request.headers.get("X-User-Role", "tenant_user"))
 
-    # Inject correlation fields into the logging context via LogRecord factory
-    old_factory = logging.getLogRecordFactory()
-
-    def _record_factory(*args, **kwargs):
-        record = old_factory(*args, **kwargs)
-        record.request_id = request_id
-        record.tenant_id  = tenant_id
-        record.user_id    = user_id
-        return record
-
-    logging.setLogRecordFactory(_record_factory)
     try:
         response = await call_next(request)
         response.headers["X-Request-Id"] = request_id
@@ -207,7 +207,6 @@ async def tenant_context_middleware(request: Request, call_next):
     finally:
         _tenant_ctx.reset(token_t)
         _role_ctx.reset(token_r)
-        logging.setLogRecordFactory(old_factory)
 
 
 # Prometheus metrics — must be registered before first request (module level)
@@ -251,6 +250,8 @@ class QueryRequest(BaseModel):
     min_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     use_cache: bool = True
     use_reranking: bool = True
+    # None = use tenant preference; true/false = per-query override
+    thinking_mode: Optional[bool] = None
 
 
 class QueryResponse(BaseModel):
@@ -265,19 +266,31 @@ class QueryResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     qdrant: str
-    ollama: str
+    llm_engine: str
     version: str = "0.1.0"
+
+
+# Model families known to support the Ollama thinking/reasoning API.
+# Checked via substring match against the lowercased model name.
+_THINKING_MODEL_FAMILIES = {"qwen3", "qwq", "deepseek-r1", "marco-o1", "skywork-o1", ":r1"}
+
+
+def _model_supports_thinking(model_name: str) -> bool:
+    name_lower = model_name.lower()
+    return any(family in name_lower for family in _THINKING_MODEL_FAMILIES)
 
 
 class ModelInfo(BaseModel):
     name: str
     size: Optional[int] = None
     modified_at: Optional[str] = None
+    supports_thinking: bool = False
 
 
 class ModelListResponse(BaseModel):
     models: list[ModelInfo]
     default_model: str
+    tenant_thinking_mode: bool = False
 
 
 class VectorStatsResponse(BaseModel):
@@ -293,7 +306,7 @@ class VectorStatsResponse(BaseModel):
 @app.get("/health", response_model=HealthResponse)
 async def health_check(settings: SettingsDep):
     qdrant_status = "unknown"
-    ollama_status = "unknown"
+    llm_status = "unknown"
 
     try:
         from qdrant_client import QdrantClient
@@ -303,16 +316,16 @@ async def health_check(settings: SettingsDep):
         qdrant_status = f"error: {str(e)[:50]}"
 
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(f"{settings.ollama_base_url}/api/tags", timeout=5.0)
-            ollama_status = "connected" if r.status_code == 200 else f"error: HTTP {r.status_code}"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{settings.llm_chat_url}/models")
+            llm_status = "connected" if r.status_code == 200 else f"error: HTTP {r.status_code}"
     except Exception as e:
-        ollama_status = f"error: {str(e)[:50]}"
+        llm_status = f"error: {str(e)[:50]}"
 
     return HealthResponse(
         status="healthy" if qdrant_status == "connected" else "degraded",
         qdrant=qdrant_status,
-        ollama=ollama_status,
+        llm_engine=llm_status,
     )
 
 
@@ -331,35 +344,71 @@ async def root():
 # =============================================================================
 
 @app.get("/models", response_model=ModelListResponse)
-async def list_models(settings: SettingsDep):
+async def list_models(
+    settings: SettingsDep,
+    http_request: Request,
+    x_tenant_id: Optional[str] = Header(None),
+):
     """
-    List all Ollama models available on the host.
-    Used by the UI to populate the model selection dropdown.
+    List all chat models available from the configured LLM engine.
+    Uses the standard GET /v1/models endpoint (OpenAI-compatible).
+    Enriches each model with supports_thinking and returns the tenant's thinking_mode preference.
     """
     _EMBED_KEYWORDS = {"embed", "nomic", "mxbai", "bge", "gte", "e5-"}
 
     models: list[ModelInfo] = []
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{settings.ollama_base_url}/api/tags")
+            r = await client.get(f"{settings.llm_chat_url}/models")
             if r.status_code == 200:
-                for m in r.json().get("models", []):
-                    name: str = m.get("name", "")
+                raw_models = r.json().get("data", [])
+                for m in raw_models:
+                    name: str = m.get("id", "") or m.get("name", "")
                     name_lower = name.lower()
-                    if any(kw in name_lower for kw in _EMBED_KEYWORDS):
+                    if not name or any(kw in name_lower for kw in _EMBED_KEYWORDS):
                         continue
+                    # LMForge exposes capabilities.thinking — use it when available
+                    capabilities: dict = m.get("capabilities", {})
+                    supports_thinking = capabilities.get("thinking", _model_supports_thinking(name))
                     models.append(ModelInfo(
                         name=name,
                         size=m.get("size"),
-                        modified_at=m.get("modified_at"),
+                        modified_at=m.get("modified_at") or m.get("created"),
+                        supports_thinking=supports_thinking,
                     ))
     except Exception as exc:
-        logger.warning("Failed to fetch Ollama model list: %s", exc)
+        logger.warning("Failed to fetch model list from %s: %s", settings.llm_chat_url, exc)
+
+    tenant_thinking_mode = False
+    tenant_id = x_tenant_id or "default"
+    try:
+        model_resolver: TenantModelResolver = http_request.app.state.model_resolver
+        resolved = await model_resolver.resolve(tenant_id)
+        tenant_thinking_mode = resolved.thinking_mode
+    except Exception as exc:
+        logger.warning("Failed to resolve tenant thinking_mode for %s: %s", tenant_id, exc)
 
     return ModelListResponse(
         models=models,
-        default_model=settings.ollama_llm_model,
+        default_model=settings.llm_model,
+        tenant_thinking_mode=tenant_thinking_mode,
     )
+
+
+# =============================================================================
+# Settings cache invalidation
+# =============================================================================
+
+@app.delete("/internal/settings-cache/{tenant_id}", status_code=204)
+async def invalidate_settings_cache(tenant_id: str, http_request: Request):
+    """
+    Invalidate the in-process TenantModelResolver cache for a tenant.
+    Called by the UI (via gateway) immediately after tenant settings are saved,
+    so the next query picks up the new model/thinking_mode without waiting for TTL expiry.
+    """
+    model_resolver: TenantModelResolver = http_request.app.state.model_resolver
+    model_resolver.invalidate(tenant_id)
+    logger.info("Settings cache invalidated for tenant %s", tenant_id)
 
 
 # =============================================================================
@@ -419,6 +468,7 @@ async def query_documents(
     rag_service: RAGServiceDep,
     user_ctx: UserContextDep,
     settings: SettingsDep,
+    http_request: Request,
 ):
     """
     RAG query with tenant isolation and RBAC.
@@ -439,6 +489,7 @@ async def query_documents(
             conversation_id=request.conversation_id,
             min_score=request.min_score,
             user_context=user_ctx,
+            summarizer=http_request.app.state.summarizer,
         )
         _fire_and_forget(_emit_query_event(
             query_id=str(uuid.uuid4()),
@@ -479,8 +530,7 @@ async def query_documents_stream(
     """
     import asyncio
 
-    from haystack_integrations.components.generators.ollama import OllamaChatGenerator
-
+    from ..components.llm_adapter import build_streaming_generator, extract_reasoning_content
     from ..pipelines.query import _build_section_label
 
     tenant_id = user_ctx.tenant_id
@@ -489,10 +539,21 @@ async def query_documents_stream(
 
     llm_semaphore: asyncio.Semaphore = http_request.app.state.llm_semaphore
     model_resolver: TenantModelResolver = http_request.app.state.model_resolver
+    summarizer = http_request.app.state.summarizer
 
-    # Resolve the effective LLM model for this tenant before entering the generator.
-    # This keeps the async DB lookup outside the sync generator closure.
-    effective_model = await model_resolver.resolve(tenant_id)
+    # Resolve effective model + thinking_mode before entering the generator.
+    # request.thinking_mode (per-query override) wins over tenant preference.
+    # thinking is additionally gated on model capability.
+    resolved = await model_resolver.resolve(tenant_id)
+    effective_model = resolved.model
+    effective_thinking = (
+        request.thinking_mode if request.thinking_mode is not None else resolved.thinking_mode
+    ) and _model_supports_thinking(effective_model)
+    logger.warning(
+        "Stream query — tenant=%s model=%s thinking=%s (tenant_pref=%s, req_override=%s, model_supports=%s)",
+        tenant_id, effective_model, effective_thinking,
+        resolved.thinking_mode, request.thinking_mode, _model_supports_thinking(effective_model),
+    )
 
     async def generate():
         try:
@@ -501,10 +562,23 @@ async def query_documents_stream(
                 rag_service.warm_up()
 
             query_id = str(uuid.uuid4())
-            yield f"data: {json.dumps({'metadata': {'query_id': query_id, 'cache_hit': False}})}\n\n"
+            loop = asyncio.get_running_loop()
+
+            # Load conversation history (anchored summary + recent verbatim turns)
+            # before emitting the metadata event so context_state is included upfront.
+            stream_history: list[dict] = []
+            context_state: dict = {}
+            if request.conversation_id:
+                stream_history, context_state = rag_service._load_conversation_history(
+                    request.conversation_id, tenant_id
+                )
+
+            metadata_payload: dict = {"query_id": query_id, "cache_hit": False}
+            if context_state.get("has_summary"):
+                metadata_payload["context_state"] = context_state
+            yield f"data: {json.dumps({'metadata': metadata_payload})}\n\n"
 
             # Embed — run sync calls in executor so they don't block the event loop
-            loop = asyncio.get_running_loop()
             embed_result = await loop.run_in_executor(
                 None, lambda: rag_service._dense_embedder.run(text=request.question)
             )
@@ -628,44 +702,46 @@ async def query_documents_stream(
                 yield f"data: {json.dumps({'sources': [], 'done': True})}\n\n"
                 return
 
-            # Prompt
+            # Prompt — inject anchored conversation history
             prompt_result = rag_service._pipeline.get_component("prompt_builder").run(
-                documents=documents, query=request.question
+                documents=documents,
+                query=request.question,
+                history=stream_history or None,
             )
             messages = prompt_result["messages"]
 
-            # Stream LLM via Haystack's OllamaChatGenerator.
-            # ollama-haystack ≥6.1 maps message.thinking → chunk.reasoning.reasoning_text
-            # and message.content → chunk.content, giving clean separation without
-            # any custom parsing or direct Ollama API calls.
-            # Unbounded queue: streaming_callback runs inside the executor thread, so
-            # we MUST use call_soon_threadsafe to safely enqueue items into the event
-            # loop. put_nowait alone is not thread-safe — it won't wake a coroutine
+            # Stream LLM via Haystack's OpenAIChatGenerator (engine-agnostic).
+            # The streaming_callback runs inside the executor thread, so we MUST use
+            # call_soon_threadsafe to safely enqueue items into the event loop.
+            # put_nowait alone is not thread-safe — it won't wake a coroutine
             # waiting on queue.get() if called from outside the event loop thread.
             queue: asyncio.Queue = asyncio.Queue()
 
             full_thinking = ""
             full_answer = ""
 
-            # OllamaChatGenerator calls the streaming_callback SYNCHRONOUSLY inside
-            # its HTTP response loop (executor thread). Use call_soon_threadsafe so
-            # the event loop wakes up and delivers items to the waiting consumer.
             def streaming_callback(chunk):
-                reasoning = getattr(chunk, "reasoning", None)
-                if reasoning and getattr(reasoning, "reasoning_text", None):
-                    loop.call_soon_threadsafe(queue.put_nowait, ("thinking", reasoning.reasoning_text))
+                reasoning = extract_reasoning_content(chunk)
+                if reasoning:
+                    loop.call_soon_threadsafe(queue.put_nowait, ("thinking", reasoning))
                 elif chunk.content:
                     loop.call_soon_threadsafe(queue.put_nowait, ("answer", chunk.content))
 
-            llm = OllamaChatGenerator(
+            # num_ctx: always set — default 4096 is too tight for RAG prompts that include
+            # retrieved chunks + conversation history on top of the question.
+            # max_tokens: uncapped for thinking (thinking tokens share the budget with answer).
+            num_ctx = settings.llm_thinking_ctx if effective_thinking else settings.llm_ctx
+            max_tokens = -1 if effective_thinking else settings.llm_max_tokens
+
+            llm = build_streaming_generator(
                 model=effective_model,
-                url=settings.ollama_base_url,
-                think=True,
-                generation_kwargs={
-                    "temperature": settings.ollama_llm_temperature,
-                    "num_predict": settings.ollama_llm_max_tokens,
-                },
+                chat_url=settings.llm_chat_url,
+                api_key=settings.llm_api_key,
                 streaming_callback=streaming_callback,
+                think=effective_thinking,
+                num_ctx=num_ctx,
+                max_tokens=max_tokens,
+                temperature=settings.llm_temperature,
             )
 
             # Notify the client if it will have to wait for an LLM slot.
@@ -699,7 +775,7 @@ async def query_documents_stream(
                         full_answer += text
                         yield f"data: {json.dumps({'token': text})}\n\n"
             except GeneratorExit:
-                # Client disconnected — cancel the LLM task to free Ollama
+                # Client disconnected — cancel the LLM task to free engine slot
                 task.cancel()
                 logger.info("Client disconnected mid-stream, LLM task cancelled")
                 return
@@ -738,8 +814,15 @@ async def query_documents_stream(
             if request.conversation_id:
                 try:
                     from ..db import add_message
+                    import asyncio as _asyncio
                     add_message(request.conversation_id, "user", request.question, tenant_id=tenant_id)
                     add_message(request.conversation_id, "assistant", answer, tenant_id=tenant_id, sources=sources)
+                    # Async fire-and-forget: compress history if threshold reached
+                    _asyncio.ensure_future(
+                        rag_service._maybe_compress_history(
+                            request.conversation_id, tenant_id, summarizer
+                        )
+                    )
                 except Exception as e:
                     logger.warning("Failed to persist streaming conversation: %s", e)
 
@@ -832,3 +915,48 @@ async def delete_conversation_endpoint(conversation_id: str, user_ctx: UserConte
     if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"status": "deleted"}
+
+
+# =============================================================================
+# Internal service-to-service endpoints — no JWT, HMAC token only
+# =============================================================================
+
+@app.delete("/internal/conversations/tenant")
+async def delete_tenant_conversations(
+    x_tenant_id: str = Header(alias="X-Tenant-Id", default=""),
+    x_internal_service_token: str = Header(alias="X-Internal-Service-Token", default=""),
+):
+    """
+    Delete all conversations and messages for a tenant.
+    Called by admin-service during tenant deletion.
+    Auth: X-Internal-Service-Token (shared HMAC secret).
+    """
+    import os
+    secret = os.environ.get("INTERNAL_GATEWAY_SECRET", "")
+    if secret and x_internal_service_token != secret:
+        raise HTTPException(status_code=403, detail="Invalid internal service token")
+
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="X-Tenant-Id header required")
+
+    from ..db import SessionLocal
+    from sqlalchemy import text
+
+    def _delete_all():
+        with SessionLocal() as db:
+            # platform_admin role to bypass RLS for cross-tenant admin operation
+            db.execute(text("SET LOCAL app.user_role = 'platform_admin'"))
+            db.execute(text("SET LOCAL app.current_tenant = :tid"), {"tid": x_tenant_id})
+            result = db.execute(
+                text(
+                    "DELETE FROM conversations WHERE tenant_id = :tid"
+                ),
+                {"tid": x_tenant_id},
+            )
+            db.commit()
+            return result.rowcount
+
+    loop = asyncio.get_running_loop()
+    deleted = await loop.run_in_executor(None, _delete_all)
+    logger.info("Deleted %d conversations for tenant %s (internal API)", deleted, x_tenant_id)
+    return {"deleted": deleted, "tenant_id": x_tenant_id}

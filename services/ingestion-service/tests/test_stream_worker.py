@@ -63,11 +63,12 @@ def mock_paths(tmp_path):
 @pytest.mark.asyncio
 async def test_handle_message_success_publishes_completed_and_acks(bus, mock_paths):
     settings = MagicMock()
+    mock_doc_client = MagicMock()
 
     with (
         patch("src.stream_worker.MinIOAdapter") as mock_adapter_cls,
         patch("src.stream_worker.run_ingestion", return_value=MOCK_RESULT),
-        patch("src.stream_worker.persist_chunks") as mock_persist,
+        patch("src.stream_worker.DocumentServiceClient", return_value=mock_doc_client),
     ):
         mock_adapter_cls.return_value.fetch = AsyncMock(return_value=mock_paths)
 
@@ -82,26 +83,29 @@ async def test_handle_message_success_publishes_completed_and_acks(bus, mock_pat
     assert payload_arg["tenantId"] == _TENANT_ID
 
     bus.ack.assert_called_once_with(TOPIC_DOCUMENTS_READY, _CONSUMER_GROUP, "1-1")
-    mock_persist.assert_called_once()
+    mock_doc_client.persist_chunks.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_handle_message_persists_correct_chunk_count(bus, mock_paths):
     settings = MagicMock()
+    mock_doc_client = MagicMock()
 
     with (
         patch("src.stream_worker.MinIOAdapter") as mock_adapter_cls,
         patch("src.stream_worker.run_ingestion", return_value=MOCK_RESULT),
-        patch("src.stream_worker.persist_chunks") as mock_persist,
+        patch("src.stream_worker.DocumentServiceClient", return_value=mock_doc_client),
     ):
         mock_adapter_cls.return_value.fetch = AsyncMock(return_value=mock_paths)
 
         await _handle_message(bus, "2-1", READY_PAYLOAD.copy(), settings)
 
-    chunk_records = mock_persist.call_args.args[0]
-    assert len(chunk_records) == 3
-    assert chunk_records[0].document_id == _DOCUMENT_ID
-    assert chunk_records[0].tenant_id == _TENANT_ID
+    # persist_chunks is called as (document_id, tenant_id, chunk_payloads)
+    call_args = mock_doc_client.persist_chunks.call_args
+    doc_id_arg, tenant_id_arg, chunk_payloads_arg = call_args.args
+    assert doc_id_arg == _DOCUMENT_ID
+    assert tenant_id_arg == _TENANT_ID
+    assert len(chunk_payloads_arg) == 3
 
 
 @pytest.mark.asyncio
@@ -132,7 +136,7 @@ async def test_handle_message_publishes_failed_on_pipeline_error(bus, mock_paths
     with (
         patch("src.stream_worker.MinIOAdapter") as mock_adapter_cls,
         patch("src.stream_worker.run_ingestion", side_effect=RuntimeError("GPU OOM")),
-        patch("src.stream_worker.persist_chunks"),
+        patch("src.stream_worker.DocumentServiceClient", return_value=MagicMock()),
     ):
         mock_adapter_cls.return_value.fetch = AsyncMock(return_value=mock_paths)
 
@@ -162,7 +166,7 @@ async def test_handle_message_uses_camelcase_payload_keys(bus, mock_paths):
     with (
         patch("src.stream_worker.MinIOAdapter") as mock_adapter_cls,
         patch("src.stream_worker.run_ingestion", return_value=MOCK_RESULT) as mock_run,
-        patch("src.stream_worker.persist_chunks"),
+        patch("src.stream_worker.DocumentServiceClient", return_value=MagicMock()),
     ):
         mock_adapter_cls.return_value.fetch = AsyncMock(return_value=mock_paths)
 

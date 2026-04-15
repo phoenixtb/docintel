@@ -7,6 +7,7 @@
   import { toast } from 'svelte-sonner';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import MessageBubble from '$lib/components/MessageBubble.svelte';
+  import ContextSummaryDivider from '$lib/components/ContextSummaryDivider.svelte';
 
   interface Source {
     ref_id?: number;
@@ -20,13 +21,20 @@
 
   interface Message {
     id: string;
-    role: 'user' | 'assistant';
+    role: 'user' | 'assistant' | 'context_summary';
     content: string;
     thinking?: string;
     sources?: Source[];
     liked?: boolean | null;
     queryId?: string;
     routedDomain?: string;
+    metadata?: { type: string; compressed_turns: number; summary_upto_count: number };
+  }
+
+  interface ContextState {
+    has_summary: boolean;
+    summarized_turns: number;
+    verbatim_turns: number;
   }
   
   interface Conversation {
@@ -45,6 +53,7 @@
   let currentSources: Source[] = $state([]);
   let currentQueryId = $state('');
   let currentRoutedDomain = $state<string | null>(null);
+  let contextState = $state<ContextState | null>(null);
   let streamAbort: AbortController | null = null;
 
   // Scroll anchor
@@ -117,10 +126,21 @@
         const data = await res.json();
         messages = (data.messages || []).map((m: any) => ({
           id: m.id,
-          role: m.role as 'user' | 'assistant',
+          role: m.role as 'user' | 'assistant' | 'context_summary',
           content: m.content,
           sources: m.sources || undefined,
+          metadata: m.metadata || undefined,
         }));
+        // Derive contextState from loaded conversation
+        if (data.summary_upto_count > 0) {
+          contextState = {
+            has_summary: true,
+            summarized_turns: Math.floor(data.summary_upto_count / 2),
+            verbatim_turns: 0,
+          };
+        } else {
+          contextState = null;
+        }
       } else if (res.status === 404) {
         // Stale ID - clear and start fresh
         localStorage.removeItem('activeConversationId');
@@ -159,6 +179,7 @@
     activeConversationId = null;
     messages = [];
     input = '';
+    contextState = null;
     localStorage.removeItem('activeConversationId');
     goto('/chat', { replaceState: true });
   }
@@ -211,31 +232,41 @@
       
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
+      const reader = response.body?.pipeThrough(new TextDecoderStream()).getReader();
       let serverError: string | null = null;
+      let buf = '';
+      let streamDone = false;
       
-      while (reader) {
+      while (reader && !streamDone) {
         const { done, value } = await reader.read();
         if (done) break;
-        
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
-        
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.metadata?.query_id) currentQueryId = data.metadata.query_id;
-              if (data.routing?.domain) currentRoutedDomain = data.routing.domain;
-              if (data.queued) { isQueued = true; }
-              if (data.thinking_token) { isQueued = false; currentThinking += data.thinking_token; }
-              if (data.token) { isQueued = false; currentResponse += data.token; }
-              if (data.sources) currentSources = data.sources;
-              if (data.error) { serverError = data.error; reader.cancel(); break; }
-              if (data.done) { reader.cancel(); break; }
-            } catch { /* skip malformed JSON lines */ }
+
+        // Accumulate and split on SSE block boundaries (\n\n).
+        // A single reader.read() may contain partial events — naive line splitting
+        // loses the data: prefix on continuation chunks and silently drops them.
+        buf += value.replace(/\r\n/g, '\n');
+        const blocks = buf.split('\n\n');
+        buf = blocks.pop() ?? '';
+
+        for (const block of blocks) {
+          if (!block.trim()) continue;
+          let dataLine = '';
+          for (const line of block.split('\n')) {
+            if (line.startsWith('data:')) dataLine = line.slice(5).trimStart();
           }
+          if (!dataLine) continue;
+          try {
+            const data = JSON.parse(dataLine);
+            if (data.metadata?.query_id) currentQueryId = data.metadata.query_id;
+            if (data.metadata?.context_state) contextState = data.metadata.context_state;
+            if (data.routing?.domain) currentRoutedDomain = data.routing.domain;
+            if (data.queued) { isQueued = true; }
+            if (data.thinking_token) { isQueued = false; currentThinking += data.thinking_token; }
+            if (data.token) { isQueued = false; currentResponse += data.token; }
+            if (data.sources) currentSources = data.sources;
+            if (data.error) { serverError = data.error; streamDone = true; break; }
+            if (data.done) { streamDone = true; break; }
+          } catch { /* skip malformed */ }
         }
       }
 
@@ -515,7 +546,12 @@
         <!-- Message list -->
         {#each messages as message (message.id)}
           <div data-message-id={message.id}>
-            {#if message.role === 'user'}
+            {#if message.role === 'context_summary'}
+              <ContextSummaryDivider
+                summary={message.content}
+                compressedTurns={message.metadata?.compressed_turns ?? 0}
+              />
+            {:else if message.role === 'user'}
               <div class="flex justify-end">
                 <div class="max-w-2xl px-4 py-3 rounded-2xl
                   bg-emerald-600/75 backdrop-blur-sm text-white
@@ -612,6 +648,19 @@
     <!-- ── Floating glass input ── -->
     <div class="px-4 py-3">
       <div class="max-w-3xl mx-auto">
+        {#if contextState?.has_summary}
+          <div class="flex items-center gap-1.5 mb-1.5 px-1 text-xs text-slate-600"
+            title="This conversation has been partially summarized to fit within the context window. The AI has access to a summary of older turns and the full text of recent ones.">
+            <svg class="w-3 h-3 text-indigo-500/50 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+            </svg>
+            <span>
+              Context: {contextState.verbatim_turns} {contextState.verbatim_turns === 1 ? 'turn' : 'turns'} active
+              · {contextState.summarized_turns} summarized
+            </span>
+          </div>
+        {/if}
         <div class="glass-input rounded-2xl px-4 py-3 flex items-end gap-3">
           <textarea
             bind:value={input}

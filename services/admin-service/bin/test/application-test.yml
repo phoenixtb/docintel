@@ -1,24 +1,40 @@
 spring:
   datasource:
-    url: jdbc:tc:postgresql:15:///testdb
-    driver-class-name: org.testcontainers.jdbc.ContainerDatabaseDriver
-  
+    # Overridden at runtime by BaseIntegrationTest via @DynamicPropertySource
+    url: jdbc:postgresql://localhost:5432/testdb
+    username: test
+    password: test
+    driver-class-name: org.postgresql.Driver
+
   jpa:
     hibernate:
-      ddl-auto: create-drop
+      ddl-auto: none
     show-sql: true
 
-  # Disable Redis for tests (will be mocked)
+  flyway:
+    enabled: false  # disables both Spring auto-config and TenantDataSourceConfig Flyway bean
+
   data:
     redis:
       host: localhost
       port: 6379
 
-# Disable Redis health check
+flyway:
+  ddl:
+    username: test
+    password: test
+
 management:
   health:
     redis:
       enabled: false
+
+analytics-service:
+  url: http://localhost:9999  # unreachable in tests — mocked via @MockkBean
+
+internal:
+  gateway:
+    secret: test-internal-secret
 
 logging:
   level:

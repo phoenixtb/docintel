@@ -38,6 +38,18 @@ def verify_internal_token(
     return _hmac.compare_digest(token, expected)
 
 
+def compute_service_token(tenant_id: str, secret: str) -> str:
+    """
+    Compute a token for direct service-to-service calls (no user/request context).
+
+    Uses the same HMAC function as gateway tokens but with empty request_id and
+    user_id, so the receiving service can validate both paths identically:
+      - gateway token:  HMAC(requestId:tenantId:userId, secret)
+      - service token:  HMAC("":tenantId:"",            secret)
+    """
+    return compute_internal_token("", tenant_id, "", secret)
+
+
 def get_internal_secret() -> str:
     """Read INTERNAL_GATEWAY_SECRET from environment."""
     return os.environ.get("INTERNAL_GATEWAY_SECRET", "")

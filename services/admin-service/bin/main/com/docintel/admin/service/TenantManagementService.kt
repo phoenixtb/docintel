@@ -13,6 +13,9 @@ class TenantManagementService(
     private val zitadelService: ZitadelService,
     private val cacheService: CacheService,
     private val provisioningService: ProvisioningService,
+    private val documentServiceClient: DocumentServiceClient,
+    private val ragServiceClient: RagServiceClient,
+    private val analyticsServiceClient: AnalyticsServiceClient,
     @Value("\${docintel.default-llm-model:qwen3.5:4b}") private val defaultLlmModel: String,
 ) {
     private val log = LoggerFactory.getLogger(TenantManagementService::class.java)
@@ -56,20 +59,22 @@ class TenantManagementService(
         return if (affected > 0) getTenantSummary(tenantId) else null
     }
 
-    @Transactional
     fun deleteTenant(tenantId: String): DeleteTenantResponse {
-        // Cascade: chunks, query_log, documents, conversations all FK to tenants with ON DELETE CASCADE
-        // or we delete manually to be safe
-        jdbcTemplate.update("DELETE FROM query_log WHERE tenant_id = ?", tenantId)
-        jdbcTemplate.update("DELETE FROM chunks WHERE tenant_id = ?", tenantId)
-        jdbcTemplate.update("DELETE FROM documents WHERE tenant_id = ?", tenantId)
-        jdbcTemplate.update("DELETE FROM conversations WHERE tenant_id = ?", tenantId)
+        // Step 1: Delete cross-schema data via service APIs (each service owns its schema)
+        // document-service owns documents + chunks (cascade handles chunks)
+        documentServiceClient.deleteAllDocuments(tenantId)
+        // rag-service owns conversations + messages
+        ragServiceClient.deleteAllConversations(tenantId)
+        // analytics-service owns ClickHouse data
+        analyticsServiceClient.deleteTenantData(tenantId)
+
+        // Step 2: Delete admin-schema data that admin-service owns
         jdbcTemplate.update("DELETE FROM users WHERE tenant_id = ?", tenantId)
         val affected = jdbcTemplate.update("DELETE FROM tenants WHERE id = ?", tenantId)
 
+        // Step 3: Deprovision Qdrant + MinIO resources
         cacheService.clearTenantCache(tenantId)
         zitadelService.deleteTenantGroup(tenantId)
-        // Deprovision per-tenant Qdrant collection and MinIO bucket
         provisioningService.deleteQdrantCollection(tenantId)
         provisioningService.deleteMinioBucket(tenantId)
 
@@ -98,18 +103,20 @@ class TenantManagementService(
             jdbcTemplate.queryForObject(
                 """
                 SELECT t.id, t.name, t.quota_documents, t.quota_queries_per_day,
-                       COALESCE(d.doc_count, 0) as doc_count,
-                       COALESCE(q.query_count, 0) as query_count
+                       COALESCE(d.doc_count, 0) as doc_count
                 FROM tenants t
-                LEFT JOIN (SELECT tenant_id, COUNT(*) as doc_count FROM documents GROUP BY tenant_id) d ON t.id = d.tenant_id
-                LEFT JOIN (SELECT tenant_id, COUNT(*) as query_count FROM query_log GROUP BY tenant_id) q ON t.id = q.tenant_id
+                LEFT JOIN (
+                    SELECT tenant_id, COUNT(*) as doc_count
+                    FROM documents.documents
+                    GROUP BY tenant_id
+                ) d ON t.id = d.tenant_id
                 WHERE t.id = ?
                 """.trimIndent(),
                 { rs, _ -> TenantSummary(
                     tenantId = rs.getString("id"),
                     name = rs.getString("name"),
                     documentCount = rs.getInt("doc_count"),
-                    queryCount = rs.getLong("query_count"),
+                    queryCount = 0L,
                     quotaDocuments = rs.getInt("quota_documents"),
                     quotaQueriesPerDay = rs.getInt("quota_queries_per_day")
                 ) },

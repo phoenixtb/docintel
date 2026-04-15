@@ -61,9 +61,12 @@ services:
     build: ./services/document-service
     environment:
       - SPRING_PROFILES_ACTIVE=docker
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel?user=docintel_app&password=${DOCINTEL_APP_DB_PASSWORD}
-      - SPRING_DATASOURCE_USERNAME=docintel_app
-      - SPRING_DATASOURCE_PASSWORD=${DOCINTEL_APP_DB_PASSWORD}
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel?user=docintel_documents&password=${DOCINTEL_DOCUMENTS_DB_PASSWORD}
+      - SPRING_DATASOURCE_USERNAME=docintel_documents
+      - SPRING_DATASOURCE_PASSWORD=${DOCINTEL_DOCUMENTS_DB_PASSWORD}
+      # DDL user (superuser) — used by Flyway to create documents.flyway_schema_history
+      - FLYWAY_DDL_USERNAME=docintel
+      - FLYWAY_DDL_PASSWORD=${POSTGRES_PASSWORD}
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
@@ -72,6 +75,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - SPRING_DATA_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - INTERNAL_GATEWAY_SECRET=${INTERNAL_GATEWAY_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,14 +94,20 @@ services:
       dockerfile: services/rag-service/Dockerfile
     environment:
       - QDRANT_URL=http://qdrant:6333
-      # Ollama runs natively on host (Metal on Apple Silicon, CUDA on Linux, vLLM in prod)
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      # LLM — chat generation and streaming
-      - OLLAMA_LLM_MODEL=qwen3.5:4b
-      - OLLAMA_LLM_FALLBACK=phi3:mini
-      # Embeddings — dense vectors via Ollama (GPU/Metal, no Docker model download)
-      - OLLAMA_EMBED_MODEL=nomic-embed-text
-      - OLLAMA_EMBED_DIM=768
+      # LLM Engine — OpenAI-compatible chat completions endpoint.
+      # Switch engine by overriding LLM_CHAT_URL in .env:
+      #   LMForge  (macOS/Apple Silicon): http://host.docker.internal:11430/v1
+      #   Ollama   (any platform, default): http://host.docker.internal:11434/v1
+      #   vLLM     (Linux/NVIDIA): http://host.docker.internal:8000/v1
+      #   LM Studio (Windows/macOS): http://host.docker.internal:1234/v1
+      - LLM_CHAT_URL=${LLM_CHAT_URL:-http://host.docker.internal:11434/v1}
+      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b}
+      - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-phi3:mini}
+      - LLM_API_KEY=${LLM_API_KEY:-none}
+      # Embeddings — Infinity (always Docker, platform-independent)
+      - LLM_EMBED_URL=${LLM_EMBED_URL:-http://infinity:7997/v1}
+      - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-nomic-embed-text}
+      - LLM_EMBED_DIM=768
       # Reranker — Infinity server (GPU/CPU via ONNX, decoupled from app process)
       - INFINITY_URL=http://infinity:7997
       - INFINITY_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
@@ -116,7 +126,7 @@ services:
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       # Disable Haystack's outbound telemetry ping (also avoids ~/.config write at startup)
       - HAYSTACK_TELEMETRY_ENABLED=false
-      - POSTGRES_URL=postgresql://docintel_app:${DOCINTEL_APP_DB_PASSWORD}@postgres:5432/docintel
+      - POSTGRES_URL=postgresql://docintel_rag:${DOCINTEL_RAG_DB_PASSWORD}@postgres:5432/docintel
       - OPA_URL=http://opa:8181
       - INTERNAL_GATEWAY_SECRET=${INTERNAL_GATEWAY_SECRET:-}
     depends_on:
@@ -145,6 +155,7 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
       - DOCUMENT_SERVICE_URL=http://document-service:8081
+      - INTERNAL_GATEWAY_SECRET=${INTERNAL_GATEWAY_SECRET:-}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
@@ -179,10 +190,10 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
       - QDRANT_URL=http://qdrant:6333
-      # Ollama runs natively on host
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
-      - DATABASE_URL=postgresql://docintel_ingestion:${DOCINTEL_INGESTION_DB_PASSWORD}@postgres:5432/docintel
+      # Embeddings via OpenAI-compatible endpoint (Infinity by default)
+      - LLM_EMBED_URL=${LLM_EMBED_URL:-http://infinity:7997/v1}
+      - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-nomic-embed-text}
+      - LLM_API_KEY=${LLM_API_KEY:-none}
       - DOCUMENT_SERVICE_URL=http://document-service:8081
       - DOCLING_ARTIFACTS_PATH=/app/docling-cache
       - DOCLING_DO_OCR=${DOCLING_DO_OCR:-true}
@@ -197,8 +208,6 @@ services:
       - STREAM_CONSUMER_ENABLED=true
     depends_on:
       qdrant:
-        condition: service_healthy
-      postgres:
         condition: service_healthy
       minio:
         condition: service_started
@@ -276,10 +285,10 @@ services:
       - ./config/zitadel/generated.env
     environment:
       - SPRING_PROFILES_ACTIVE=docker
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel?user=docintel_app&password=${DOCINTEL_APP_DB_PASSWORD}
-      - SPRING_DATASOURCE_USERNAME=docintel_app
-      - SPRING_DATASOURCE_PASSWORD=${DOCINTEL_APP_DB_PASSWORD}
-      # DDL user (schema owner) — used by Flyway to create the schema history table
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel?user=docintel_admin&password=${DOCINTEL_ADMIN_DB_PASSWORD}
+      - SPRING_DATASOURCE_USERNAME=docintel_admin
+      - SPRING_DATASOURCE_PASSWORD=${DOCINTEL_ADMIN_DB_PASSWORD}
+      # DDL user (superuser) — used by Flyway to create the admin.flyway_schema_history table
       - FLYWAY_DDL_USERNAME=docintel
       - FLYWAY_DDL_PASSWORD=${POSTGRES_PASSWORD}
       - QDRANT_URL=http://qdrant:6333
@@ -289,6 +298,10 @@ services:
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - DOCUMENT_SERVICE_URL=http://document-service:8081
+      - RAG_SERVICE_URL=http://rag-service:8000
+      - ANALYTICS_SERVICE_URL=http://analytics-service:8001
+      - INTERNAL_GATEWAY_SECRET=${INTERNAL_GATEWAY_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -388,7 +401,9 @@ services:
       - POSTGRES_USER=docintel
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - DOCINTEL_APP_DB_PASSWORD=${DOCINTEL_APP_DB_PASSWORD}
-      - DOCINTEL_INGESTION_DB_PASSWORD=${DOCINTEL_INGESTION_DB_PASSWORD}
+      - DOCINTEL_ADMIN_DB_PASSWORD=${DOCINTEL_ADMIN_DB_PASSWORD}
+      - DOCINTEL_DOCUMENTS_DB_PASSWORD=${DOCINTEL_DOCUMENTS_DB_PASSWORD}
+      - DOCINTEL_RAG_DB_PASSWORD=${DOCINTEL_RAG_DB_PASSWORD}
     volumes:
       # PostgreSQL 18+ uses version-specific subdirectories under /var/lib/postgresql
       - postgres-data:/var/lib/postgresql

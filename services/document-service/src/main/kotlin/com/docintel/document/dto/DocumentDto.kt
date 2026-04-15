@@ -79,6 +79,20 @@ data class FromPathResponse(
     val deduplicated: Boolean
 )
 
+/**
+ * Single chunk record sent by ingestion-service via the bulk persist API.
+ * Replaces the direct psycopg2 INSERT that ingestion-service used to perform.
+ */
+data class ChunkPersistRequest(
+    val chunkId: UUID,
+    val chunkIndex: Int,
+    val content: String,
+    val startChar: Int = 0,
+    val endChar: Int = 0,
+    val tokenCount: Int = 0,
+    val metadata: Map<String, Any> = emptyMap()
+)
+
 data class DataSourceRequest(
     val sourceType: String,
     val sourceConfig: Map<String, Any?> = emptyMap()

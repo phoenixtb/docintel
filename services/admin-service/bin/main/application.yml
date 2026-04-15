@@ -50,6 +50,10 @@ minio:
   access-key: ${MINIO_ACCESS_KEY:minioadmin}
   secret-key: ${MINIO_SECRET_KEY:minioadmin}
 
+internal:
+  gateway:
+    secret: ${INTERNAL_GATEWAY_SECRET:}
+
 # Logging
 logging:
   level:

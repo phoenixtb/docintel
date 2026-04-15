@@ -119,9 +119,19 @@ route_requires_role(method, path, "models:r") {
     path == "/api/v1/models"
 }
 
-# Admin — full admin panel access
+# Admin — full admin panel access (platform_admin)
 route_requires_role(method, path, "admin:rw") {
     glob.match("/api/v1/admin*", [], path)
+}
+
+# Cache management — tenant_admin can manage their own tenant's cache
+route_requires_role(method, path, "admin.cache:rw") {
+    method == "GET"
+    glob.match("/api/v1/admin/cache/stats*", [], path)
+}
+route_requires_role(method, path, "admin.cache:rw") {
+    method == "POST"
+    glob.match("/api/v1/admin/cache/clear*", [], path)
 }
 
 # Tenant settings — read/write (tenant_admin + platform_admin)
@@ -131,6 +141,10 @@ route_requires_role(method, path, "admin.tenants.settings:rw") {
 }
 route_requires_role(method, path, "admin.tenants.settings:rw") {
     method == "PATCH"
+    glob.match("/api/v1/tenants/*/settings*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "DELETE"
     glob.match("/api/v1/tenants/*/settings*", [], path)
 }
 

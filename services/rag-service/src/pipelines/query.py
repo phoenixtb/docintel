@@ -21,7 +21,8 @@ Architecture (separation of concerns):
   │  SecureRetriever → InfinityReranker → PromptBuilder → LLM               │
   └─────────────────────────────────────────────────────────────────────────┘
 
-All model inference (LLM + dense embeddings) runs through Ollama for GPU acceleration.
+All LLM inference runs through an OpenAI-compatible endpoint (LMForge, Ollama, vLLM, etc.).
+Dense embeddings go through LLM_EMBED_URL (Infinity or engine embed endpoint).
 BM25 sparse embeddings use fastembed locally (no server, lightweight).
 Reranker (cross-encoder) runs in Infinity — GPU/CPU via ONNX/TensorRT, decoupled from app.
 
@@ -37,8 +38,9 @@ import time
 from typing import Optional
 
 from haystack import AsyncPipeline
+from haystack.components.embedders.openai_text_embedder import OpenAITextEmbedder
 from haystack.components.routers import TransformersZeroShotTextRouter
-from haystack_integrations.components.embedders.ollama import OllamaTextEmbedder
+from haystack.utils import Secret
 
 from ..components.cache import SemanticCacheChecker, SemanticCacheWriter
 from ..components.embedders import BM25SparseTextEmbedder
@@ -96,18 +98,17 @@ def build_query_pipeline(settings: Settings) -> AsyncPipeline:
     )
     pipeline.add_component("prompt_builder", PromptBuilder())
 
-    # OllamaChatGenerator is the primary LLM component (proper Haystack integration).
-    # Import here to keep the top-level imports clean.
-    from haystack_integrations.components.generators.ollama import OllamaChatGenerator
+    from haystack.components.generators.chat.openai import OpenAIChatGenerator
 
     pipeline.add_component(
         "llm",
-        OllamaChatGenerator(
-            model=settings.ollama_llm_model,
-            url=settings.ollama_base_url,
+        OpenAIChatGenerator(
+            model=settings.llm_model,
+            api_base_url=settings.llm_chat_url,
+            api_key=Secret.from_token(settings.llm_api_key),
             generation_kwargs={
-                "temperature": settings.ollama_llm_temperature,
-                "num_predict": settings.ollama_llm_max_tokens,
+                "temperature": settings.llm_temperature,
+                "max_tokens": settings.llm_max_tokens,
             },
         ),
     )
@@ -185,7 +186,7 @@ class RAGService:
         self._ready = False
 
         # Components managed outside the pipeline
-        self._dense_embedder: Optional[OllamaTextEmbedder] = None
+        self._dense_embedder: Optional[OpenAITextEmbedder] = None
         self._sparse_embedder: Optional[BM25SparseTextEmbedder] = None
         self._cache_checker: Optional[SemanticCacheChecker] = None
         self._cache_writer: Optional[SemanticCacheWriter] = None
@@ -209,10 +210,10 @@ class RAGService:
 
         cfg = self._settings
 
-        # Dense embedder — stateless HTTP client to Ollama (Metal/GPU, no warm_up needed)
-        self._dense_embedder = OllamaTextEmbedder(
-            model=cfg.ollama_embed_model,
-            url=cfg.ollama_base_url,
+        self._dense_embedder = OpenAITextEmbedder(
+            model=cfg.llm_embed_model,
+            api_base_url=cfg.llm_embed_url,
+            api_key=Secret.from_token(cfg.llm_api_key),
         )
 
         # BM25 sparse embedder
@@ -250,20 +251,58 @@ class RAGService:
     # ── Conversation helpers ─────────────────────────────────────────────────
 
     def _load_conversation_history(
-        self, conversation_id: str, tenant_id: str, max_messages: int = 10
-    ) -> list[dict]:
-        try:
-            from ..db import get_conversation
+        self,
+        conversation_id: str,
+        tenant_id: str,
+    ) -> tuple[list[dict], dict]:
+        """
+        Returns (history_messages, context_state).
 
-            conv = get_conversation(conversation_id, tenant_id)
-            if conv and conv.get("messages"):
-                msgs = conv["messages"]
-                relevant = [m for m in msgs if m["role"] in ("user", "assistant")]
-                history = relevant[-(max_messages + 1) : -1] if relevant else []
-                return [{"role": m["role"], "content": m["content"]} for m in history]
+        history_messages: list sent to LLM —
+            [optional system summary msg] + last VERBATIM_RECENT user/assistant turns
+
+        context_state: metadata for the SSE stream —
+            {has_summary, summarized_turns, verbatim_turns}
+        """
+        cfg = self._settings
+        verbatim = cfg.conversation_verbatim_recent
+
+        empty_state = {"has_summary": False, "summarized_turns": 0, "verbatim_turns": 0}
+
+        try:
+            from ..db import get_conversation_summary_state, get_recent_messages
+
+            state = get_conversation_summary_state(conversation_id, tenant_id)
+            session_summary = state["session_summary"]
+            summary_upto_count = state["summary_upto_count"]
+            total = state["total_message_count"]
+
+            # Exclude the current question (not yet persisted) from verbatim count
+            recent = get_recent_messages(conversation_id, tenant_id, limit=verbatim)
+
+            history: list[dict] = []
+            if session_summary:
+                history.append({
+                    "role": "system",
+                    "content": f"Earlier in this conversation:\n{session_summary}",
+                })
+
+            history.extend(recent)
+
+            verbatim_count = len(recent)
+            summarized_turns = summary_upto_count // 2  # messages → turns (pairs)
+
+            context_state = {
+                "has_summary": bool(session_summary),
+                "summarized_turns": summarized_turns,
+                "verbatim_turns": verbatim_count // 2,
+            }
+
+            return history, context_state
+
         except Exception as e:
             logger.warning("Could not load conversation history: %s", e)
-        return []
+        return [], empty_state
 
     def _persist_conversation(
         self,
@@ -272,7 +311,10 @@ class RAGService:
         answer: str,
         sources: list[dict],
         tenant_id: str = "",
+        summarizer=None,
     ) -> None:
+        import asyncio
+
         try:
             from ..db import add_message
 
@@ -280,6 +322,97 @@ class RAGService:
             add_message(conversation_id, "assistant", answer, sources=sources, tenant_id=tenant_id)
         except Exception as e:
             logger.warning("Failed to persist conversation messages: %s", e)
+            return
+
+        if summarizer is not None:
+            try:
+                loop = asyncio.get_event_loop()
+                asyncio.ensure_future(
+                    self._maybe_compress_history(conversation_id, tenant_id, summarizer),
+                    loop=loop,
+                )
+            except Exception as e:
+                logger.warning("Failed to schedule history compression: %s", e)
+
+    async def _maybe_compress_history(
+        self,
+        conversation_id: str,
+        tenant_id: str,
+        summarizer,
+    ) -> None:
+        """
+        Anchored iterative compression (fire-and-forget).
+
+        Triggers when total user/assistant messages exceed the threshold.
+        Compresses only the newly-evictable span (not already in summary,
+        not in the verbatim recent window) into the existing summary anchor.
+        Writes a context_summary message so the UI can show a persistent divider.
+        """
+        cfg = self._settings
+        threshold = cfg.conversation_summary_threshold
+        verbatim = cfg.conversation_verbatim_recent
+
+        try:
+            from ..db import (
+                get_conversation_summary_state,
+                get_messages_slice,
+                update_conversation_summary,
+                add_message,
+            )
+
+            state = get_conversation_summary_state(conversation_id, tenant_id)
+            total = state["total_message_count"]
+
+            if total <= threshold:
+                return
+
+            summary_upto = state["summary_upto_count"]
+            evictable_end = total - verbatim
+
+            if evictable_end <= summary_upto:
+                return  # nothing new to evict yet
+
+            evictable_count = evictable_end - summary_upto
+            if evictable_count < 2:
+                return  # wait for at least one full turn
+
+            new_span = get_messages_slice(
+                conversation_id, tenant_id,
+                offset=summary_upto,
+                limit=evictable_count,
+            )
+
+            if not new_span:
+                return
+
+            new_summary = await summarizer.compress(
+                existing_summary=state["session_summary"],
+                new_span=new_span,
+            )
+
+            new_upto = summary_upto + len(new_span)
+            update_conversation_summary(conversation_id, tenant_id, new_summary, new_upto)
+
+            compressed_turns = len(new_span) // 2
+            add_message(
+                conversation_id,
+                "context_summary",
+                new_summary,
+                tenant_id=tenant_id,
+                metadata={
+                    "type": "context_compression",
+                    "compressed_turns": compressed_turns,
+                    "summary_upto_count": new_upto,
+                },
+            )
+
+            logger.info(
+                "Conversation %s compressed: %d new turns absorbed (total summarized: %d)",
+                conversation_id, compressed_turns, new_upto // 2,
+            )
+
+        except Exception as e:
+            logger.warning("History compression failed (non-fatal): %s", e)
 
     # ── Domain routing helper ────────────────────────────────────────────────
 
@@ -322,6 +455,7 @@ class RAGService:
         conversation_id: str | None = None,
         min_score: float | None = None,
         user_context: Optional[UserContext] = None,
+        summarizer=None,
     ) -> dict:
         """
         Execute the full RAG query.
@@ -350,7 +484,7 @@ class RAGService:
         start_time = time.time()
 
         # ── Step 1: Embed query ──────────────────────────────────────────────
-        # OllamaTextEmbedder.run() makes a synchronous HTTP request to Ollama.
+        # OpenAITextEmbedder.run() makes a synchronous HTTP request to the embed endpoint.
         # BM25SparseTextEmbedder.run() is CPU-bound. Both are offloaded to a thread pool
         # to avoid blocking the uvicorn event loop.
         embed_result = await loop.run_in_executor(
@@ -402,7 +536,7 @@ class RAGService:
         # ── Step 4: Conversation history ─────────────────────────────────────
         history: list[dict] = []
         if conversation_id:
-            history = self._load_conversation_history(conversation_id, tenant_id)
+            history, _ = self._load_conversation_history(conversation_id, tenant_id)
 
         # ── Step 5: Core Haystack Pipeline ───────────────────────────────────
         pipeline_inputs = {
@@ -437,14 +571,14 @@ class RAGService:
 
         llm_replies = result.get("llm", {}).get("replies", [])
         raw_text = ""
-        model_used = cfg.ollama_llm_model
+        model_used = cfg.llm_model
         if llm_replies:
             reply = llm_replies[0]
             raw_text = getattr(reply, "text", None) or (
                 reply.content[0].text if getattr(reply, "content", None) else ""
             )
             meta = getattr(reply, "meta", {}) or {}
-            model_used = meta.get("model", cfg.ollama_llm_model) if isinstance(meta, dict) else cfg.ollama_llm_model
+            model_used = meta.get("model", cfg.llm_model) if isinstance(meta, dict) else cfg.llm_model
 
         thinking, answer = _extract_think(_parse_json_answer(raw_text))
         latency_ms = int((time.time() - start_time) * 1000)
@@ -485,7 +619,10 @@ class RAGService:
 
         # ── Step 9: Persist conversation ──────────────────────────────────────
         if conversation_id:
-            self._persist_conversation(conversation_id, question, answer, sources, tenant_id=tenant_id)
+            self._persist_conversation(
+                conversation_id, question, answer, sources,
+                tenant_id=tenant_id, summarizer=summarizer,
+            )
 
         return {
             "answer": answer,

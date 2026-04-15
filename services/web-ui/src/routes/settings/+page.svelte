@@ -5,7 +5,7 @@
   import { toast } from 'svelte-sonner';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 
-  let activeTab: 'usage' | 'documents' | 'users' | 'model' = $state('usage');
+  let activeTab: 'usage' | 'documents' | 'users' | 'model' | 'cache' = $state('usage');
   let loading = $state(true);
 
   // Usage
@@ -35,22 +35,38 @@
   let updatingRoleFor: string | null = $state(null);
 
   // Model
-  interface ModelInfo { name: string; size?: number; modified_at?: string }
-  interface TenantSettings { llmModel: string | null; effectiveModel: string | null }
+  interface ModelInfo { name: string; size?: number; modified_at?: string; supports_thinking?: boolean }
+  interface TenantSettings { llmModel: string | null; effectiveModel: string | null; thinkingMode: boolean }
   let modelLoading = $state(false);
   let availableModels: ModelInfo[] = $state([]);
   let platformDefaultModel: string | null = $state(null);
   let tenantSettings: TenantSettings | null = $state(null);
   let selectedModel: string | null = $state(null);   // null = "Platform Default"
+  let thinkingMode = $state(false);
+  let thinkingSaving = $state(false);
   let modelSaving = $state(false);
   let modelConfirmOpen = $state(false);
   let pendingModel: string | null = $state(null);
+
+  // Cache
+  interface CacheStats { totalEntries: number; hitRate: number; avgLatencySavedMs: number }
+  let cacheLoading = $state(false);
+  let cacheStats: CacheStats | null = $state(null);
+  let clearingSemanticCache = $state(false);
+  let clearingResolverCache = $state(false);
+  let semanticCacheConfirmOpen = $state(false);
 
   // Platform admin has a global override when effectiveModel differs from tenant's own llmModel
   let isPlatformControlled = $derived(
     tenantSettings != null &&
     tenantSettings.effectiveModel !== null &&
     tenantSettings.effectiveModel !== tenantSettings.llmModel
+  );
+
+  // Whether the currently selected/active model supports thinking
+  let effectiveModelName = $derived(tenantSettings?.effectiveModel ?? selectedModel ?? platformDefaultModel ?? '');
+  let activeModelSupportsThinking = $derived(
+    availableModels.find(m => m.name === effectiveModelName)?.supports_thinking ?? false
   );
 
   const tenantId = getTenantId();
@@ -140,7 +156,11 @@
       }
       if (settingsRes.ok) {
         tenantSettings = await settingsRes.json();
-        selectedModel = tenantSettings?.llmModel ?? null;
+        // Show the effective model in the select even if tenant has no explicit preference.
+        // This prevents the dropdown from appearing blank. The save button remains disabled
+        // when selection matches the stored llmModel (null check handled below).
+        selectedModel = tenantSettings?.llmModel ?? tenantSettings?.effectiveModel ?? platformDefaultModel ?? null;
+        thinkingMode = tenantSettings?.thinkingMode ?? false;
       }
     } catch (e) {
       toast.error(`Failed to load model settings: ${e}`);
@@ -165,8 +185,9 @@
       });
       if (!res.ok) throw new Error(`${res.status}`);
 
-      // 2. Invalidate semantic cache for this tenant
+      // 2. Invalidate semantic cache + rag-service resolver cache
       await apiFetch(`/api/v1/admin/cache/clear/${tenantId}`, { method: 'POST' });
+      await apiFetch(`/api/v1/tenants/${tenantId}/settings/invalidate-cache`, { method: 'DELETE' });
 
       selectedModel = pendingModel;
       tenantSettings = await res.json();
@@ -178,12 +199,76 @@
     pendingModel = null;
   }
 
+  async function saveThinkingMode(enabled: boolean) {
+    thinkingSaving = true;
+    try {
+      const res = await apiFetch(`/api/v1/tenants/${tenantId}/settings`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thinkingMode: enabled }),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      tenantSettings = await res.json();
+      thinkingMode = tenantSettings?.thinkingMode ?? false;
+      // Bust both caches: resolver (in-process TTL) and semantic (Qdrant).
+      // Semantic cache must be cleared because cached responses were generated
+      // without/with thinking tokens and are now stale after the mode change.
+      await Promise.all([
+        apiFetch(`/api/v1/tenants/${tenantId}/settings/invalidate-cache`, { method: 'DELETE' }),
+        apiFetch(`/api/v1/admin/cache/clear/${tenantId}`, { method: 'POST' }),
+      ]);
+      toast.success(enabled ? 'Thinking mode enabled — caches cleared.' : 'Thinking mode disabled — caches cleared.');
+    } catch (e) {
+      toast.error(`Failed to update thinking mode: ${e}`);
+      thinkingMode = !enabled; // revert toggle
+    }
+    thinkingSaving = false;
+  }
+
+  async function loadCache() {
+    cacheLoading = true;
+    try {
+      const res = await apiFetch('/api/v1/admin/cache/stats');
+      if (res.ok) cacheStats = await res.json();
+    } catch (e) {
+      toast.error(`Failed to load cache stats: ${e}`);
+    }
+    cacheLoading = false;
+  }
+
+  async function clearSemanticCache() {
+    semanticCacheConfirmOpen = false;
+    clearingSemanticCache = true;
+    try {
+      const res = await apiFetch(`/api/v1/admin/cache/clear/${tenantId}`, { method: 'POST' });
+      if (!res.ok) throw new Error(`${res.status}`);
+      toast.success('Semantic cache cleared. Next queries will re-run through the LLM.');
+      await loadCache();
+    } catch (e) {
+      toast.error(`Failed to clear semantic cache: ${e}`);
+    }
+    clearingSemanticCache = false;
+  }
+
+  async function clearResolverCache() {
+    clearingResolverCache = true;
+    try {
+      const res = await apiFetch(`/api/v1/tenants/${tenantId}/settings/invalidate-cache`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`${res.status}`);
+      toast.success('Model settings cache refreshed.');
+    } catch (e) {
+      toast.error(`Failed to refresh settings cache: ${e}`);
+    }
+    clearingResolverCache = false;
+  }
+
   function switchTab(tab: typeof activeTab) {
     activeTab = tab;
     if (tab === 'usage') loadUsage();
     if (tab === 'documents') loadDocuments();
     if (tab === 'users') loadUsers();
     if (tab === 'model') loadModel();
+    if (tab === 'cache') loadCache();
   }
 
   onMount(() => {
@@ -233,7 +318,7 @@
         { id: 'usage', label: 'Usage' },
         { id: 'documents', label: 'Documents' },
         { id: 'users', label: 'Users' },
-        ...(isTenantAdmin() ? [{ id: 'model', label: 'Model' }] : []),
+        ...(isTenantAdmin() ? [{ id: 'model', label: 'Model' }, { id: 'cache', label: 'Cache' }] : []),
       ] as tab}
         <button
           onclick={() => switchTab(tab.id as typeof activeTab)}
@@ -446,7 +531,7 @@
               </div>
               <button
                 onclick={() => requestModelChange(selectedModel)}
-                disabled={isPlatformControlled || modelSaving || selectedModel === tenantSettings?.llmModel}
+                disabled={isPlatformControlled || modelSaving || selectedModel === (tenantSettings?.llmModel ?? tenantSettings?.effectiveModel ?? platformDefaultModel)}
                 class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white
                   hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
@@ -460,9 +545,121 @@
               </p>
             {/if}
           </div>
+
+          <!-- Thinking mode toggle -->
+          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            <div class="flex items-start justify-between gap-4">
+              <div class="flex-1">
+                <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Thinking Mode</h3>
+                <p class="text-sm text-gray-500 dark:text-gray-400">
+                  When enabled, the model reasons step-by-step before answering (shown in a collapsible panel).
+                  Best for complex multi-step analysis. For straightforward factual retrieval, keeping this
+                  <span class="font-medium">off</span> reduces latency and often gives better results.
+                </p>
+                {#if !activeModelSupportsThinking}
+                  <p class="text-xs text-amber-600 dark:text-amber-400 mt-2">
+                    The active model does not support thinking mode.
+                  </p>
+                {/if}
+              </div>
+              <button
+                role="switch"
+                aria-checked={thinkingMode}
+                disabled={!activeModelSupportsThinking || thinkingSaving}
+                onclick={() => saveThinkingMode(!thinkingMode)}
+                class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent
+                  transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2
+                  disabled:opacity-40 disabled:cursor-not-allowed mt-0.5
+                  {thinkingMode && activeModelSupportsThinking ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}"
+              >
+                <span
+                  class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0
+                    transition duration-200 ease-in-out
+                    {thinkingMode && activeModelSupportsThinking ? 'translate-x-5' : 'translate-x-0'}"
+                ></span>
+              </button>
+            </div>
+          </div>
+
         </div>
       {/if}
     {/if}
+
+    <!-- Cache Tab -->
+    {#if activeTab === 'cache'}
+      {#if cacheLoading}
+        <div class="text-center py-12 text-gray-400">Loading...</div>
+      {:else}
+        <div class="space-y-4">
+
+          <!-- Semantic Query Cache -->
+          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            <div class="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <h3 class="text-base font-semibold text-gray-900 dark:text-white">Semantic Query Cache</h3>
+                <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                  Stores AI-generated responses for semantically similar queries to reduce latency.
+                  Clear this when you change the model, toggle thinking mode, or want fresh responses.
+                </p>
+              </div>
+              <button
+                onclick={() => semanticCacheConfirmOpen = true}
+                disabled={clearingSemanticCache}
+                class="shrink-0 px-3 py-1.5 text-sm font-medium rounded-lg border
+                  border-red-300 dark:border-red-700 text-red-600 dark:text-red-400
+                  hover:bg-red-50 dark:hover:bg-red-900/20
+                  disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {clearingSemanticCache ? 'Clearing…' : 'Clear Cache'}
+              </button>
+            </div>
+            {#if cacheStats}
+              <div class="grid grid-cols-2 gap-4">
+                <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                  <p class="text-xs text-gray-500 dark:text-gray-400 mb-1">Cached responses</p>
+                  <p class="text-xl font-semibold text-gray-900 dark:text-white">{cacheStats.totalEntries.toLocaleString()}</p>
+                </div>
+                <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                  <p class="text-xs text-gray-500 dark:text-gray-400 mb-1">Cache hit rate</p>
+                  <p class="text-xl font-semibold text-gray-900 dark:text-white">{(cacheStats.hitRate * 100).toFixed(1)}%</p>
+                </div>
+              </div>
+            {:else}
+              <p class="text-sm text-gray-400">Stats unavailable.</p>
+            {/if}
+          </div>
+
+          <!-- Model Settings Cache -->
+          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h3 class="text-base font-semibold text-gray-900 dark:text-white">Model Settings Cache</h3>
+                <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                  In-process cache of your tenant's model and thinking mode preferences.
+                  Auto-expires every 60 seconds. Force-refresh if a settings change isn't
+                  taking effect immediately.
+                </p>
+                <p class="text-xs text-gray-400 dark:text-gray-500 mt-2">
+                  This cache is automatically cleared when you save model or thinking mode settings.
+                </p>
+              </div>
+              <button
+                onclick={clearResolverCache}
+                disabled={clearingResolverCache}
+                class="shrink-0 px-3 py-1.5 text-sm font-medium rounded-lg border
+                  border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400
+                  hover:bg-gray-50 dark:hover:bg-gray-700
+                  disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {clearingResolverCache ? 'Refreshing…' : 'Force Refresh'}
+              </button>
+            </div>
+          </div>
+
+        </div>
+      {/if}
+    {/if}
+
   </div>
 </div>
 
@@ -484,4 +681,14 @@
   dangerous={false}
   onconfirm={confirmModelChange}
   oncancel={() => { modelConfirmOpen = false; pendingModel = null; }}
+/>
+
+<ConfirmDialog
+  open={semanticCacheConfirmOpen}
+  title="Clear semantic cache?"
+  message="This will delete all cached query responses for your tenant. The next queries will be slower as they re-run through the LLM. This cannot be undone."
+  confirmLabel="Clear Cache"
+  dangerous={true}
+  onconfirm={clearSemanticCache}
+  oncancel={() => { semanticCacheConfirmOpen = false; }}
 />

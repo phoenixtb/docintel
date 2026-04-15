@@ -18,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.extension.ExtendWith
+import org.springframework.context.ApplicationEventPublisher
 import org.springframework.data.domain.PageImpl
 import org.springframework.data.domain.Pageable
 import org.springframework.mock.web.MockMultipartFile
@@ -50,6 +51,9 @@ class DocumentServiceTest {
     @MockK
     private lateinit var ingestionServiceClient: IngestionServiceClient
 
+    @MockK
+    private lateinit var eventPublisher: ApplicationEventPublisher
+
     private lateinit var documentService: DocumentService
 
     private val testTenantId = "test-tenant"
@@ -57,12 +61,14 @@ class DocumentServiceTest {
 
     @BeforeEach
     fun setUp() {
+        every { eventPublisher.publishEvent(any()) } just Runs
         documentService = DocumentService(
             documentRepository,
             dataSourceRepository,
             chunkRepository,
             storageService,
-            ingestionServiceClient
+            ingestionServiceClient,
+            eventPublisher,
         )
     }
 

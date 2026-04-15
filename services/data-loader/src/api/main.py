@@ -15,11 +15,13 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from docintel_common.tracing import TraceContext, configure_trace_logging
 
 from ..adapters import HuggingFaceAdapter, LoadedFile
 from ..config import get_settings
@@ -84,10 +86,18 @@ app = FastAPI(
 if _METRICS_ENABLED:
     Instrumentator().instrument(app).expose(app)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-)
+configure_trace_logging()
+
+
+@app.middleware("http")
+async def tracing_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-Id") or str(uuid4())
+    tenant_id  = request.headers.get("X-Tenant-Id", "-")
+    user_id    = request.headers.get("X-User-Id", "-")
+    TraceContext.set(request_id, tenant_id, user_id)
+    response = await call_next(request)
+    response.headers["X-Request-Id"] = request_id
+    return response
 
 
 # =============================================================================
@@ -130,7 +140,7 @@ class DatasetInfo(BaseModel):
 
 class DatasetLoadRequest(BaseModel):
     datasets: list[str] = Field(default_factory=list)
-    samples_per_dataset: int = Field(default=100, ge=1, le=10_000)
+    samples_per_dataset: int = Field(default=100, ge=1, le=1_000_000)
     tenant_id: str = Field(default="default")
 
 
