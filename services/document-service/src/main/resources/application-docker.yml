@@ -33,6 +33,9 @@ rag-service:
 ingestion-service:
   url: ${INGESTION_SERVICE_URL:http://ingestion-service:8001}
 
+qdrant:
+  url: ${QDRANT_URL:http://qdrant:6333}
+
 internal:
   gateway:
     secret: ${INTERNAL_GATEWAY_SECRET:}

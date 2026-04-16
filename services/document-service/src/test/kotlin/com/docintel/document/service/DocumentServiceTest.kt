@@ -7,8 +7,10 @@ import com.docintel.document.entity.DataSource
 import com.docintel.document.entity.DataSourceStatus
 import com.docintel.document.entity.Document
 import com.docintel.document.entity.ProcessingStatus
+import com.docintel.document.entity.DeletionTask
 import com.docintel.document.repository.ChunkRepository
 import com.docintel.document.repository.DataSourceRepository
+import com.docintel.document.repository.DeletionTaskRepository
 import com.docintel.document.repository.DocumentRepository
 import io.mockk.*
 import io.mockk.impl.annotations.MockK
@@ -46,12 +48,15 @@ class DocumentServiceTest {
     private lateinit var chunkRepository: ChunkRepository
 
     @MockK
+    private lateinit var deletionTaskRepository: DeletionTaskRepository
+
+    @MockK
     private lateinit var storageService: StorageService
 
     @MockK
     private lateinit var ingestionServiceClient: IngestionServiceClient
 
-    @MockK
+    @MockK(relaxed = true)
     private lateinit var eventPublisher: ApplicationEventPublisher
 
     private lateinit var documentService: DocumentService
@@ -61,11 +66,11 @@ class DocumentServiceTest {
 
     @BeforeEach
     fun setUp() {
-        every { eventPublisher.publishEvent(any()) } just Runs
         documentService = DocumentService(
             documentRepository,
             dataSourceRepository,
             chunkRepository,
+            deletionTaskRepository,
             storageService,
             ingestionServiceClient,
             eventPublisher,
@@ -169,7 +174,7 @@ class DocumentServiceTest {
         )
         val page = PageImpl(documents)
 
-        every { documentRepository.findByTenantId(testTenantId, any()) } returns page
+        every { documentRepository.findByTenantIdAndStatusNot(testTenantId, ProcessingStatus.DELETING, any()) } returns page
 
         val result = documentService.listDocuments(testTenantId, null, Pageable.unpaged())
 
@@ -192,30 +197,27 @@ class DocumentServiceTest {
     }
 
     @Test
-    fun `should delete document and associated data`() = runBlocking {
+    fun `should queue document for deletion via markForDeletion`() {
         val document = createTestDocument()
 
         every { documentRepository.findByIdAndTenantId(testDocumentId, testTenantId) } returns document
-        coEvery { ingestionServiceClient.deleteDocumentVectors(testTenantId, testDocumentId) } returns true
-        every { chunkRepository.deleteByDocumentId(testDocumentId) } returns 3L
-        every { storageService.deleteDocumentFiles(testTenantId, any<String>()) } just Runs
-        every { documentRepository.delete(document) } just Runs
+        every { documentRepository.save(any()) } answers { firstArg() }
+        every { deletionTaskRepository.save(any<DeletionTask>()) } answers { firstArg() }
 
-        val result = documentService.deleteDocument(testDocumentId, testTenantId)
+        val result = documentService.markForDeletion(testDocumentId, testTenantId)
 
         assertTrue(result)
-        verify { chunkRepository.deleteByDocumentId(testDocumentId) }
-        verify { storageService.deleteDocumentFiles(testTenantId, document.filePath) }
-        verify { documentRepository.delete(document) }
+        verify { documentRepository.save(match { it.status == ProcessingStatus.DELETING }) }
+        verify { deletionTaskRepository.save(any<DeletionTask>()) }
     }
 
     @Test
-    fun `should return false when deleting non-existent document`() = runBlocking {
+    fun `should return false when marking non-existent document for deletion`() {
         every { documentRepository.findByIdAndTenantId(any(), any()) } returns null
 
-        val result = documentService.deleteDocument(UUID.randomUUID(), testTenantId)
+        val result = documentService.markForDeletion(UUID.randomUUID(), testTenantId)
 
-        assertTrue(!result)
+        assertFalse(result)
     }
 
     @Test

@@ -10,7 +10,9 @@ enum class ProcessingStatus {
     PENDING,
     PROCESSING,
     COMPLETED,
-    FAILED
+    FAILED,
+    /** Document is queued for async cleanup (Qdrant + MinIO). Hidden from user-facing queries. */
+    DELETING
 }
 
 @Entity

@@ -460,4 +460,116 @@ class DocumentControllerTest : BaseIntegrationTest() {
             objectMapper.readTree(result.response.contentAsString)["id"].asText()
         )
     }
+
+    // ─── Cleanup ──────────────────────────────────────────────────────────────
+
+    @Test
+    fun `POST cleanup preview returns matchCount for uploaded docs`() {
+        uploadTestDocument("doc-a.txt")
+        uploadTestDocument("doc-b.txt")
+
+        mockMvc.perform(
+            post("/internal/documents/cleanup/preview")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.matchCount").value(2))
+            .andExpect(jsonPath("$.tenantId").value(testTenantId))
+    }
+
+    @Test
+    fun `POST cleanup preview with status filter returns only matching docs`() {
+        uploadTestDocument("pending.txt")
+
+        mockMvc.perform(
+            post("/internal/documents/cleanup/preview")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"statuses":["FAILED"]}""")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.matchCount").value(0))
+    }
+
+    @Test
+    fun `POST cleanup preview cross-tenant without delete_all role returns 403`() {
+        mockMvc.perform(
+            post("/internal/documents/cleanup/preview")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"targetTenantId":"other-tenant"}""")
+                .header("X-Tenant-Id", testTenantId)
+                .header("X-User-Roles", "documents:r,documents:delete")
+        )
+            .andExpect(status().isForbidden)
+    }
+
+    @Test
+    fun `POST cleanup jobs returns 202 with jobId`() {
+        mockMvc.perform(
+            post("/internal/documents/cleanup/jobs")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isAccepted)
+            .andExpect(jsonPath("$.jobId").exists())
+            .andExpect(jsonPath("$.tenantId").value(testTenantId))
+    }
+
+    @Test
+    fun `POST cleanup jobs returns 409 when another job is active`() {
+        mockMvc.perform(
+            post("/internal/documents/cleanup/jobs")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}")
+                .header("X-Tenant-Id", testTenantId)
+        ).andExpect(status().isAccepted)
+
+        mockMvc.perform(
+            post("/internal/documents/cleanup/jobs")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}")
+                .header("X-Tenant-Id", testTenantId)
+        ).andExpect(status().isConflict)
+    }
+
+    @Test
+    fun `GET cleanup job status returns job details`() {
+        val result = mockMvc.perform(
+            post("/internal/documents/cleanup/jobs")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}")
+                .header("X-Tenant-Id", testTenantId)
+        ).andExpect(status().isAccepted).andReturn()
+
+        val jobId = objectMapper.readTree(result.response.contentAsString)["jobId"].asText()
+
+        mockMvc.perform(
+            get("/internal/documents/cleanup/jobs/$jobId")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.jobId").value(jobId))
+    }
+
+    @Test
+    fun `DELETE cleanup job cancels active job`() {
+        val result = mockMvc.perform(
+            post("/internal/documents/cleanup/jobs")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}")
+                .header("X-Tenant-Id", testTenantId)
+        ).andExpect(status().isAccepted).andReturn()
+
+        val jobId = objectMapper.readTree(result.response.contentAsString)["jobId"].asText()
+
+        mockMvc.perform(
+            delete("/internal/documents/cleanup/jobs/$jobId")
+                .header("X-Tenant-Id", testTenantId)
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.cancelled").value(true))
+    }
 }

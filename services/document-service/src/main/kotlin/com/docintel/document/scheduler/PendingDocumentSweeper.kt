@@ -34,6 +34,8 @@ class PendingDocumentSweeper(
 
     @Scheduled(fixedDelay = 5 * 60 * 1_000L, initialDelay = 60_000L)
     fun sweep() {
+        // Use updatedAt (not createdAt) so that a document which was recently touched
+        // (e.g. just set to PROCESSING) is not immediately retried by the next sweep run.
         val before = Instant.now().minus(STALE_MINUTES, ChronoUnit.MINUTES)
         val stale = documentRepository.findStaleByStatusIn(
             statuses = listOf(ProcessingStatus.PENDING, ProcessingStatus.PROCESSING),

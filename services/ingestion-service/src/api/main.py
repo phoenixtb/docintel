@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from ..job_registry import JobRegistry
 
 from docintel_common.internal_auth import verify_internal_token
+from docintel_common.messaging import RedisStreamBus, TOPIC_INGESTION_COMPLETE
 from docintel_common.security import CLASSIFICATION_ORDER, Classification, DocumentACL
 from docintel_common.tracing import TraceContext, configure_trace_logging
 
@@ -280,9 +281,30 @@ async def _ingest_document_background(
 
     except Exception as e:
         logger.exception("Ingestion failed for document %s", request.document_id)
-        # Status update on failure is handled by document-service via the Redis
-        # ingestion.complete stream consumer (IngestionCompleteConsumer).
-        # We still log here but no longer write directly to the DB.
+        # Publish ingestion.complete FAILED so IngestionCompleteConsumer in document-service
+        # can drive the document status to FAILED. Without this, the HTTP ingest path left
+        # documents stuck in PROCESSING indefinitely (only the stream worker published FAILED).
+        try:
+            cfg = get_settings()
+            bus = RedisStreamBus(
+                host=cfg.redis_host,
+                port=cfg.redis_port,
+                password=cfg.redis_password,
+            )
+            await bus.publish(TOPIC_INGESTION_COMPLETE, {
+                "documentId": request.document_id,
+                "tenantId":   effective_tenant_id,
+                "chunkCount": 0,
+                "domain":     "general",
+                "status":     "FAILED",
+                "error":      str(e),
+            })
+            await bus.close()
+        except Exception as publish_err:
+            logger.error(
+                "Failed to publish ingestion.complete FAILED for document %s: %s",
+                request.document_id, publish_err,
+            )
     finally:
         for p in tmp_paths:
             try:

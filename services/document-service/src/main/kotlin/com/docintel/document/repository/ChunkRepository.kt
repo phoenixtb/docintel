@@ -2,7 +2,10 @@ package com.docintel.document.repository
 
 import com.docintel.document.entity.Chunk
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Modifying
+import org.springframework.data.jpa.repository.Query
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
 
 @Repository
@@ -13,8 +16,14 @@ interface ChunkRepository : JpaRepository<Chunk, UUID> {
     fun findByDocumentIdOrderByChunkIndex(documentId: UUID): List<Chunk>
     
     fun countByDocumentId(documentId: UUID): Long
-    
-    fun deleteByDocumentId(documentId: UUID): Long
-    
-    fun deleteByTenantId(tenantId: String): Long
+
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM Chunk c WHERE c.documentId = :documentId")
+    fun deleteByDocumentId(documentId: UUID): Int
+
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM Chunk c WHERE c.tenantId = :tenantId")
+    fun deleteByTenantId(tenantId: String): Int
 }

@@ -44,6 +44,25 @@ spring:
           filters:
             - RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents${segment}
 
+        # Cleanup job SSE stream — long-lived; must be before the generic document-service route.
+        - id: document-service-cleanup-events
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents/cleanup/jobs/*/events
+            - Method=GET
+          filters:
+            - RewritePath=/api/v1/documents/cleanup/jobs/(?<jobId>[^/]+)/events, /internal/documents/cleanup/jobs/${jobId}/events
+          metadata:
+            response-timeout: -1
+            connect-timeout: 5000
+
+        - id: document-service-cleanup
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents/cleanup, /api/v1/documents/cleanup/**
+          filters:
+            - RewritePath=/api/v1/documents/cleanup(?<segment>/?.*), /internal/documents/cleanup${segment}
+
         - id: document-service-delete-all
           uri: http://document-service:8081
           predicates:

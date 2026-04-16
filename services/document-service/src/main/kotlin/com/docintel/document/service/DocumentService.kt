@@ -4,10 +4,12 @@ import com.docintel.document.dto.*
 import com.docintel.document.entity.Chunk
 import com.docintel.document.entity.DataSource
 import com.docintel.document.entity.DataSourceStatus
+import com.docintel.document.entity.DeletionTask
 import com.docintel.document.entity.Document
 import com.docintel.document.entity.ProcessingStatus
 import com.docintel.document.repository.ChunkRepository
 import com.docintel.document.repository.DataSourceRepository
+import com.docintel.document.repository.DeletionTaskRepository
 import com.docintel.document.repository.DocumentRepository
 import com.docintel.document.sse.DocumentStatusEvent
 import org.slf4j.LoggerFactory
@@ -15,6 +17,7 @@ import org.springframework.context.ApplicationEventPublisher
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Pageable
+import org.springframework.data.domain.Sort
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.multipart.MultipartFile
@@ -28,6 +31,7 @@ class DocumentService(
     private val documentRepository: DocumentRepository,
     private val dataSourceRepository: DataSourceRepository,
     private val chunkRepository: ChunkRepository,
+    private val deletionTaskRepository: DeletionTaskRepository,
     private val storageService: StorageService,
     private val ingestionServiceClient: IngestionServiceClient,
     private val eventPublisher: ApplicationEventPublisher,
@@ -35,6 +39,9 @@ class DocumentService(
     private val logger = LoggerFactory.getLogger(DocumentService::class.java)
 
     companion object {
+        /** Maximum IDs fetched in a single cleanup snapshot. Protects memory on huge tenants. */
+        const val MAX_SNAPSHOT_IDS = 10_000
+
         /**
          * Derive a deterministic UUID and full content hash from SHA-256(tenantId + fileBytes).
          *
@@ -101,8 +108,9 @@ class DocumentService(
                     )
                     return Pair(existing.toResponse(), true)
                 }
-                ProcessingStatus.FAILED -> {
-                    logger.info("Re-processing FAILED document: document_id={} tenant={}", documentId, tenantId)
+                ProcessingStatus.FAILED, ProcessingStatus.DELETING -> {
+                    // DELETING: a prior delete is in progress; treat as gone and allow re-upload.
+                    logger.info("Re-processing {} document: document_id={} tenant={}", existing.status, documentId, tenantId)
                     // Fall through to re-upload and re-save below.
                 }
             }
@@ -158,8 +166,8 @@ class DocumentService(
                     )
                     return Pair(existing.toResponse(), true)
                 }
-                ProcessingStatus.FAILED -> {
-                    logger.info("Re-processing FAILED document from-path: document_id={} tenant={}", documentId, tenantId)
+                ProcessingStatus.FAILED, ProcessingStatus.DELETING -> {
+                    logger.info("Re-processing {} document from-path: document_id={} tenant={}", existing.status, documentId, tenantId)
                 }
             }
         }
@@ -299,31 +307,33 @@ class DocumentService(
         status: ProcessingStatus? = null,
         pageable: Pageable
     ): Page<DocumentResponse> {
+        // DELETING is an internal state; never expose it to callers.
+        if (status == ProcessingStatus.DELETING) return org.springframework.data.domain.Page.empty(pageable)
         val page = if (status != null) {
             documentRepository.findByTenantIdAndStatus(tenantId, status, pageable)
         } else {
-            documentRepository.findByTenantId(tenantId, pageable)
+            documentRepository.findByTenantIdAndStatusNot(tenantId, ProcessingStatus.DELETING, pageable)
         }
         return page.map { it.toResponse() }
     }
 
     /**
-     * Delete a document and all associated data.
+     * Mark a document for async deletion.
      *
-     * NOT annotated @Transactional — see processDocument for the rationale.
+     * Atomically sets status=DELETING and inserts a [DeletionTask] outbox record.
+     * [DeletionTaskWorker] will asynchronously clean up Qdrant vectors, MinIO files,
+     * and finally the PG rows. Returns false if the document does not exist.
      */
-    suspend fun deleteDocument(id: UUID, tenantId: String): Boolean {
-        val doc = fetchDocumentForIngestion(id, tenantId) ?: return false
-
-        val vectorsDeleted = ingestionServiceClient.deleteDocumentVectors(tenantId, id)
-        if (!vectorsDeleted) {
-            throw IllegalStateException(
-                "Failed to delete vectors for document $id in Qdrant. " +
-                "Aborting deletion to prevent orphan vector/PG state mismatch."
-            )
-        }
-
-        deleteDocumentRecords(id, tenantId, doc.filePath)
+    @Transactional
+    fun markForDeletion(id: UUID, tenantId: String): Boolean {
+        val doc = documentRepository.findByIdAndTenantId(id, tenantId) ?: return false
+        if (doc.status == ProcessingStatus.DELETING) return true  // already queued
+        doc.status = ProcessingStatus.DELETING
+        documentRepository.save(doc)
+        deletionTaskRepository.save(
+            DeletionTask(tenantId = tenantId, documentId = id, filePath = doc.filePath)
+        )
+        logger.info("Document {} (tenant={}) queued for deletion", id, tenantId)
         return true
     }
 
@@ -331,15 +341,14 @@ class DocumentService(
     fun documentExistsForTenant(id: UUID, tenantId: String): Boolean =
         documentRepository.findByIdAndTenantId(id, tenantId) != null
 
-    @Transactional
-    fun deleteDocumentRecords(id: UUID, tenantId: String, filePath: String) {
+    /**
+     * Directly delete document records from PG (called by [DeletionTaskWorker] after
+     * Qdrant + MinIO have been cleaned up). Each repository call has its own
+     * [Transactional] and is idempotent — safe to retry.
+     */
+    fun deleteDocumentRecords(id: UUID, tenantId: String) {
         chunkRepository.deleteByDocumentId(id)
-        try {
-            storageService.deleteDocumentFiles(tenantId, filePath)
-        } catch (e: Exception) {
-            logger.warn("Failed to delete files for document $id (non-fatal): ${e.message}")
-        }
-        documentRepository.findByIdAndTenantId(id, tenantId)?.let { documentRepository.delete(it) }
+        documentRepository.deleteByIdAndTenantId(id, tenantId)
     }
 
     fun getDocumentChunks(documentId: UUID, tenantId: String): List<ChunkResponse> {
@@ -351,42 +360,79 @@ class DocumentService(
     }
 
     /**
-     * Delete all documents for a tenant.
-     * NOT annotated @Transactional — see processDocument for the rationale.
+     * Mark all documents for a tenant for async deletion.
+     *
+     * Optimistically drops the entire Qdrant collection (fast path). Then marks each
+     * document DELETING and inserts a [DeletionTask] with [DeletionTask.qdrantDone]
+     * set based on whether the Qdrant collection drop succeeded.
+     * [DeletionTaskWorker] then handles per-document MinIO cleanup and PG removal.
      */
     suspend fun deleteAllDocuments(tenantId: String): Int {
-        try {
+        val qdrantDone = try {
             ingestionServiceClient.deleteTenantVectors(tenantId)
         } catch (e: Exception) {
-            logger.warn("Failed to delete vectors for tenant $tenantId: ${e.message}")
+            logger.warn("Failed to delete Qdrant collection for tenant {}: {}", tenantId, e.message)
+            false
         }
-
-        val deleted = deleteTenantDocumentBatches(tenantId)
-        logger.info("Deleted $deleted documents for tenant $tenantId")
-        return deleted
+        val count = markAllDocumentsForDeletion(tenantId, qdrantAlreadyDeleted = qdrantDone)
+        logger.info("Queued {} documents for deletion for tenant={} (qdrantCollectionDropped={})", count, tenantId, qdrantDone)
+        return count
     }
 
     @Transactional
-    fun deleteTenantDocumentBatches(tenantId: String): Int {
-        val pageSize = 200
-        var deleted = 0
-
+    fun markAllDocumentsForDeletion(tenantId: String, qdrantAlreadyDeleted: Boolean = false): Int {
+        var total = 0
         while (true) {
-            val documents = documentRepository.findByTenantId(
-                tenantId, PageRequest.of(0, pageSize)
-            ).content
-            if (documents.isEmpty()) break
-
-            for (doc in documents) {
-                chunkRepository.deleteByDocumentId(doc.id)
-                try {
-                    storageService.deleteDocumentFiles(tenantId, doc.filePath)
-                } catch (_: Exception) { }
+            val page = documentRepository.findByTenantIdAndStatusNot(
+                tenantId, ProcessingStatus.DELETING, PageRequest.of(0, 200)
+            )
+            if (page.content.isEmpty()) break
+            val tasks = page.content.map { doc ->
+                doc.status = ProcessingStatus.DELETING
+                DeletionTask(
+                    tenantId = tenantId,
+                    documentId = doc.id,
+                    filePath = doc.filePath,
+                    qdrantDone = qdrantAlreadyDeleted,
+                )
             }
-            documentRepository.deleteAll(documents)
-            deleted += documents.size
+            documentRepository.saveAll(page.content)
+            deletionTaskRepository.saveAll(tasks)
+            total += page.content.size
+            if (!page.hasNext()) break
         }
-        return deleted
+        return total
+    }
+
+    // ==========================================================================
+    // Cleanup — filter-based preview and ID snapshot (used by CleanupJobService)
+    // ==========================================================================
+
+    /** Returns the number of documents matching [filters] for the given tenant. */
+    @Transactional(readOnly = true)
+    fun previewCleanup(tenantId: String, filters: CleanupFiltersRequest): Long {
+        val spec = DocumentSpecifications.fromFilters(tenantId, filters)
+        return documentRepository.count(spec)
+    }
+
+    /**
+     * Snapshot the IDs of documents matching [filters].
+     * Paginates through the result to cap memory usage at [MAX_SNAPSHOT_IDS].
+     * The snapshot is stable: subsequent uploads won't appear in this job's work set.
+     */
+    @Transactional(readOnly = true)
+    fun snapshotMatchingIds(tenantId: String, filters: CleanupFiltersRequest): List<UUID> {
+        val spec = DocumentSpecifications.fromFilters(tenantId, filters)
+        val ids = mutableListOf<UUID>()
+        val batchSize = 500
+        val sort = Sort.by(Sort.Direction.ASC, "createdAt")
+        var page = 0
+        while (ids.size < MAX_SNAPSHOT_IDS) {
+            val batch = documentRepository.findAll(spec, PageRequest.of(page++, batchSize, sort))
+            ids.addAll(batch.content.map { it.id })
+            if (!batch.hasNext()) break
+        }
+        return ids.take(MAX_SNAPSHOT_IDS)
     }
 
     // ==========================================================================
@@ -404,6 +450,9 @@ class DocumentService(
     fun bulkPersistChunks(documentId: UUID, tenantId: String, requests: List<ChunkPersistRequest>): Int {
         val doc = documentRepository.findByIdAndTenantId(documentId, tenantId)
             ?: throw IllegalArgumentException("Document not found or tenant mismatch: $documentId")
+
+        // Clear any stale chunks from a previous (re)process run before inserting the new set.
+        chunkRepository.deleteByDocumentId(documentId)
 
         val entities = requests.map { req ->
             Chunk(

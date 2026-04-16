@@ -28,6 +28,29 @@
   let confirmDocName = $state('');
   let deleting = $state(false);
 
+  // Cleanup
+  interface CleanupJobState {
+    jobId: string; tenantId: string; status: string;
+    total: number; processed: number; succeeded: number; failed: number;
+    errors?: string[];
+  }
+  let cleanupFiltersOpen = $state(false);
+  let cleanupFilters = $state({
+    statuses: [] as string[],
+    createdAfter: '',
+    createdBefore: '',
+    domain: '',
+    contentType: '',
+    uploadOrigin: '' as '' | 'MANUAL' | 'DATA_SOURCE',
+    metadataSource: '',
+  });
+  let cleanupPreview: { matchCount: number } | null = $state(null);
+  let cleanupPreviewing = $state(false);
+  let cleanupConfirmOpen = $state(false);
+  let cleanupJob: CleanupJobState | null = $state(null);
+  let cleanupStarting = $state(false);
+  let cleanupSseAbort: AbortController | null = null;
+
   // Users
   interface TenantUser { id: string; email: string; username: string; name: string; role: string; tenantId: string }
   let users: TenantUser[] = $state([]);
@@ -94,6 +117,148 @@
     usersLoading = true;
     users = (await fetchJson(`/api/v1/tenants/${tenantId}/users`)) ?? [];
     usersLoading = false;
+  }
+
+  function buildCleanupBody() {
+    const body: Record<string, unknown> = {};
+    if (cleanupFilters.statuses.length) body.statuses = cleanupFilters.statuses;
+    if (cleanupFilters.createdAfter) body.createdAfter = new Date(cleanupFilters.createdAfter).toISOString();
+    if (cleanupFilters.createdBefore) body.createdBefore = new Date(cleanupFilters.createdBefore).toISOString();
+    if (cleanupFilters.domain) body.domain = cleanupFilters.domain;
+    if (cleanupFilters.contentType) body.contentType = cleanupFilters.contentType;
+    if (cleanupFilters.uploadOrigin) body.uploadOrigin = cleanupFilters.uploadOrigin;
+    if (cleanupFilters.metadataSource) body.metadataSource = cleanupFilters.metadataSource;
+    return body;
+  }
+
+  async function previewCleanup() {
+    cleanupPreviewing = true;
+    cleanupPreview = null;
+    try {
+      const res = await apiFetch('/api/v1/documents/cleanup/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildCleanupBody()),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      cleanupPreview = await res.json();
+    } catch (e) {
+      toast.error(`Preview failed: ${e}`);
+    }
+    cleanupPreviewing = false;
+  }
+
+  async function startCleanup() {
+    cleanupConfirmOpen = false;
+    cleanupStarting = true;
+    try {
+      const res = await apiFetch('/api/v1/documents/cleanup/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildCleanupBody()),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error ?? `${res.status}`);
+      }
+      const job = await res.json();
+      cleanupJob = { jobId: job.jobId, tenantId: job.tenantId, status: job.status, total: job.matchCount, processed: 0, succeeded: 0, failed: 0 };
+      cleanupPreview = null;
+      runCleanupSse(job.jobId);
+    } catch (e) {
+      toast.error(`Failed to start cleanup: ${e}`);
+    }
+    cleanupStarting = false;
+  }
+
+  // SSE uses fetch (not EventSource) so apiFetch can inject Authorization: Bearer.
+  // EventSource does not support custom headers — the token lives in localStorage, not a cookie.
+  function runCleanupSse(jobId: string) {
+    cleanupSseAbort?.abort();
+    cleanupSseAbort = new AbortController();
+    const signal = cleanupSseAbort.signal;
+
+    (async () => {
+      try {
+        while (!signal.aborted) {
+          try {
+            const res = await apiFetch(`/api/v1/documents/cleanup/jobs/${jobId}/events`, {
+              signal,
+              headers: { Accept: 'text/event-stream' },
+            });
+
+            if (!res.ok || !res.body) {
+              await new Promise(r => setTimeout(r, 3000));
+              continue;
+            }
+
+            const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+            let buf = '';
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              buf += value.replace(/\r\n/g, '\n');
+              const parts = buf.split('\n\n');
+              buf = parts.pop() ?? '';
+              for (const block of parts) {
+                if (!block.trim() || block.startsWith(':')) continue;
+                let eventType = 'message', dataLine = '';
+                for (const rawLine of block.split('\n')) {
+                  const line = rawLine.trimEnd();
+                  if (line.startsWith('event:')) eventType = line.slice(6).trimStart();
+                  if (line.startsWith('data:'))  dataLine  = line.slice(5).trimStart();
+                }
+                if (!dataLine) continue;
+                const data = JSON.parse(dataLine);
+                if (eventType === 'cleanup_progress') {
+                  if (cleanupJob) cleanupJob = { ...cleanupJob, ...data };
+                } else if (eventType === 'cleanup_complete') {
+                  if (cleanupJob) cleanupJob = { ...cleanupJob, ...data };
+                  closeCleanupSse();
+                  loadDocuments();
+                  loadUsage();
+                  if (data.status === 'COMPLETED') toast.success(`Cleanup done: ${data.succeeded} deleted.`);
+                  else if (data.status === 'CANCELLED') toast.info('Cleanup cancelled.');
+                  else toast.error(`Cleanup finished with errors: ${data.failed} failed.`);
+                  return;
+                }
+              }
+            }
+
+            // Stream closed — stop if terminal or aborted, else reconnect after 1s.
+            if (signal.aborted) return;
+            const s = cleanupJob?.status;
+            if (s === 'COMPLETED' || s === 'FAILED' || s === 'CANCELLED') return;
+            await new Promise(r => setTimeout(r, 1000));
+          } catch (e) {
+            if (signal.aborted) return;
+            await new Promise(r => setTimeout(r, 3000));
+          }
+        }
+      } finally {
+        if (cleanupSseAbort?.signal === signal) cleanupSseAbort = null;
+      }
+    })();
+  }
+
+  function closeCleanupSse() {
+    cleanupSseAbort?.abort();
+    cleanupSseAbort = null;
+  }
+
+  async function cancelCleanup() {
+    if (!cleanupJob) return;
+    try {
+      await apiFetch(`/api/v1/documents/cleanup/jobs/${cleanupJob.jobId}`, { method: 'DELETE' });
+      toast.info('Cancellation requested.');
+    } catch (e) {
+      toast.error(`Cancel failed: ${e}`);
+    }
+  }
+
+  function resetCleanupFilters() {
+    cleanupFilters = { statuses: [], createdAfter: '', createdBefore: '', domain: '', contentType: '', uploadOrigin: '', metadataSource: '' };
+    cleanupPreview = null;
   }
 
   function confirmDeleteDoc(doc: Doc) {
@@ -362,76 +527,261 @@
 
     <!-- Documents Tab -->
     {#if activeTab === 'documents'}
-      {#if docsLoading}
-        <div class="text-center py-12 text-gray-400">Loading...</div>
-      {:else}
-        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
-          {#if documents.length === 0}
-            <div class="text-center py-12 text-gray-400 text-sm">No documents found.</div>
-          {:else}
-            <table class="w-full text-sm">
-              <thead class="bg-gray-50 dark:bg-gray-700/50 border-b border-gray-200 dark:border-gray-700">
-                <tr>
-                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">File</th>
-                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Type</th>
-                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Source</th>
-                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Status</th>
-                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Chunks</th>
-                  <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Uploaded</th>
-                  <th class="px-4 py-3"></th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
-                {#each documents as doc}
-                  <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
-                    <td class="px-4 py-3 font-medium text-gray-900 dark:text-white truncate max-w-xs">{doc.filename}</td>
-                    <td class="px-4 py-3">
-                      {#if doc.metadata?.domain}
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium {getDomainColor(doc.metadata.domain)}">
-                          {DOMAIN_LABELS[doc.metadata.domain] || doc.metadata.domain}
-                        </span>
-                      {:else}
-                        <span class="text-gray-400 text-xs">—</span>
-                      {/if}
-                    </td>
-                    <td class="px-4 py-3">
-                      {#if doc.metadata?.source === 'sample_dataset'}
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400">
-                          Sample
-                        </span>
-                      {:else}
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400">
-                          Uploaded
-                        </span>
-                      {/if}
-                    </td>
-                    <td class="px-4 py-3">
-                      <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
-                        {doc.status === 'COMPLETED' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' :
-                         doc.status === 'FAILED' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' :
-                         'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400'}">
-                        {doc.status}
-                      </span>
-                    </td>
-                    <td class="px-4 py-3 text-gray-500 dark:text-gray-400">{doc.chunkCount}</td>
-                    <td class="px-4 py-3 text-gray-500 dark:text-gray-400">{formatDate(doc.createdAt)}</td>
-                    <td class="px-4 py-3 text-right">
-                      <button
-                        onclick={() => confirmDeleteDoc(doc)}
-                        disabled={deleting}
-                        class="px-2.5 py-1 text-xs rounded-lg text-red-600 dark:text-red-400
-                          hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50 transition-colors"
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
+      <div class="space-y-4">
+
+        <!-- Bulk Cleanup Panel -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+          <button
+            class="w-full flex items-center justify-between px-4 py-3 text-left"
+            onclick={() => { cleanupFiltersOpen = !cleanupFiltersOpen; }}
+          >
+            <span class="text-sm font-semibold text-gray-700 dark:text-gray-300">Bulk Cleanup</span>
+            <svg class="w-4 h-4 text-gray-400 transition-transform {cleanupFiltersOpen ? 'rotate-180' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          {#if cleanupFiltersOpen}
+            <div class="border-t border-gray-100 dark:border-gray-700 px-4 pt-4 pb-4 space-y-4">
+
+              <!-- Active job progress -->
+              {#if cleanupJob && (cleanupJob.status === 'QUEUED' || cleanupJob.status === 'RUNNING')}
+                <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700/40 rounded-lg p-4">
+                  <div class="flex items-center justify-between mb-2">
+                    <p class="text-sm font-medium text-blue-800 dark:text-blue-300">
+                      Cleanup in progress — {cleanupJob.processed}/{cleanupJob.total} processed
+                    </p>
+                    <button
+                      onclick={cancelCleanup}
+                      class="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                    >Cancel</button>
+                  </div>
+                  <div class="w-full bg-blue-200 dark:bg-blue-800 rounded-full h-1.5">
+                    <div
+                      class="bg-blue-600 dark:bg-blue-400 h-1.5 rounded-full transition-all duration-300"
+                      style="width: {cleanupJob.total > 0 ? Math.round((cleanupJob.processed / cleanupJob.total) * 100) : 0}%"
+                    ></div>
+                  </div>
+                  <p class="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                    {cleanupJob.succeeded} deleted · {cleanupJob.failed} failed
+                  </p>
+                </div>
+
+              {:else if cleanupJob && (cleanupJob.status === 'COMPLETED' || cleanupJob.status === 'FAILED' || cleanupJob.status === 'CANCELLED')}
+                <div class="text-sm rounded-lg px-3 py-2 border {cleanupJob.status === 'COMPLETED' ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700/40 text-green-800 dark:text-green-300' : 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-700/40 text-yellow-800 dark:text-yellow-300'}">
+                  Last job: {cleanupJob.status} — {cleanupJob.succeeded} deleted, {cleanupJob.failed} failed
+                  <button aria-label="Dismiss" onclick={() => cleanupJob = null} class="ml-2 opacity-60 hover:opacity-100">✕</button>
+                </div>
+              {/if}
+
+              <!-- Filters grid -->
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+
+                <div>
+                  <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Status</label>
+                  <div class="flex flex-wrap gap-1">
+                    {#each ['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'] as s}
+                      <label class="flex items-center gap-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={cleanupFilters.statuses.includes(s)}
+                          onchange={() => {
+                            cleanupFilters.statuses = cleanupFilters.statuses.includes(s)
+                              ? cleanupFilters.statuses.filter(x => x !== s)
+                              : [...cleanupFilters.statuses, s];
+                            cleanupPreview = null;
+                          }}
+                          class="rounded text-blue-600"
+                        />
+                        <span class="text-xs text-gray-700 dark:text-gray-300">{s}</span>
+                      </label>
+                    {/each}
+                  </div>
+                </div>
+
+                <div>
+                  <label for="cf-origin" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Source</label>
+                  <select
+                    id="cf-origin"
+                    bind:value={cleanupFilters.uploadOrigin}
+                    onchange={() => cleanupPreview = null}
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="">All sources</option>
+                    <option value="MANUAL">Manual uploads only</option>
+                    <option value="DATA_SOURCE">Data source / loader only</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label for="cf-domain" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Domain (type)</label>
+                  <select
+                    id="cf-domain"
+                    bind:value={cleanupFilters.domain}
+                    onchange={() => cleanupPreview = null}
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="">All domains</option>
+                    {#each Object.entries(DOMAIN_LABELS) as [key, label]}
+                      <option value={key}>{label}</option>
+                    {/each}
+                  </select>
+                </div>
+
+                <div>
+                  <label for="cf-meta-source" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Metadata source tag</label>
+                  <input
+                    id="cf-meta-source"
+                    type="text"
+                    placeholder="e.g. sample_dataset"
+                    bind:value={cleanupFilters.metadataSource}
+                    oninput={() => cleanupPreview = null}
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label for="cf-after" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Uploaded after</label>
+                  <input
+                    id="cf-after"
+                    type="date"
+                    bind:value={cleanupFilters.createdAfter}
+                    oninput={() => cleanupPreview = null}
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label for="cf-before" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Uploaded before</label>
+                  <input
+                    id="cf-before"
+                    type="date"
+                    bind:value={cleanupFilters.createdBefore}
+                    oninput={() => cleanupPreview = null}
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div class="sm:col-span-2">
+                  <label for="cf-content-type" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Content type prefix</label>
+                  <input
+                    id="cf-content-type"
+                    type="text"
+                    placeholder="e.g. application/pdf or image/"
+                    bind:value={cleanupFilters.contentType}
+                    oninput={() => cleanupPreview = null}
+                    class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+
+              <!-- Preview + action row -->
+              <div class="flex items-center gap-3 pt-1">
+                <button
+                  onclick={previewCleanup}
+                  disabled={cleanupPreviewing}
+                  class="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
+                >
+                  {cleanupPreviewing ? 'Checking…' : 'Preview'}
+                </button>
+
+                {#if cleanupPreview !== null}
+                  <span class="text-xs text-gray-500 dark:text-gray-400">
+                    {cleanupPreview.matchCount === 0 ? 'No documents match.' : `${cleanupPreview.matchCount} document${cleanupPreview.matchCount === 1 ? '' : 's'} will be deleted.`}
+                  </span>
+                  {#if cleanupPreview.matchCount > 0}
+                    <button
+                      onclick={() => cleanupConfirmOpen = true}
+                      disabled={cleanupStarting || (cleanupJob?.status === 'QUEUED' || cleanupJob?.status === 'RUNNING')}
+                      class="px-3 py-1.5 text-xs font-medium rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                    >
+                      {cleanupStarting ? 'Starting…' : `Delete ${cleanupPreview.matchCount}`}
+                    </button>
+                  {/if}
+                {/if}
+
+                <button
+                  onclick={resetCleanupFilters}
+                  class="ml-auto text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                >Reset filters</button>
+              </div>
+
+            </div>
           {/if}
         </div>
-      {/if}
+
+        <!-- Document list -->
+        {#if docsLoading}
+          <div class="text-center py-12 text-gray-400">Loading...</div>
+        {:else}
+          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+            {#if documents.length === 0}
+              <div class="text-center py-12 text-gray-400 text-sm">No documents found.</div>
+            {:else}
+              <table class="w-full text-sm">
+                <thead class="bg-gray-50 dark:bg-gray-700/50 border-b border-gray-200 dark:border-gray-700">
+                  <tr>
+                    <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">File</th>
+                    <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Type</th>
+                    <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Source</th>
+                    <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Status</th>
+                    <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Chunks</th>
+                    <th class="text-left px-4 py-3 font-medium text-gray-700 dark:text-gray-300">Uploaded</th>
+                    <th class="px-4 py-3"></th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
+                  {#each documents as doc}
+                    <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                      <td class="px-4 py-3 font-medium text-gray-900 dark:text-white truncate max-w-xs">{doc.filename}</td>
+                      <td class="px-4 py-3">
+                        {#if doc.metadata?.domain}
+                          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium {getDomainColor(doc.metadata.domain)}">
+                            {DOMAIN_LABELS[doc.metadata.domain] || doc.metadata.domain}
+                          </span>
+                        {:else}
+                          <span class="text-gray-400 text-xs">—</span>
+                        {/if}
+                      </td>
+                      <td class="px-4 py-3">
+                        {#if doc.metadata?.source === 'sample_dataset'}
+                          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400">
+                            Sample
+                          </span>
+                        {:else}
+                          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400">
+                            Uploaded
+                          </span>
+                        {/if}
+                      </td>
+                      <td class="px-4 py-3">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                          {doc.status === 'COMPLETED' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' :
+                           doc.status === 'FAILED' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' :
+                           'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400'}">
+                          {doc.status}
+                        </span>
+                      </td>
+                      <td class="px-4 py-3 text-gray-500 dark:text-gray-400">{doc.chunkCount}</td>
+                      <td class="px-4 py-3 text-gray-500 dark:text-gray-400">{formatDate(doc.createdAt)}</td>
+                      <td class="px-4 py-3 text-right">
+                        <button
+                          onclick={() => confirmDeleteDoc(doc)}
+                          disabled={deleting}
+                          class="px-2.5 py-1 text-xs rounded-lg text-red-600 dark:text-red-400
+                            hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </div>
+        {/if}
+      </div>
     {/if}
 
     <!-- Users Tab -->
@@ -691,4 +1041,14 @@
   dangerous={true}
   onconfirm={clearSemanticCache}
   oncancel={() => { semanticCacheConfirmOpen = false; }}
+/>
+
+<ConfirmDialog
+  open={cleanupConfirmOpen}
+  title="Delete documents?"
+  message={`This will permanently delete ${cleanupPreview?.matchCount ?? 0} document${(cleanupPreview?.matchCount ?? 0) === 1 ? '' : 's'} matching your filters — including all chunks and vectors. This cannot be undone.`}
+  confirmLabel={`Delete ${cleanupPreview?.matchCount ?? 0}`}
+  dangerous={true}
+  onconfirm={startCleanup}
+  oncancel={() => { cleanupConfirmOpen = false; }}
 />

@@ -239,6 +239,7 @@ services:
     command: >
       v2
       --model-id cross-encoder/ms-marco-MiniLM-L-6-v2
+      --model-id nomic-ai/nomic-embed-text-v1.5
       --port 7997
       --engine ${INFINITY_ENGINE:-optimum}
     # No host port — rag-service reaches infinity via internal network (infinity:7997)

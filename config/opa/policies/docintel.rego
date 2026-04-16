@@ -40,12 +40,44 @@ route_requires_role(method, path, "documents:delete") {
     method == "DELETE"
     glob.match("/api/v1/documents/*", [], path)
     not glob.match("/api/v1/documents/all*", [], path)
+    not glob.match("/api/v1/documents/cleanup/jobs/*", [], path)
 }
 
 # Documents — delete all (platform_admin only)
 route_requires_role(method, path, "documents:delete_all") {
     method == "DELETE"
     glob.match("/api/v1/documents/all*", [], path)
+}
+
+# Cleanup — preview (dry-run count; aligned with read permission)
+route_requires_role(method, path, "documents:r") {
+    method == "POST"
+    path == "/api/v1/documents/cleanup/preview"
+}
+
+# Cleanup — start job (same gate as single-doc delete; cross-tenant check is in the service)
+route_requires_role(method, path, "documents:delete") {
+    method == "POST"
+    path == "/api/v1/documents/cleanup/jobs"
+}
+
+# Cleanup — job status poll
+route_requires_role(method, path, "documents:r") {
+    method == "GET"
+    glob.match("/api/v1/documents/cleanup/jobs/*", [], path)
+    not glob.match("/api/v1/documents/cleanup/jobs/*/events", [], path)
+}
+
+# Cleanup — job SSE stream
+route_requires_role(method, path, "documents:r") {
+    method == "GET"
+    glob.match("/api/v1/documents/cleanup/jobs/*/events", [], path)
+}
+
+# Cleanup — cancel job
+route_requires_role(method, path, "documents:delete") {
+    method == "DELETE"
+    glob.match("/api/v1/documents/cleanup/jobs/*", [], path)
 }
 
 # Query

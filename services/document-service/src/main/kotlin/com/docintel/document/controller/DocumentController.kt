@@ -3,6 +3,8 @@ package com.docintel.document.controller
 import com.docintel.document.dto.*
 import com.docintel.document.entity.ProcessingStatus
 import com.docintel.document.service.DocumentService
+import com.docintel.document.service.cleanup.CleanupJobService
+import com.docintel.document.sse.CleanupSseRegistry
 import com.docintel.document.sse.SseEmitterRegistry
 import com.fasterxml.jackson.databind.ObjectMapper
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -14,6 +16,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
 import org.springframework.data.web.PageableDefault
+import jakarta.servlet.http.HttpServletResponse
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
@@ -26,6 +29,8 @@ import java.util.UUID
 @RequestMapping("/internal/documents")
 class DocumentController(
     private val documentService: DocumentService,
+    private val cleanupJobService: CleanupJobService,
+    private val cleanupSseRegistry: CleanupSseRegistry,
     private val objectMapper: ObjectMapper,
     private val sseRegistry: SseEmitterRegistry,
 ) {
@@ -115,19 +120,13 @@ class DocumentController(
     }
 
     @DeleteMapping("/{id}")
-    suspend fun deleteDocument(
+    fun deleteDocument(
         @PathVariable id: UUID,
         @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String
-    ): ResponseEntity<*> {
-        return try {
-            val deleted = documentService.deleteDocument(id, tenantId)
-            if (deleted) ResponseEntity.noContent().build<Void>()
-            else ResponseEntity.notFound().build<Void>()
-        } catch (e: IllegalStateException) {
-            logger.warn("Vector deletion failed for document {} (tenant={}): {}", id, tenantId, e.message)
-            ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                .body(mapOf("error" to "Vector store unavailable", "detail" to e.message))
-        }
+    ): ResponseEntity<Void> {
+        val queued = documentService.markForDeletion(id, tenantId)
+        return if (queued) ResponseEntity.accepted().build()
+        else ResponseEntity.notFound().build()
     }
 
     @GetMapping("/{id}/chunks")
@@ -236,6 +235,113 @@ class DocumentController(
         } catch (e: IllegalArgumentException) {
             ResponseEntity.notFound().build()
         }
+    }
+
+    // ==========================================================================
+    // Cleanup — filter-based preview and async bulk delete
+    // ==========================================================================
+
+    private fun resolveEffectiveTenant(
+        tenantId: String,
+        filters: CleanupFiltersRequest,
+        rolesHeader: String,
+    ): Pair<String, ResponseEntity<*>?> {
+        val target = filters.targetTenantId
+        if (target != null && target != tenantId) {
+            val roles = rolesHeader.split(",").map { it.trim() }
+            if ("documents:delete_all" !in roles) {
+                return Pair(
+                    tenantId,
+                    ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body(mapOf("error" to "Cross-tenant cleanup requires the documents:delete_all role")),
+                )
+            }
+            return Pair(target, null)
+        }
+        return Pair(tenantId, null)
+    }
+
+    /**
+     * Dry-run: returns the count of documents matching the given filters.
+     * No documents are modified.
+     */
+    @PostMapping("/cleanup/preview")
+    fun previewCleanup(
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
+        @RequestHeader("X-User-Roles", defaultValue = "") rolesHeader: String,
+        @RequestBody filters: CleanupFiltersRequest,
+    ): ResponseEntity<*> {
+        val (effectiveTenant, err) = resolveEffectiveTenant(tenantId, filters, rolesHeader)
+        if (err != null) return err
+        val count = documentService.previewCleanup(effectiveTenant, filters)
+        return ResponseEntity.ok(CleanupPreviewResponse(matchCount = count, tenantId = effectiveTenant))
+    }
+
+    /**
+     * Start an async cleanup job. Returns 202 immediately with a job ID.
+     * Subscribe to GET .../cleanup/jobs/{jobId}/events for progress.
+     * Rejects with 409 if another job is already active for this tenant.
+     */
+    @PostMapping("/cleanup/jobs")
+    fun startCleanupJob(
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
+        @RequestHeader("X-User-Roles", defaultValue = "") rolesHeader: String,
+        @RequestBody filters: CleanupFiltersRequest,
+    ): ResponseEntity<*> {
+        val (effectiveTenant, err) = resolveEffectiveTenant(tenantId, filters, rolesHeader)
+        if (err != null) return err
+        return try {
+            val response = cleanupJobService.startJob(effectiveTenant, filters)
+            ResponseEntity.status(HttpStatus.ACCEPTED).body(response)
+        } catch (e: IllegalStateException) {
+            ResponseEntity.status(HttpStatus.CONFLICT).body(mapOf("error" to e.message))
+        }
+    }
+
+    /**
+     * SSE stream for cleanup job progress.
+     * Emits [cleanup_progress] events and a final [cleanup_complete] event.
+     */
+    @GetMapping("/cleanup/jobs/{jobId}/events", produces = [MediaType.TEXT_EVENT_STREAM_VALUE])
+    fun cleanupJobEvents(
+        @PathVariable jobId: UUID,
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
+        response: HttpServletResponse,
+    ): SseEmitter {
+        val status = cleanupJobService.getJobStatus(jobId, tenantId)
+        if (status == null) {
+            response.sendError(HttpServletResponse.SC_NOT_FOUND)
+            return SseEmitter(0L)
+        }
+        val emitter = cleanupSseRegistry.register(jobId.toString())
+        // Race-condition guard: if job already finished before client connected, replay final state.
+        if (status.status.isTerminal()) {
+            cleanupSseRegistry.replayFinal(jobId.toString(), status, emitter)
+        }
+        return emitter
+    }
+
+    /** Get the current status snapshot of a cleanup job. */
+    @GetMapping("/cleanup/jobs/{jobId}")
+    fun getCleanupJobStatus(
+        @PathVariable jobId: UUID,
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
+    ): ResponseEntity<*> {
+        return ResponseEntity.ok(
+            cleanupJobService.getJobStatus(jobId, tenantId)
+                ?: return ResponseEntity.notFound().build<Any>(),
+        )
+    }
+
+    /** Cooperative cancel — already-deleted documents stay deleted. */
+    @DeleteMapping("/cleanup/jobs/{jobId}")
+    fun cancelCleanupJob(
+        @PathVariable jobId: UUID,
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
+    ): ResponseEntity<*> {
+        val cancelled = cleanupJobService.cancelJob(jobId, tenantId)
+        return if (cancelled) ResponseEntity.ok(mapOf("cancelled" to true, "jobId" to jobId))
+        else ResponseEntity.notFound().build<Any>()
     }
 
     // ==========================================================================
