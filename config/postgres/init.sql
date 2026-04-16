@@ -63,6 +63,17 @@ CREATE TABLE admin.users (
 
 CREATE INDEX idx_admin_users_tenant ON admin.users(tenant_id);
 
+CREATE TABLE admin.user_preferences (
+    user_id    TEXT         NOT NULL,
+    tenant_id  TEXT         NOT NULL REFERENCES admin.tenants(id) ON DELETE CASCADE,
+    key        TEXT         NOT NULL,
+    value      JSONB        NOT NULL DEFAULT 'null',
+    updated_at TIMESTAMPTZ  DEFAULT NOW(),
+    PRIMARY KEY (user_id, tenant_id, key)
+);
+
+CREATE INDEX idx_user_pref_tenant ON admin.user_preferences(tenant_id);
+
 CREATE TRIGGER tenants_updated_at
     BEFORE UPDATE ON admin.tenants
     FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
@@ -189,6 +200,38 @@ CREATE POLICY tenant_isolation_tenants_admin ON admin.tenants
         OR id = current_setting('app.current_tenant', true)
     );
 
+ALTER TABLE admin.user_preferences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin.user_preferences FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY user_pref_admin ON admin.user_preferences
+    AS PERMISSIVE FOR ALL TO docintel_admin
+    USING (
+        user_id   = current_setting('app.current_user_id', true)
+        AND tenant_id = current_setting('app.current_tenant',  true)
+    )
+    WITH CHECK (
+        user_id   = current_setting('app.current_user_id', true)
+        AND tenant_id = current_setting('app.current_tenant',  true)
+    );
+
+CREATE POLICY user_pref_app ON admin.user_preferences
+    AS PERMISSIVE FOR ALL TO docintel_app
+    USING (
+        user_id   = current_setting('app.current_user_id', true)
+        AND tenant_id = current_setting('app.current_tenant',  true)
+    )
+    WITH CHECK (
+        user_id   = current_setting('app.current_user_id', true)
+        AND tenant_id = current_setting('app.current_tenant',  true)
+    );
+
+CREATE POLICY user_pref_rag ON admin.user_preferences
+    AS PERMISSIVE FOR SELECT TO docintel_rag
+    USING (
+        user_id   = current_setting('app.current_user_id', true)
+        AND tenant_id = current_setting('app.current_tenant',  true)
+    );
+
 -- documents schema
 ALTER TABLE documents.data_sources ENABLE ROW LEVEL SECURITY;
 ALTER TABLE documents.data_sources FORCE ROW LEVEL SECURITY;
@@ -308,7 +351,7 @@ GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_documents;
 GRANT USAGE ON SCHEMA conversations, admin, public TO docintel_rag;
 GRANT ALL   ON ALL TABLES    IN SCHEMA conversations TO docintel_rag;
 GRANT ALL   ON ALL SEQUENCES IN SCHEMA conversations TO docintel_rag;
-GRANT SELECT ON admin.tenants, admin.platform_settings TO docintel_rag;
+GRANT SELECT ON admin.tenants, admin.platform_settings, admin.user_preferences TO docintel_rag;
 ALTER DEFAULT PRIVILEGES IN SCHEMA conversations GRANT ALL ON TABLES    TO docintel_rag;
 ALTER DEFAULT PRIVILEGES IN SCHEMA conversations GRANT ALL ON SEQUENCES TO docintel_rag;
 GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_rag;

@@ -79,6 +79,7 @@ GROUP_ROLES: dict[str, list[str]] = {
         "admin:rw",
         "vector_stats:r",
         "models:r",
+        "user.preferences:rw",
     ],
     "tenant_admin": [
         "documents:r",
@@ -93,6 +94,7 @@ GROUP_ROLES: dict[str, list[str]] = {
         "admin.tenants.settings:rw",
         "vector_stats:r",
         "models:r",
+        "user.preferences:rw",
     ],
     "tenant_user": [
         "documents:r",
@@ -100,6 +102,7 @@ GROUP_ROLES: dict[str, list[str]] = {
         "conversations:rw",
         "analytics:feedback",
         "models:r",
+        "user.preferences:rw",
     ],
 }
 

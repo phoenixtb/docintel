@@ -6,6 +6,7 @@ import com.docintel.admin.service.HealthService
 import com.docintel.admin.service.PlatformSettingsService
 import com.docintel.admin.service.StatsService
 import com.docintel.admin.service.TenantManagementService
+import com.docintel.admin.service.UserPreferencesService
 import jakarta.validation.Valid
 import org.springframework.http.ResponseEntity
 import org.springframework.validation.annotation.Validated
@@ -20,6 +21,7 @@ class AdminController(
     private val statsService: StatsService,
     private val tenantManagementService: TenantManagementService,
     private val platformSettingsService: PlatformSettingsService,
+    private val userPreferencesService: UserPreferencesService,
 ) {
     /**
      * System health check with component status.
@@ -180,4 +182,24 @@ class AdminController(
         @RequestBody req: UpdateTenantSettingsRequest
     ): ResponseEntity<TenantSettings> =
         ResponseEntity.ok(platformSettingsService.updateTenantSettings(tenantId, req))
+
+    // -----------------------------------------------------------------------
+    // User-level preferences (any authenticated user — enforced by OPA)
+    // X-User-Id and X-Tenant-Id headers are injected by the API gateway.
+    // -----------------------------------------------------------------------
+
+    @GetMapping("/users/me/preferences")
+    fun getMyPreferences(
+        @RequestHeader("X-User-Id") userId: String,
+        @RequestHeader("X-Tenant-Id") tenantId: String,
+    ): ResponseEntity<UserPreferences> =
+        ResponseEntity.ok(userPreferencesService.getPreferences(userId, tenantId))
+
+    @PatchMapping("/users/me/preferences")
+    fun updateMyPreferences(
+        @RequestHeader("X-User-Id") userId: String,
+        @RequestHeader("X-Tenant-Id") tenantId: String,
+        @RequestBody req: UpdateUserPreferencesRequest,
+    ): ResponseEntity<UserPreferences> =
+        ResponseEntity.ok(userPreferencesService.updatePreferences(userId, tenantId, req))
 }

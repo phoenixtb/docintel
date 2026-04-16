@@ -15,6 +15,15 @@ CREATE TABLE IF NOT EXISTS admin.tenants (
     updated_at            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS admin.user_preferences (
+    user_id    TEXT         NOT NULL,
+    tenant_id  TEXT         NOT NULL REFERENCES admin.tenants(id) ON DELETE CASCADE,
+    key        TEXT         NOT NULL,
+    value      JSONB        NOT NULL DEFAULT 'null',
+    updated_at TIMESTAMPTZ  DEFAULT NOW(),
+    PRIMARY KEY (user_id, tenant_id, key)
+);
+
 -- Unqualified alias — admin-service sets search_path = admin, ... so plain
 -- "tenants" resolves here in the test container as well.
 SET search_path = admin, documents, public;

@@ -381,9 +381,10 @@ async def list_models(
 
     tenant_thinking_mode = False
     tenant_id = x_tenant_id or "default"
+    # For the model list we don't have a user context; use empty string to get default prefs.
     try:
         model_resolver: TenantModelResolver = http_request.app.state.model_resolver
-        resolved = await model_resolver.resolve(tenant_id)
+        resolved = await model_resolver.resolve(tenant_id, "")
         tenant_thinking_mode = resolved.thinking_mode
     except Exception as exc:
         logger.warning("Failed to resolve tenant thinking_mode for %s: %s", tenant_id, exc)
@@ -402,13 +403,29 @@ async def list_models(
 @app.delete("/internal/settings-cache/{tenant_id}", status_code=204)
 async def invalidate_settings_cache(tenant_id: str, http_request: Request):
     """
-    Invalidate the in-process TenantModelResolver cache for a tenant.
-    Called by the UI (via gateway) immediately after tenant settings are saved,
-    so the next query picks up the new model/thinking_mode without waiting for TTL expiry.
+    Invalidate the in-process TenantModelResolver cache for all users in a tenant.
+    Called by the UI after tenant model settings change.
     """
     model_resolver: TenantModelResolver = http_request.app.state.model_resolver
-    model_resolver.invalidate(tenant_id)
-    logger.info("Settings cache invalidated for tenant %s", tenant_id)
+    model_resolver.invalidate(tenant_id=tenant_id)
+    logger.info("Model settings cache invalidated for tenant %s (all users)", tenant_id)
+
+
+@app.delete("/internal/user-settings-cache", status_code=204)
+async def invalidate_user_settings_cache(
+    http_request: Request,
+    x_tenant_id: str = Header(alias="X-Tenant-Id", default=""),
+    x_user_id: str = Header(alias="X-User-Id", default=""),
+):
+    """
+    Invalidate the in-process TenantModelResolver cache for a specific user.
+    Called by the UI immediately after user preferences are saved.
+    """
+    if not x_tenant_id or not x_user_id:
+        raise HTTPException(status_code=400, detail="X-Tenant-Id and X-User-Id headers required")
+    model_resolver: TenantModelResolver = http_request.app.state.model_resolver
+    model_resolver.invalidate(tenant_id=x_tenant_id, user_id=x_user_id)
+    logger.info("User preferences cache invalidated for user=%s tenant=%s", x_user_id, x_tenant_id)
 
 
 # =============================================================================
@@ -542,9 +559,9 @@ async def query_documents_stream(
     summarizer = http_request.app.state.summarizer
 
     # Resolve effective model + thinking_mode before entering the generator.
-    # request.thinking_mode (per-query override) wins over tenant preference.
+    # thinking_mode is user-scoped; request.thinking_mode (per-query override) wins.
     # thinking is additionally gated on model capability.
-    resolved = await model_resolver.resolve(tenant_id)
+    resolved = await model_resolver.resolve(tenant_id, user_id or "")
     effective_model = resolved.model
     effective_thinking = (
         request.thinking_mode if request.thinking_mode is not None else resolved.thinking_mode

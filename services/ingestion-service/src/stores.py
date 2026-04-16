@@ -58,7 +58,7 @@ def get_document_store(tenant_id: str, settings: Settings | None = None) -> Qdra
     Return (or create) the Qdrant document store for a given tenant.
 
     Collection name: ``documents_{tenant_id}``
-    Vectors: 768-dimensional (nomic-embed-text default).
+    Vector dimension read from ``cfg.llm_embed_dim`` (default 1024 for qwen3-embed).
     Sparse vectors enabled for BM25 hybrid search.
     ACL payload indexes are ensured on every call.
     """
@@ -72,7 +72,7 @@ def get_document_store(tenant_id: str, settings: Settings | None = None) -> Qdra
         url=cfg.qdrant_url,
         api_key=cfg.qdrant_api_key,
         index=collection_name,
-        embedding_dim=768,
+        embedding_dim=cfg.llm_embed_dim,
         use_sparse_embeddings=True,
         sparse_idf=True,
         recreate_index=False,

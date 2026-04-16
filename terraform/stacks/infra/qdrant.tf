@@ -1,16 +1,16 @@
 locals {
   qdrant_url = var.qdrant_url
 
-  # Vector config for main document collection (nomic-embed-text → 768 dims)
+  # Vector config for main document collection (qwen3-embed:0.6b:4bit → 1024 dims)
   documents_config = {
-    vectors           = { size = 768, distance = "Cosine" }
+    vectors           = { size = 1024, distance = "Cosine" }
     hnsw_config       = { m = 16, ef_construct = 100 }
     optimizers_config = { indexing_threshold = 10000 }
   }
 
   # Semantic cache collection — same embedding model
   response_cache_config = {
-    vectors     = { size = 768, distance = "Cosine" }
+    vectors     = { size = 1024, distance = "Cosine" }
     hnsw_config = { m = 16, ef_construct = 100 }
   }
 }

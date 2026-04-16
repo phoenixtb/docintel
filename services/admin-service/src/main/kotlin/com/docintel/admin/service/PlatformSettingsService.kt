@@ -60,14 +60,13 @@ class PlatformSettingsService(
     // ------------------------------------------------------------------
 
     fun getTenantSettings(tenantId: String): TenantSettings {
-        data class Row(val tenantModel: String?, val platformModel: String?, val thinkingMode: Boolean?)
+        data class Row(val tenantModel: String?, val platformModel: String?)
 
         val row = jdbcTemplate.queryForObject(
             """
             SELECT
                 t.settings->>'llm_model'                        AS tenant_model,
-                (SELECT value FROM platform_settings WHERE key = 'llm_model') AS platform_model,
-                (t.settings->>'thinking_mode')::boolean         AS thinking_mode
+                (SELECT value FROM platform_settings WHERE key = 'llm_model') AS platform_model
             FROM tenants t
             WHERE t.id = ?
             """.trimIndent(),
@@ -75,11 +74,10 @@ class PlatformSettingsService(
                 Row(
                     tenantModel   = rs.getString("tenant_model"),
                     platformModel = rs.getString("platform_model"),
-                    thinkingMode  = rs.getObject("thinking_mode") as? Boolean
                 )
             },
             tenantId
-        ) ?: return TenantSettings(llmModel = null, effectiveModel = null, thinkingMode = false)
+        ) ?: return TenantSettings(llmModel = null, effectiveModel = null)
 
         val platformOverride = if (row.platformModel == null || row.platformModel == "null") null
                                else row.platformModel.trim('"')
@@ -89,7 +87,6 @@ class PlatformSettingsService(
         return TenantSettings(
             llmModel      = tenantPref,
             effectiveModel = effective,
-            thinkingMode  = row.thinkingMode ?: false,
         )
     }
 
@@ -107,14 +104,7 @@ class PlatformSettingsService(
             )
         }
 
-        if (req.thinkingMode != null) {
-            jdbcTemplate.update(
-                "UPDATE tenants SET settings = jsonb_set(COALESCE(settings, '{}'), '{thinking_mode}', to_jsonb(?::boolean)), updated_at = NOW() WHERE id = ?",
-                req.thinkingMode, tenantId
-            )
-        }
-
-        log.info("Tenant {} settings updated — llm_model={}, thinking_mode={}", tenantId, req.llmModel ?: "unchanged", req.thinkingMode ?: "unchanged")
+        log.info("Tenant {} settings updated — llm_model={}", tenantId, req.llmModel ?: "unchanged")
         return getTenantSettings(tenantId)
     }
 }

@@ -121,12 +121,20 @@ data class UpdatePlatformSettingsRequest(
 )
 
 data class UpdateTenantSettingsRequest(
-    val llmModel: String?,         // null = clear preference (use platform default)
-    val thinkingMode: Boolean?     // null = no change; true/false = update
+    val llmModel: String?          // null = clear preference (use platform default)
 )
 
 data class TenantSettings(
     val llmModel: String?,         // null = using platform default / no preference set
     val effectiveModel: String?,   // what actually resolves (platform override or own pref)
+)
+
+// ---- User Preferences DTOs ----
+
+data class UserPreferences(
     val thinkingMode: Boolean = false
+)
+
+data class UpdateUserPreferencesRequest(
+    val thinkingMode: Boolean?     // null = no change
 )

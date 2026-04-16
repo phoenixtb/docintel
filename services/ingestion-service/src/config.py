@@ -18,8 +18,9 @@ class Settings(BaseSettings):
 
     # --- LLM Engine (OpenAI-compatible) ---
     # Embeddings endpoint — Infinity (Docker) by default; can point to any OpenAI-compat embed server.
-    llm_embed_url: str = Field(default="http://infinity:7997/v1", alias="LLM_EMBED_URL")
-    llm_embed_model: str = Field(default="nomic-embed-text", alias="LLM_EMBED_MODEL")
+    llm_embed_url: str = Field(default="http://host.docker.internal:11430/v1", alias="LLM_EMBED_URL")
+    llm_embed_model: str = Field(default="qwen3-embed:0.6b:4bit", alias="LLM_EMBED_MODEL")
+    llm_embed_dim: int = Field(default=1024, alias="LLM_EMBED_DIM")
     llm_api_key: str = Field(default="none", alias="LLM_API_KEY")
 
     # --- Document service (chunk persist + status callback) ---

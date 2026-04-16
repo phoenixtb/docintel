@@ -36,6 +36,7 @@ class AdminControllerTest : BaseIntegrationTest() {
     @BeforeEach
     fun setUp() {
         jdbcTemplate.execute("DELETE FROM documents.documents")
+        jdbcTemplate.execute("DELETE FROM admin.user_preferences")
         jdbcTemplate.execute("DELETE FROM admin.tenants")
 
         every { cacheService.getCacheStats() } returns CacheStats(
@@ -169,6 +170,71 @@ class AdminControllerTest : BaseIntegrationTest() {
         mockMvc.perform(get("/internal/tenants/tenant-1/usage"))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.cacheHitRate").value(0.5))
+    }
+
+    // -----------------------------------------------------------------------
+    // User preferences endpoints
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `GET user preferences returns defaults for new user`() {
+        jdbcTemplate.update("INSERT INTO admin.tenants (id, name) VALUES (?, ?)", "tenant-1", "Tenant One")
+
+        mockMvc.perform(
+            get("/internal/users/me/preferences", "tenant-1")
+                .header("X-User-Id", "user-abc")
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.thinkingMode").value(false))
+    }
+
+    @Test
+    fun `PATCH user preferences persists thinking mode`() {
+        jdbcTemplate.update("INSERT INTO admin.tenants (id, name) VALUES (?, ?)", "tenant-1", "Tenant One")
+
+        mockMvc.perform(
+            MockMvcRequestBuilders.patch("/internal/users/me/preferences")
+                .header("X-Internal-Service-Token", internalToken("tenant-1"))
+                .header("X-Tenant-Id", "tenant-1")
+                .header("X-User-Id", "user-abc")
+                .contentType("application/json")
+                .content("""{"thinkingMode": true}""")
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.thinkingMode").value(true))
+    }
+
+    @Test
+    fun `GET user preferences reflects previously saved value`() {
+        jdbcTemplate.update("INSERT INTO admin.tenants (id, name) VALUES (?, ?)", "tenant-1", "Tenant One")
+        jdbcTemplate.update(
+            "INSERT INTO admin.user_preferences (user_id, tenant_id, key, value) VALUES (?, ?, ?, ?::jsonb)",
+            "user-abc", "tenant-1", "thinking_mode", "true"
+        )
+
+        mockMvc.perform(
+            get("/internal/users/me/preferences", "tenant-1")
+                .header("X-User-Id", "user-abc")
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.thinkingMode").value(true))
+    }
+
+    @Test
+    fun `User preferences are isolated by user_id`() {
+        jdbcTemplate.update("INSERT INTO admin.tenants (id, name) VALUES (?, ?)", "tenant-1", "Tenant One")
+        jdbcTemplate.update(
+            "INSERT INTO admin.user_preferences (user_id, tenant_id, key, value) VALUES (?, ?, ?, ?::jsonb)",
+            "user-abc", "tenant-1", "thinking_mode", "true"
+        )
+
+        // Different user should get default false
+        mockMvc.perform(
+            get("/internal/users/me/preferences", "tenant-1")
+                .header("X-User-Id", "user-xyz")
+        )
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.thinkingMode").value(false))
     }
 
     private fun insertTestData() {

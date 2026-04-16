@@ -79,3 +79,12 @@ DO $$ BEGIN
         );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
+-- docintel_rag (RAG service) needs read access to resolve per-tenant
+-- model preferences (llm_model, thinking_mode) at query time.
+DO $$ BEGIN
+    CREATE POLICY tenant_resolver_tenants ON tenants
+        AS PERMISSIVE FOR SELECT TO docintel_rag
+        USING (id = current_setting('app.current_tenant', true));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;

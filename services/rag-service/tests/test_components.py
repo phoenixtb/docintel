@@ -381,3 +381,157 @@ class TestSecureRetrieverFiltering:
         )
         
         assert "documents" in result
+
+
+# ---------------------------------------------------------------------------
+# TenantModelResolver unit tests (no real DB needed — psycopg2 is mocked)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestTenantModelResolver:
+    """Unit tests for TenantModelResolver with mocked psycopg2."""
+
+    def _make_resolver(self) -> "TenantModelResolver":
+        from src.components.model_resolver import TenantModelResolver
+        # Reset class-level cache between tests
+        TenantModelResolver._cache = {}
+        TenantModelResolver._platform_cache = (object(), 0.0)  # expired
+        return TenantModelResolver(postgres_url="postgresql://test", default_model="default-model")
+
+    def test_resolve_returns_default_model_and_no_thinking_on_empty_db(self, monkeypatch):
+        """When DB returns no rows, model falls back to default and thinking_mode=False."""
+        import psycopg2
+        from src.components.model_resolver import TenantModelResolver
+
+        def fake_connect(url):
+            class FakeCursor:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+                def execute(self, *a): pass
+                def fetchone(self): return None
+                def __iter__(self): return iter([])
+
+            class FakeConn:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+                def cursor(self, **kw): return FakeCursor()
+
+            return FakeConn()
+
+        monkeypatch.setattr(psycopg2, "connect", fake_connect)
+        resolver = self._make_resolver()
+
+        import asyncio
+        result = asyncio.run(resolver.resolve("tenant-1", "user-1"))
+        assert result.model == "default-model"
+        assert result.thinking_mode is False
+
+    def test_resolve_returns_thinking_true_when_user_preference_set(self, monkeypatch):
+        """When user_preferences has thinking_mode=true, resolved thinking_mode is True."""
+        import psycopg2
+        from src.components.model_resolver import TenantModelResolver
+
+        call_count = [0]
+
+        def fake_connect(url):
+            class FakeCursor:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+
+                def execute(self, sql, params=None):
+                    pass
+
+                def fetchone(self_inner):
+                    call_count[0] += 1
+                    # _fetch_tenant_model_sync returns a row with llm_model
+                    if call_count[0] == 1:
+                        return {"llm_model": "my-model"}
+                    # _fetch_user_preferences_sync returns thinking_mode=True
+                    if call_count[0] == 2:
+                        return {"value": True}
+                    return None
+
+                def __iter__(self): return iter([])
+
+            class FakeConn:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+                def cursor(self, **kw): return FakeCursor()
+
+            return FakeConn()
+
+        monkeypatch.setattr(psycopg2, "connect", fake_connect)
+        resolver = self._make_resolver()
+
+        import asyncio
+        result = asyncio.run(resolver.resolve("tenant-1", "user-1"))
+        assert result.model == "my-model"
+        assert result.thinking_mode is True
+
+    def test_invalidate_clears_user_entry(self, monkeypatch):
+        """invalidate(tenant_id, user_id) removes only the specific user's cache entry."""
+        import psycopg2
+        from src.components.model_resolver import TenantModelResolver
+
+        def fake_connect(url):
+            class FakeCursor:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+                def execute(self, *a): pass
+                def fetchone(self): return None
+
+            class FakeConn:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+                def cursor(self, **kw): return FakeCursor()
+
+            return FakeConn()
+
+        monkeypatch.setattr(psycopg2, "connect", fake_connect)
+
+        import asyncio
+        resolver = self._make_resolver()
+        asyncio.run(resolver.resolve("tenant-1", "user-a"))
+        asyncio.run(resolver.resolve("tenant-1", "user-b"))
+
+        assert ("tenant-1", "user-a") in TenantModelResolver._cache
+        assert ("tenant-1", "user-b") in TenantModelResolver._cache
+
+        resolver.invalidate(tenant_id="tenant-1", user_id="user-a")
+
+        assert ("tenant-1", "user-a") not in TenantModelResolver._cache
+        assert ("tenant-1", "user-b") in TenantModelResolver._cache
+
+    def test_invalidate_tenant_clears_all_users(self, monkeypatch):
+        """invalidate(tenant_id) removes all user entries for that tenant."""
+        import psycopg2
+        from src.components.model_resolver import TenantModelResolver
+
+        def fake_connect(url):
+            class FakeCursor:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+                def execute(self, *a): pass
+                def fetchone(self): return None
+
+            class FakeConn:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+                def cursor(self, **kw): return FakeCursor()
+
+            return FakeConn()
+
+        monkeypatch.setattr(psycopg2, "connect", fake_connect)
+
+        import asyncio
+        resolver = self._make_resolver()
+        asyncio.run(resolver.resolve("tenant-1", "user-a"))
+        asyncio.run(resolver.resolve("tenant-1", "user-b"))
+        asyncio.run(resolver.resolve("tenant-2", "user-c"))
+
+        resolver.invalidate(tenant_id="tenant-1")
+
+        assert ("tenant-1", "user-a") not in TenantModelResolver._cache
+        assert ("tenant-1", "user-b") not in TenantModelResolver._cache
+        # Different tenant unaffected
+        assert ("tenant-2", "user-c") in TenantModelResolver._cache

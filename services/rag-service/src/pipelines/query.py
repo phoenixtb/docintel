@@ -18,7 +18,7 @@ Architecture (separation of concerns):
   └─────────────────────────────────────────────────────────────────────────┘
          ↓ pipeline.run()
   ┌── Haystack Pipeline (serialisable, warm-up managed, OTel-traceable) ─────┐
-  │  SecureRetriever → InfinityReranker → PromptBuilder → LLM               │
+  │  SecureRetriever → LocalCrossEncoderRanker → PromptBuilder → LLM        │
   └─────────────────────────────────────────────────────────────────────────┘
 
 All LLM inference runs through an OpenAI-compatible endpoint (LMForge, Ollama, vLLM, etc.).
@@ -46,7 +46,7 @@ from ..components.cache import SemanticCacheChecker, SemanticCacheWriter
 from ..components.embedders import BM25SparseTextEmbedder
 from ..components.opa import OpaChunkValidator
 from ..components.prompt import PromptBuilder
-from ..components.reranker import InfinityReranker
+from ..components.reranker import LocalCrossEncoderRanker
 from ..components.retrieval import SecureRetriever
 from docintel_common.domain import DOMAIN_LABELS
 from docintel_common.security import Classification, UserContext
@@ -90,9 +90,8 @@ def build_query_pipeline(settings: Settings) -> AsyncPipeline:
     )
     pipeline.add_component(
         "reranker",
-        InfinityReranker(
-            url=settings.infinity_url,
-            model=settings.infinity_reranker_model,
+        LocalCrossEncoderRanker(
+            model=settings.reranker_model,
             top_k=settings.rag_reranker_top_k,
         ),
     )

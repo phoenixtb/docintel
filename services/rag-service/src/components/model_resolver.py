@@ -1,7 +1,7 @@
 """
 TenantModelResolver
 ===================
-Resolves the effective LLM model and thinking_mode for a given tenant at query time.
+Resolves the effective LLM model and thinking_mode for a given (tenant, user) at query time.
 
 Resolution hierarchy (first non-null wins):
   Model:
@@ -9,11 +9,12 @@ Resolution hierarchy (first non-null wins):
     2. tenants.settings->>'llm_model' — per-tenant preference
     3. default_model                  — config fallback (OLLAMA_LLM_MODEL env var)
 
-  Thinking mode:
-    1. tenants.settings->>'thinking_mode' — per-tenant preference
-    2. false                              — default (instruct mode; better for most RAG)
+  Thinking mode (user-scoped):
+    1. user_preferences (key='thinking_mode') — per-user, per-tenant preference
+    2. false                                  — default
 
 Results are cached in-process for TTL seconds to avoid a DB round-trip per query.
+Cache key is (tenant_id, user_id) for user-scoped entries.
 """
 
 import asyncio
@@ -45,9 +46,9 @@ class TenantModelResolver:
     and shared across requests.
     """
 
-    # Class-level caches: tenant_id → (TenantResolved, expires_at)
-    _cache: dict[str, tuple[object, float]] = {}
-    # Platform-level: (model|None, expires_at)  None = "Tenant Choice"
+    # (tenant_id, user_id) → (TenantResolved, expires_at)
+    _cache: dict[tuple[str, str], tuple[object, float]] = {}
+    # Platform-level: (model|None, expires_at)
     _platform_cache: tuple[object, float] = (_SENTINEL, 0.0)
 
     TTL: float = 60.0
@@ -60,38 +61,49 @@ class TenantModelResolver:
     # Public API
     # ------------------------------------------------------------------
 
-    async def resolve(self, tenant_id: str) -> TenantResolved:
-        """Return the effective model and thinking_mode for tenant_id."""
+    async def resolve(self, tenant_id: str, user_id: str) -> TenantResolved:
+        """Return the effective model and thinking_mode for (tenant_id, user_id)."""
         platform_model = await self._get_platform_model()
 
-        cached_val, expires_at = self._cache.get(tenant_id, (_SENTINEL, 0.0))
+        cache_key = (tenant_id, user_id)
+        cached_val, expires_at = self._cache.get(cache_key, (_SENTINEL, 0.0))
         if cached_val is not _SENTINEL and time.monotonic() < expires_at:
             resolved: TenantResolved = cached_val  # type: ignore[assignment]
-            # Platform override can change independently; apply it on top of cache.
             if platform_model is not None:
                 return TenantResolved(model=platform_model, thinking_mode=resolved.thinking_mode)
             return resolved
 
-        resolved = await asyncio.get_running_loop().run_in_executor(
-            None, self._fetch_tenant_settings_sync, tenant_id
+        model_resolved = await asyncio.get_running_loop().run_in_executor(
+            None, self._fetch_tenant_model_sync, tenant_id
         )
-        self._cache[tenant_id] = (resolved, time.monotonic() + self.TTL)
+        thinking_mode = await asyncio.get_running_loop().run_in_executor(
+            None, self._fetch_user_preferences_sync, tenant_id, user_id
+        )
+
+        resolved = TenantResolved(model=model_resolved, thinking_mode=thinking_mode)
+        self._cache[cache_key] = (resolved, time.monotonic() + self.TTL)
 
         if platform_model is not None:
             return TenantResolved(model=platform_model, thinking_mode=resolved.thinking_mode)
         return resolved
 
-    def invalidate(self, tenant_id: Optional[str] = None) -> None:
+    def invalidate(self, tenant_id: Optional[str] = None, user_id: Optional[str] = None) -> None:
         """
         Invalidate cached entries.
-          - tenant_id=None  → clear everything (platform model changed).
-          - tenant_id=<id>  → clear only that tenant's entry.
+          - both None             → clear everything (platform model changed).
+          - tenant_id only        → clear all users in that tenant.
+          - tenant_id + user_id   → clear only that user's entry.
         """
         if tenant_id is None:
             self._cache.clear()
             self.__class__._platform_cache = (_SENTINEL, 0.0)
+        elif user_id is not None:
+            self._cache.pop((tenant_id, user_id), None)
         else:
-            self._cache.pop(tenant_id, None)
+            # Clear all (tenant_id, *) entries when model-level settings change
+            keys_to_remove = [k for k in self._cache if k[0] == tenant_id]
+            for k in keys_to_remove:
+                del self._cache[k]
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -113,7 +125,6 @@ class TenantModelResolver:
         try:
             with psycopg2.connect(self._postgres_url) as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                    # platform_admin role bypasses tenant RLS on platform_settings
                     cur.execute("SET LOCAL app.user_role = 'platform_admin'")
                     cur.execute(
                         "SELECT value FROM admin.platform_settings WHERE key = 'llm_model'"
@@ -127,30 +138,51 @@ class TenantModelResolver:
             logger.warning("Failed to fetch platform model setting: %s", exc)
             return None
 
-    def _fetch_tenant_settings_sync(self, tenant_id: str) -> TenantResolved:
-        """Fetch llm_model and thinking_mode from tenants.settings in one query."""
+    def _fetch_tenant_model_sync(self, tenant_id: str) -> str:
+        """Fetch llm_model from tenants.settings."""
         try:
             with psycopg2.connect(self._postgres_url) as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                    # RLS on tenants requires app.current_tenant to be set so the
-                    # policy `id = current_setting('app.current_tenant')` passes.
                     cur.execute("SET LOCAL app.current_tenant = %s", (tenant_id,))
                     cur.execute(
-                        """
-                        SELECT
-                            settings->>'llm_model'     AS llm_model,
-                            (settings->>'thinking_mode')::boolean AS thinking_mode
-                        FROM admin.tenants WHERE id = %s
-                        """,
+                        "SELECT settings->>'llm_model' AS llm_model FROM admin.tenants WHERE id = %s",
                         (tenant_id,),
                     )
                     row = cur.fetchone()
                     if row:
-                        model = row["llm_model"] or self._default_model
-                        thinking = bool(row["thinking_mode"]) if row["thinking_mode"] is not None else False
-                        return TenantResolved(model=model, thinking_mode=thinking)
+                        return row["llm_model"] or self._default_model
         except Exception as exc:
             logger.warning(
-                "Failed to fetch tenant settings for %s: %s — using defaults", tenant_id, exc
+                "Failed to fetch tenant model for %s: %s — using default", tenant_id, exc
             )
-        return TenantResolved(model=self._default_model, thinking_mode=False)
+        return self._default_model
+
+    def _fetch_user_preferences_sync(self, tenant_id: str, user_id: str) -> bool:
+        """Fetch thinking_mode from admin.user_preferences for the given user."""
+        try:
+            with psycopg2.connect(self._postgres_url) as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                    cur.execute("SET LOCAL app.current_tenant  = %s", (tenant_id,))
+                    cur.execute("SET LOCAL app.current_user_id = %s", (user_id,))
+                    cur.execute(
+                        """
+                        SELECT value
+                        FROM admin.user_preferences
+                        WHERE user_id = %s AND tenant_id = %s AND key = 'thinking_mode'
+                        """,
+                        (user_id, tenant_id),
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        val = row["value"]
+                        if isinstance(val, bool):
+                            return val
+                        if isinstance(val, str):
+                            return val.lower() == "true"
+                    return False
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch user preferences for user=%s tenant=%s: %s — defaulting thinking_mode=False",
+                user_id, tenant_id, exc,
+            )
+            return False

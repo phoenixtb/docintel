@@ -4,15 +4,18 @@ Service configuration — single source of truth for all env vars.
 All model inference runs through an OpenAI-compatible endpoint.
 Switch engines by updating LLM_CHAT_URL / LLM_EMBED_URL:
   LMForge (macOS/Apple Silicon):  LLM_CHAT_URL=http://host.docker.internal:11430/v1
+                                   LLM_EMBED_URL=http://host.docker.internal:11430/v1
   Ollama (any platform):          LLM_CHAT_URL=http://host.docker.internal:11434/v1
+                                   LLM_EMBED_URL=http://host.docker.internal:11434/v1
   vLLM (Linux/NVIDIA):            LLM_CHAT_URL=http://host:8000/v1
+                                   LLM_EMBED_URL=http://host:8001/v1  (separate embed instance)
   LM Studio (Windows/macOS):      LLM_CHAT_URL=http://host.docker.internal:1234/v1
 
 Model tiers:
   LLM          → LLM_MODEL            (chat generation, streaming)
-  Embeddings   → LLM_EMBED_MODEL      (dense vectors via Infinity or engine embed endpoint)
+  Embeddings   → LLM_EMBED_MODEL      (dense vectors via engine embed endpoint)
   Sparse (BM25)→ fastembed local       (no server, CPU, lightweight)
-  Reranker     → RERANKER_MODEL        (cross-encoder, CPU-local via Infinity)
+  Reranker     → RERANKER_MODEL        (cross-encoder, in-process sentence-transformers, MPS/CUDA/CPU)
   Domain router→ RAG_DOMAIN_ROUTER_MODEL (optional, disabled by default)
 """
 
@@ -33,15 +36,15 @@ class Settings(BaseSettings):
     qdrant_collection: str = "documents"
     qdrant_cache_collection: str = "response_cache"
     # Must match llm_embed_dim. Update both together when switching embed model.
-    qdrant_embedding_dim: int = 768
+    qdrant_embedding_dim: int = 1024
     # Set QDRANT_QUANTIZATION=false to disable INT8 scalar quantization (e.g. during benchmarking).
     qdrant_quantization: bool = True
 
     # ── LLM Engine — OpenAI-compatible endpoint ───────────────────────────────
     # Chat completions (generation, streaming, thinking mode)
     llm_chat_url: str = "http://host.docker.internal:11434/v1"  # Ollama default
-    # Embeddings — split from chat so LMForge (chat) + Infinity (embed) is first-class
-    llm_embed_url: str = "http://infinity:7997/v1"              # Infinity (Docker)
+    # Embeddings — same engine as chat by default; override via LLM_EMBED_URL
+    llm_embed_url: str = "http://host.docker.internal:11430/v1"  # LMForge default
     # API key — ignored by local engines; set for hosted APIs (OpenAI, Anthropic, etc.)
     llm_api_key: str = "none"
 
@@ -49,9 +52,9 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3.5:4b"
     llm_fallback_model: str = "phi3:mini"
 
-    # Embeddings — dense vectors (768-dim). Must match qdrant_embedding_dim.
-    llm_embed_model: str = "nomic-embed-text"
-    llm_embed_dim: int = 768
+    # Embeddings — dense vectors (1024-dim for qwen3-embed). Must match qdrant_embedding_dim.
+    llm_embed_model: str = "qwen3-embed:0.6b:4bit"
+    llm_embed_dim: int = 1024
 
     # LLM generation settings
     llm_temperature: float = 0.1
@@ -71,11 +74,11 @@ class Settings(BaseSettings):
     llm_ctx: int = 16384          # standard queries
     llm_thinking_ctx: int = 32768  # thinking mode (thinking block eats extra context)
 
-    # ── Reranker — Infinity server ────────────────────────────────────────────
-    # Infinity serves cross-encoder models via OpenAI-compatible API.
-    # GPU/CPU acceleration is handled by Infinity; rag-service calls HTTP.
-    infinity_url: str = "http://infinity:7997"
-    infinity_reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # ── Reranker — in-process sentence-transformers (MPS/CUDA/CPU) ───────────
+    # LocalCrossEncoderRanker auto-selects device: mps → cuda → cpu.
+    # Model is downloaded once and cached by HuggingFace Hub.
+    # For NVIDIA TensorRT opt-in via Infinity: docker compose --profile infinity up
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     use_reranking: bool = True
 
     # ── RAG parameters ────────────────────────────────────────────────────────

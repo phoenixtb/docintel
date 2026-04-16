@@ -5,7 +5,7 @@
   import { toast } from 'svelte-sonner';
   import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 
-  let activeTab: 'usage' | 'documents' | 'users' | 'model' | 'cache' = $state('usage');
+  let activeTab: 'usage' | 'documents' | 'users' | 'model' | 'cache' | 'preferences' = $state('usage');
   let loading = $state(true);
 
   // Usage
@@ -59,17 +59,22 @@
 
   // Model
   interface ModelInfo { name: string; size?: number; modified_at?: string; supports_thinking?: boolean }
-  interface TenantSettings { llmModel: string | null; effectiveModel: string | null; thinkingMode: boolean }
+  interface TenantSettings { llmModel: string | null; effectiveModel: string | null }
   let modelLoading = $state(false);
   let availableModels: ModelInfo[] = $state([]);
   let platformDefaultModel: string | null = $state(null);
   let tenantSettings: TenantSettings | null = $state(null);
   let selectedModel: string | null = $state(null);   // null = "Platform Default"
-  let thinkingMode = $state(false);
-  let thinkingSaving = $state(false);
   let modelSaving = $state(false);
   let modelConfirmOpen = $state(false);
   let pendingModel: string | null = $state(null);
+
+  // Personal Preferences
+  interface UserPreferences { thinkingMode: boolean }
+  let preferencesLoading = $state(false);
+  let userPreferences: UserPreferences | null = $state(null);
+  let thinkingMode = $state(false);
+  let thinkingSaving = $state(false);
 
   // Cache
   interface CacheStats { totalEntries: number; hitRate: number; avgLatencySavedMs: number }
@@ -321,16 +326,58 @@
       }
       if (settingsRes.ok) {
         tenantSettings = await settingsRes.json();
-        // Show the effective model in the select even if tenant has no explicit preference.
-        // This prevents the dropdown from appearing blank. The save button remains disabled
-        // when selection matches the stored llmModel (null check handled below).
         selectedModel = tenantSettings?.llmModel ?? tenantSettings?.effectiveModel ?? platformDefaultModel ?? null;
-        thinkingMode = tenantSettings?.thinkingMode ?? false;
       }
     } catch (e) {
       toast.error(`Failed to load model settings: ${e}`);
     }
     modelLoading = false;
+  }
+
+  async function loadPreferences() {
+    preferencesLoading = true;
+    try {
+      const res = await apiFetch('/api/v1/users/me/preferences');
+      if (res.ok) {
+        userPreferences = await res.json();
+        thinkingMode = userPreferences?.thinkingMode ?? false;
+      }
+      // Also load models so we can check if active model supports thinking
+      if (availableModels.length === 0) {
+        const modelsRes = await apiFetch('/api/v1/models');
+        if (modelsRes.ok) {
+          const data = await modelsRes.json();
+          availableModels = data.models ?? [];
+          platformDefaultModel = data.default_model ?? null;
+        }
+        const settingsRes = await apiFetch(`/api/v1/tenants/${tenantId}/settings`);
+        if (settingsRes.ok) tenantSettings = await settingsRes.json();
+      }
+    } catch (e) {
+      toast.error(`Failed to load preferences: ${e}`);
+    }
+    preferencesLoading = false;
+  }
+
+  async function saveThinkingMode(enabled: boolean) {
+    thinkingSaving = true;
+    try {
+      const res = await apiFetch('/api/v1/users/me/preferences', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thinkingMode: enabled }),
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      userPreferences = await res.json();
+      thinkingMode = userPreferences?.thinkingMode ?? false;
+      // Bust the user-scoped resolver cache so the next query picks up the new preference.
+      await apiFetch('/api/v1/users/me/preferences/invalidate-cache', { method: 'DELETE' });
+      toast.success(enabled ? 'Thinking mode enabled.' : 'Thinking mode disabled.');
+    } catch (e) {
+      toast.error(`Failed to update thinking mode: ${e}`);
+      thinkingMode = !enabled;
+    }
+    thinkingSaving = false;
   }
 
   function requestModelChange(model: string | null) {
@@ -362,32 +409,6 @@
     }
     modelSaving = false;
     pendingModel = null;
-  }
-
-  async function saveThinkingMode(enabled: boolean) {
-    thinkingSaving = true;
-    try {
-      const res = await apiFetch(`/api/v1/tenants/${tenantId}/settings`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ thinkingMode: enabled }),
-      });
-      if (!res.ok) throw new Error(`${res.status}`);
-      tenantSettings = await res.json();
-      thinkingMode = tenantSettings?.thinkingMode ?? false;
-      // Bust both caches: resolver (in-process TTL) and semantic (Qdrant).
-      // Semantic cache must be cleared because cached responses were generated
-      // without/with thinking tokens and are now stale after the mode change.
-      await Promise.all([
-        apiFetch(`/api/v1/tenants/${tenantId}/settings/invalidate-cache`, { method: 'DELETE' }),
-        apiFetch(`/api/v1/admin/cache/clear/${tenantId}`, { method: 'POST' }),
-      ]);
-      toast.success(enabled ? 'Thinking mode enabled — caches cleared.' : 'Thinking mode disabled — caches cleared.');
-    } catch (e) {
-      toast.error(`Failed to update thinking mode: ${e}`);
-      thinkingMode = !enabled; // revert toggle
-    }
-    thinkingSaving = false;
   }
 
   async function loadCache() {
@@ -434,6 +455,7 @@
     if (tab === 'users') loadUsers();
     if (tab === 'model') loadModel();
     if (tab === 'cache') loadCache();
+    if (tab === 'preferences') loadPreferences();
   }
 
   onMount(() => {
@@ -484,6 +506,7 @@
         { id: 'documents', label: 'Documents' },
         { id: 'users', label: 'Users' },
         ...(isTenantAdmin() ? [{ id: 'model', label: 'Model' }, { id: 'cache', label: 'Cache' }] : []),
+        { id: 'preferences', label: 'Preferences' },
       ] as tab}
         <button
           onclick={() => switchTab(tab.id as typeof activeTab)}
@@ -896,15 +919,30 @@
             {/if}
           </div>
 
-          <!-- Thinking mode toggle -->
+        </div>
+      {/if}
+    {/if}
+
+    <!-- Preferences Tab -->
+    {#if activeTab === 'preferences'}
+      {#if preferencesLoading}
+        <div class="text-center py-12 text-gray-400">Loading...</div>
+      {:else}
+        <div class="space-y-6">
           <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Personal Preferences</h3>
+            <p class="text-sm text-gray-500 dark:text-gray-400 mb-6">
+              These settings apply only to your account — they do not affect other users in your tenant.
+            </p>
+
+            <!-- Thinking Mode -->
             <div class="flex items-start justify-between gap-4">
               <div class="flex-1">
-                <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Thinking Mode</h3>
+                <p class="text-sm font-medium text-gray-900 dark:text-white mb-1">Thinking Mode</p>
                 <p class="text-sm text-gray-500 dark:text-gray-400">
                   When enabled, the model reasons step-by-step before answering (shown in a collapsible panel).
                   Best for complex multi-step analysis. For straightforward factual retrieval, keeping this
-                  <span class="font-medium">off</span> reduces latency and often gives better results.
+                  <span class="font-medium">off</span> reduces latency.
                 </p>
                 {#if !activeModelSupportsThinking}
                   <p class="text-xs text-amber-600 dark:text-amber-400 mt-2">
@@ -930,7 +968,6 @@
               </button>
             </div>
           </div>
-
         </div>
       {/if}
     {/if}

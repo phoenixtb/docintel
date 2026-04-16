@@ -79,6 +79,22 @@ spring:
           filters:
             - RewritePath=/api/v1/tenants/(?<tid>[^/]+)/settings/invalidate-cache, /internal/settings-cache/${tid}
 
+        - id: user-preferences-cache
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/users/me/preferences/invalidate-cache
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/users/me/preferences/invalidate-cache, /internal/user-settings-cache
+
+        - id: user-preferences
+          uri: http://admin-service:8082
+          predicates:
+            - Path=/api/v1/users/me/preferences
+            - Method=GET,PATCH
+          filters:
+            - RewritePath=/api/v1/users/me/preferences, /internal/users/me/preferences
+
         - id: rag-service-query
           uri: http://rag-service:8000
           predicates:

@@ -199,6 +199,20 @@ route_requires_role(method, path, "admin:rw") {
     glob.match("/api/v1/tenants*", [], path)
 }
 
+# User preferences — any authenticated user (tenant_user, tenant_admin, platform_admin)
+route_requires_role(method, path, "user.preferences:rw") {
+    method == "GET"
+    path == "/api/v1/users/me/preferences"
+}
+route_requires_role(method, path, "user.preferences:rw") {
+    method == "PATCH"
+    path == "/api/v1/users/me/preferences"
+}
+route_requires_role(method, path, "user.preferences:rw") {
+    method == "DELETE"
+    path == "/api/v1/users/me/preferences/invalidate-cache"
+}
+
 # ---------------------------------------------------------------------------
 # Allow rule — user must hold at least one matching role
 # ---------------------------------------------------------------------------
