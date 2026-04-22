@@ -34,15 +34,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ── Layer 3: actual source (changes here don't bust dep layers above) ─────────
 COPY services/rag-service/src/ ./src/
 
-# ── Layer 4: pre-bake cross-encoder reranker model ───────────────────────────
-# Run a full forward pass so the HF weights, ONNX Runtime op kernels, and BLAS
-# parameters are compiled and cached inside the image layer.  At container
-# start the model loads instantly — no runtime download, no cold compilation.
-#
-# HF_HOME is pinned to /root/.cache/huggingface here and carried into runtime
-# (even when the process runs as appuser) so the baked cache is always found.
-# Non-root user. -m creates home dir so Haystack/HF libs that write to ~/.config
+# ── Layer 4: non-root user ────────────────────────────────────────────────────
+# -m creates home dir so Haystack/HF libs that write to ~/.config
 # don't fail with PermissionError at startup.
+# Reranker runs in the Infinity sidecar (no model weights in this image).
 RUN useradd -r -u 1001 -g root -m appuser
 ENV HOME=/home/appuser
 USER 1001

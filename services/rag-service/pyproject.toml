@@ -18,7 +18,10 @@ dependencies = [
     "httpx>=0.27.0",
     
     # RAG Framework
-    "haystack-ai>=2.9.0",
+    # Pinned: llm_adapter.py subclasses OpenAIChatGenerator and imports private symbols
+    # (_convert_chat_completion_chunk_to_streaming_chunk, _convert_streaming_chunks_to_chat_message,
+    # _handle_stream_response). Validated against 2.18.x. See services/rag-service/src/components/llm_adapter.py.
+    "haystack-ai~=2.18",
     "qdrant-haystack>=6.0.0",
     "qdrant-client>=1.16.0",
     

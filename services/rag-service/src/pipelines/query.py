@@ -18,7 +18,7 @@ Architecture (separation of concerns):
   └─────────────────────────────────────────────────────────────────────────┘
          ↓ pipeline.run()
   ┌── Haystack Pipeline (serialisable, warm-up managed, OTel-traceable) ─────┐
-  │  SecureRetriever → LocalCrossEncoderRanker → PromptBuilder → LLM        │
+  │  SecureRetriever → OpaChunkValidator → InfinityReranker → PromptBuilder → LLM │
   └─────────────────────────────────────────────────────────────────────────┘
 
 All LLM inference runs through an OpenAI-compatible endpoint (LMForge, Ollama, vLLM, etc.).
@@ -34,6 +34,7 @@ Why embedders live outside the pipeline:
 
 import json
 import logging
+import threading
 import time
 from typing import Optional
 
@@ -100,16 +101,22 @@ def build_query_pipeline(settings: Settings) -> AsyncPipeline:
 
     from haystack.components.generators.chat.openai import OpenAIChatGenerator
 
+    # Keep generation_kwargs in sync with streaming path in main.py so both
+    # /query and /query/stream produce equivalent outputs for the same prompt.
+    _gen_kwargs: dict = {
+        "temperature": settings.llm_temperature,
+        "max_tokens": settings.llm_max_tokens,
+    }
+    if settings.llm_frequency_penalty:
+        _gen_kwargs["frequency_penalty"] = settings.llm_frequency_penalty
+
     pipeline.add_component(
         "llm",
         OpenAIChatGenerator(
             model=settings.llm_model,
             api_base_url=settings.llm_chat_url,
             api_key=Secret.from_token(settings.llm_api_key),
-            generation_kwargs={
-                "temperature": settings.llm_temperature,
-                "max_tokens": settings.llm_max_tokens,
-            },
+            generation_kwargs=_gen_kwargs,
         ),
     )
 
@@ -154,12 +161,20 @@ def _extract_think(raw: str) -> tuple[str, str]:
 
     Returns (thinking, answer). The thinking block is stripped from the
     answer so the two can be rendered separately in the UI.
-    Works on both complete and empty think blocks.
+
+    Handles three cases:
+      1. Complete block: <think>...</think>remainder → (thinking, remainder)
+      2. Unclosed block: <think>...EOF (generation truncated) → (tail, "")
+         Prevents thinking tokens from leaking into the displayed answer.
+      3. No block at all → ("", raw)
     """
     import re
     m = re.search(r"<think>(.*?)</think>(.*)", raw, re.DOTALL)
     if m:
         return m.group(1).strip(), m.group(2).strip()
+    m_open = re.search(r"<think>(.*)$", raw, re.DOTALL)
+    if m_open:
+        return m_open.group(1).strip(), ""
     return "", raw.strip()
 
 
@@ -184,7 +199,7 @@ class RAGService:
     def __init__(self, settings: Settings | None = None):
         self._settings = settings or get_settings()
         self._ready = False
-        self._warm_up_lock = __import__("threading").Lock()
+        self._warm_up_lock = threading.Lock()
 
         # Components managed outside the pipeline
         self._dense_embedder: Optional[OpenAITextEmbedder] = None
@@ -330,7 +345,7 @@ class RAGService:
 
         if summarizer is not None:
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 asyncio.ensure_future(
                     self._maybe_compress_history(conversation_id, tenant_id, summarizer),
                     loop=loop,
@@ -476,7 +491,7 @@ class RAGService:
           9. Conversation persist
         """
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         if not self._ready:
             # warm_up() loads models and builds pipelines — must not block the event loop.
@@ -569,9 +584,39 @@ class RAGService:
 
         if effective_min_score > 0.0:
             above = [d for d in reranked_docs if (d.score or 0.0) >= effective_min_score]
-            reranked_docs = above if above else reranked_docs[:1]
+            if not above and cfg.rag_min_score_fallback_topk > 0:
+                above = reranked_docs[:cfg.rag_min_score_fallback_topk]
+            reranked_docs = above
 
         documents = reranked_docs[:effective_top_k]
+
+        # No documents after filtering → return the standard no-docs response
+        # rather than feeding an empty context to the LLM (degenerate answer).
+        if not documents:
+            from ..prompts import NO_DOCUMENTS_RESPONSE, NO_RELEVANT_DOCUMENTS_RESPONSE
+            try:
+                from qdrant_client import QdrantClient as _QC
+                _qc = _QC(url=cfg.qdrant_url)
+                _count = _qc.count(collection_name=f"documents_{tenant_id}", exact=False).count
+                no_docs_text = (
+                    NO_RELEVANT_DOCUMENTS_RESPONSE.format(query=question)
+                    if _count > 0
+                    else NO_DOCUMENTS_RESPONSE
+                )
+            except Exception:
+                no_docs_text = NO_DOCUMENTS_RESPONSE
+            latency_ms = int((time.time() - start_time) * 1000)
+            if conversation_id:
+                self._persist_conversation(conversation_id, question, no_docs_text, [], tenant_id=tenant_id, summarizer=summarizer)
+            return {
+                "answer": no_docs_text,
+                "thinking": "",
+                "sources": [],
+                "cache_hit": False,
+                "latency_ms": latency_ms,
+                "model_used": cfg.llm_model,
+                "detected_domain": detected_domain,
+            }
 
         llm_replies = result.get("llm", {}).get("replies", [])
         raw_text = ""

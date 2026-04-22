@@ -92,8 +92,6 @@ services:
     build:
       context: .
       dockerfile: services/rag-service/Dockerfile
-      args:
-        - RERANKER_MODEL=${DEFAULT_RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
     environment:
       - QDRANT_URL=http://qdrant:6333
       # LLM Engine — OpenAI-compatible chat completions endpoint.

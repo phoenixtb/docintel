@@ -10,7 +10,7 @@ from .config import Settings, get_settings
 
 def create_document_store(
     settings: Settings | None = None,
-    collection: str | None = None,
+    collection: str = "documents",
 ) -> QdrantDocumentStore:
     """
     Create QdrantDocumentStore with dense + sparse vector support.
@@ -20,11 +20,12 @@ def create_document_store(
 
     This is the single factory used by both the indexing pipeline and the
     SecureRetriever — ensures identical collection configuration across both.
+    Callers always pass an explicit collection name (e.g. documents_{tenant_id}).
     """
     cfg = settings or get_settings()
     return QdrantDocumentStore(
         url=cfg.qdrant_url,
-        index=collection or cfg.qdrant_collection,
+        index=collection,
         embedding_dim=cfg.qdrant_embedding_dim,
         similarity="cosine",
         use_sparse_embeddings=True,

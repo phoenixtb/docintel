@@ -259,7 +259,8 @@ docintel/
 | API Gateway | Kotlin / Spring Cloud Gateway | Apache 2.0 |
 | Identity Provider | Zitadel | MIT |
 | LLM | Qwen3.5-4B via Ollama (configurable per-tenant) | Apache 2.0 |
-| Embeddings | nomic-embed-text | Apache 2.0 |
+| Embeddings | nomic-embed-text (served by LMForge/Ollama/vLLM) | Apache 2.0 |
+| Reranker | Infinity ONNX sidecar (cross-encoder/ms-marco-MiniLM-L-6-v2) | MIT |
 | RAG Framework | Haystack 2.x | Apache 2.0 |
 | Vector DB | Qdrant | Apache 2.0 |
 | Database | PostgreSQL 18 | PostgreSQL License |

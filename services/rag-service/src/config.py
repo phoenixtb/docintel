@@ -13,9 +13,9 @@ Switch engines by updating LLM_CHAT_URL / LLM_EMBED_URL:
 
 Model tiers:
   LLM          → LLM_MODEL            (chat generation, streaming)
-  Embeddings   → LLM_EMBED_MODEL      (dense vectors via engine embed endpoint)
+  Embeddings   → LLM_EMBED_MODEL      (dense vectors via engine embed endpoint — LMForge/Ollama/vLLM)
   Sparse (BM25)→ fastembed local       (no server, CPU, lightweight)
-  Reranker     → RERANKER_MODEL        (cross-encoder, in-process sentence-transformers, MPS/CUDA/CPU)
+  Reranker     → RERANKER_MODEL        (cross-encoder served by Infinity ONNX sidecar at RERANKER_URL)
   Domain router→ RAG_DOMAIN_ROUTER_MODEL (optional, disabled by default)
 """
 
@@ -33,8 +33,6 @@ class Settings(BaseSettings):
 
     # ── Qdrant ───────────────────────────────────────────────────────────────
     qdrant_url: str = "http://localhost:6333"
-    qdrant_collection: str = "documents"
-    qdrant_cache_collection: str = "response_cache"
     # Must match llm_embed_dim. Update both together when switching embed model.
     qdrant_embedding_dim: int = 1024
     # Set QDRANT_QUANTIZATION=false to disable INT8 scalar quantization (e.g. during benchmarking).
@@ -86,6 +84,10 @@ class Settings(BaseSettings):
     rag_reranker_top_k: int = 10
     rag_default_top_k: int = 5
     rag_min_relevance_score: float = 0.0
+    # When no doc passes rag_min_relevance_score, how many top docs to return anyway.
+    # 0 = strict (return empty → NO_RELEVANT_DOCUMENTS_RESPONSE).
+    # Set to 1 to always return at least one result regardless of score.
+    rag_min_score_fallback_topk: int = 0
     rag_cache_similarity_threshold: float = 0.92
 
     # ── Hybrid search (BM25 sparse via fastembed, always local) ──────────────

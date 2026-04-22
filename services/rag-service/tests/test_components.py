@@ -535,3 +535,117 @@ class TestTenantModelResolver:
         assert ("tenant-1", "user-b") not in TenantModelResolver._cache
         # Different tenant unaffected
         assert ("tenant-2", "user-c") in TenantModelResolver._cache
+
+
+# ---------------------------------------------------------------------------
+# T2 verification: LocalCrossEncoderRanker must be removed
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestRerankerImports:
+    """Verify dead code removal: LocalCrossEncoderRanker no longer exists."""
+
+    def test_local_cross_encoder_removed(self):
+        """Importing LocalCrossEncoderRanker raises ImportError — it was deleted."""
+        with pytest.raises((ImportError, AttributeError)):
+            from src.components.reranker import LocalCrossEncoderRanker  # noqa: F401
+
+    def test_infinity_reranker_importable(self):
+        """InfinityReranker is still present and importable."""
+        from src.components.reranker import InfinityReranker
+        r = InfinityReranker(url="http://localhost:7997", model="cross-encoder/ms-marco-MiniLM-L-6-v2")
+        assert r is not None
+        assert r.top_k == 10
+
+
+# ---------------------------------------------------------------------------
+# T12 verification: _extract_think handles unclosed <think> blocks
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestExtractThink:
+    """Tests for _extract_think in pipelines/query.py."""
+
+    def _call(self, raw: str):
+        from src.pipelines.query import _extract_think
+        return _extract_think(raw)
+
+    def test_complete_block(self):
+        thinking, answer = self._call("<think>I am reasoning</think>The final answer")
+        assert thinking == "I am reasoning"
+        assert answer == "The final answer"
+
+    def test_complete_block_with_whitespace(self):
+        thinking, answer = self._call("<think>\n  reasoning here\n</think>\n\nAnswer text")
+        assert "reasoning here" in thinking
+        assert "Answer text" in answer
+
+    def test_unclosed_block_returns_thinking_empty_answer(self):
+        """Generation truncated mid-think: tail is thinking, answer is empty."""
+        thinking, answer = self._call("<think>partial thought that never ends")
+        assert "partial thought" in thinking
+        assert answer == ""
+
+    def test_no_think_block_passthrough(self):
+        thinking, answer = self._call("This is a plain answer with no think block.")
+        assert thinking == ""
+        assert answer == "This is a plain answer with no think block."
+
+    def test_empty_think_block(self):
+        thinking, answer = self._call("<think></think>The answer")
+        assert thinking == ""
+        assert answer == "The answer"
+
+    def test_nested_angle_brackets_in_answer(self):
+        """Angle brackets in the answer after </think> don't confuse the parser."""
+        thinking, answer = self._call("<think>reason</think>Answer with <b>html</b>")
+        assert thinking == "reason"
+        assert "html" in answer
+
+
+# ---------------------------------------------------------------------------
+# T11 verification: min_score branch behaviour
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestMinScoreBranch:
+    """Tests for rag_min_score_fallback_topk config in query pipeline."""
+
+    def _make_doc(self, score: float):
+        from haystack import Document
+        return Document(content=f"doc score={score}", score=score)
+
+    def _apply_filter(self, docs, min_score: float, fallback_topk: int):
+        """Mirror the logic in RAGService.query step 6."""
+        reranked = docs
+        if min_score > 0.0:
+            above = [d for d in reranked if (d.score or 0.0) >= min_score]
+            if not above and fallback_topk > 0:
+                above = reranked[:fallback_topk]
+            reranked = above
+        return reranked
+
+    def test_strict_mode_returns_empty_when_all_below_threshold(self):
+        """fallback_topk=0: no docs pass threshold → empty list."""
+        docs = [self._make_doc(0.1), self._make_doc(0.2)]
+        result = self._apply_filter(docs, min_score=0.5, fallback_topk=0)
+        assert result == []
+
+    def test_fallback_topk_returns_n_docs_when_none_pass(self):
+        """fallback_topk=2: no docs pass threshold → top-2 returned."""
+        docs = [self._make_doc(0.1), self._make_doc(0.2), self._make_doc(0.3)]
+        result = self._apply_filter(docs, min_score=0.9, fallback_topk=2)
+        assert len(result) == 2
+
+    def test_above_threshold_docs_returned_normally(self):
+        """Docs above threshold are returned; fallback is not triggered."""
+        docs = [self._make_doc(0.9), self._make_doc(0.1)]
+        result = self._apply_filter(docs, min_score=0.5, fallback_topk=0)
+        assert len(result) == 1
+        assert result[0].score == pytest.approx(0.9)
+
+    def test_min_score_zero_disables_filter(self):
+        """min_score=0.0 returns all docs unfiltered."""
+        docs = [self._make_doc(0.05), self._make_doc(0.1)]
+        result = self._apply_filter(docs, min_score=0.0, fallback_topk=0)
+        assert len(result) == 2

@@ -465,15 +465,19 @@ def call_streaming(
     use_cache: bool,
     timeout: int,
     bearer_token: str | None = None,
+    extra_payload: dict | None = None,
 ) -> dict:
     """Call the RAG streaming endpoint, collect all SSE events and return a result dict."""
-    payload = {
+    payload: dict = {
         "question": question,
         "tenant_id": tenant_id,
         "document_type": document_type,
         "use_reranking": use_reranking,
         "use_cache": use_cache,
     }
+    if extra_payload:
+        payload.update(extra_payload)
+
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
@@ -486,6 +490,7 @@ def call_streaming(
     thinking = ""
     sources = []
     error = None
+    cache_hit = False
     t0 = time.time()
 
     try:
@@ -509,12 +514,17 @@ def call_streaming(
                             data = json.loads(line[6:])
                         except json.JSONDecodeError:
                             continue
+                        if "metadata" in data:
+                            meta = data["metadata"]
+                            cache_hit = bool(meta.get("cache_hit", False))
                         if data.get("thinking_token"):
                             thinking += data["thinking_token"]
                         if data.get("token"):
                             answer += data["token"]
                         if data.get("sources"):
                             sources = data["sources"]
+                        if data.get("cache_hit"):
+                            cache_hit = True
                         if data.get("error"):
                             error = data["error"]
                         if data.get("done"):
@@ -530,6 +540,7 @@ def call_streaming(
         "source_count": len(sources),
         "latency_seconds": latency,
         "error": error,
+        "cache_hit": cache_hit,
     }
 
 
@@ -537,7 +548,21 @@ def call_streaming(
 # Evaluation
 # =============================================================================
 
-def evaluate(result: dict, expect_keywords: list[str], min_answer_length: int = 5) -> dict:
+def evaluate(
+    result: dict,
+    expect_keywords: list[str],
+    min_answer_length: int = 5,
+    expect_no_sources: bool = False,
+    expect_thinking_length_min: int | None = None,
+    expect_cache_hit: bool = False,
+) -> dict:
+    """
+    Evaluate a streaming result against expectations.
+
+    expect_no_sources        : pass when sources list is empty (min score strict mode).
+    expect_thinking_length_min: pass only when thinking token count >= this value.
+    expect_cache_hit         : pass only when the metadata cache_hit flag is True.
+    """
     answer = result["answer"].lower()
 
     # Check keywords in both answer AND source content so that a short but
@@ -551,11 +576,27 @@ def evaluate(result: dict, expect_keywords: list[str], min_answer_length: int = 
     keyword_hits = [kw for kw in expect_keywords if kw.lower() in combined]
     keyword_miss = [kw for kw in expect_keywords if kw.lower() not in combined]
 
+    if expect_no_sources:
+        # No-sources mode: answer must be non-empty, sources must be empty.
+        sources_ok = result["source_count"] == 0
+    else:
+        sources_ok = result["source_count"] > 0
+
+    thinking_ok = True
+    if expect_thinking_length_min is not None:
+        thinking_ok = result.get("thinking_length", 0) >= expect_thinking_length_min
+
+    cache_hit_ok = True
+    if expect_cache_hit:
+        cache_hit_ok = bool(result.get("cache_hit", False))
+
     passed = (
         result["error"] is None
         and len(result["answer"]) >= min_answer_length
-        and result["source_count"] > 0
-        and len(keyword_miss) == 0   # all expected keywords found (in answer OR sources)
+        and sources_ok
+        and len(keyword_miss) == 0
+        and thinking_ok
+        and cache_hit_ok
     )
 
     return {
@@ -568,6 +609,7 @@ def evaluate(result: dict, expect_keywords: list[str], min_answer_length: int = 
         ),
         "answer_length": len(result["answer"]),
         "thinking_length": result.get("thinking_length", 0),
+        "cache_hit": result.get("cache_hit", False),
     }
 
 
@@ -746,7 +788,21 @@ def main() -> int:
     try:
         for suite_def in suites:
             suite_name = suite_def["name"]
-            doc_type   = suite_def["document_type"]
+            doc_type   = suite_def.get("document_type", "general")
+
+            # skip_if_env_missing: skip the whole suite unless all listed env vars are set
+            skip_vars = suite_def.get("skip_if_env_missing", [])
+            if skip_vars and not all(os.environ.get(v) for v in skip_vars):
+                print(f"   ⏭  Suite '{suite_name}' skipped (requires env: {', '.join(skip_vars)})")
+                continue
+
+            # config_overrides: per-suite overrides (e.g. thinking: true, use_cache: true)
+            cfg_overrides = suite_def.get("config_overrides", {})
+            suite_use_cache = cfg_overrides.get("use_cache", use_cache)
+            # extra_payload carries engine-specific params (thinking) not in the standard schema
+            extra_payload: dict = {}
+            if "thinking" in cfg_overrides:
+                extra_payload["thinking"] = cfg_overrides["thinking"]
 
             print(f"▶  Suite: {suite_name}  ({doc_type})")
 
@@ -759,6 +815,9 @@ def main() -> int:
             for qdef in suite_def["queries"]:
                 question = qdef["question"]
                 expect_kw = qdef.get("expect_keywords", [])
+                expect_no_sources = bool(qdef.get("expect_no_sources", False))
+                expect_thinking_min = qdef.get("expect_thinking_length_min")
+                expect_cache_hit = bool(qdef.get("expect_cache_hit", False))
 
                 # Refresh token if expiry is within 2 minutes (checked per-query
                 # because individual LLM responses can take 2-4 minutes each)
@@ -769,6 +828,16 @@ def main() -> int:
                         bearer_token, _token_expires_in = acquire_token(auth_cfg, None, None)
                         _token_acquired_at = time.time()
 
+                # Cache hit test: fire query twice; evaluate the second response
+                if expect_cache_hit:
+                    print(f"   ⋯  [warm] {question[:55]}", end="", flush=True)
+                    call_streaming(
+                        base_url=base_url, rag_path=rag_path, question=question,
+                        document_type=doc_type, tenant_id=tenant_id,
+                        use_reranking=use_reranking, use_cache=suite_use_cache,
+                        timeout=timeout, bearer_token=bearer_token, extra_payload=extra_payload,
+                    )
+
                 print(f"   ⋯  {question[:65]}", end="", flush=True)
                 result = call_streaming(
                     base_url=base_url,
@@ -777,16 +846,27 @@ def main() -> int:
                     document_type=doc_type,
                     tenant_id=tenant_id,
                     use_reranking=use_reranking,
-                    use_cache=use_cache,
+                    use_cache=suite_use_cache,
                     timeout=timeout,
                     bearer_token=bearer_token,
+                    extra_payload=extra_payload or None,
                 )
-                ev = evaluate(result, expect_kw, min_answer_length=min_answer_length)
+                ev = evaluate(
+                    result, expect_kw,
+                    min_answer_length=min_answer_length,
+                    expect_no_sources=expect_no_sources,
+                    expect_thinking_length_min=expect_thinking_min,
+                    expect_cache_hit=expect_cache_hit,
+                )
 
                 icon = PASS if ev["passed"] else FAIL
                 kw_info = ""
                 if expect_kw:
                     kw_info = f" kw={int(ev['keyword_coverage']*100)}%"
+                if expect_thinking_min is not None:
+                    kw_info += f" think={ev['thinking_length']}"
+                if expect_cache_hit:
+                    kw_info += f" cache={'HIT' if ev['cache_hit'] else 'MISS'}"
                 print(f"\r   {icon}  {question[:60]:<60} {result['latency_seconds']:5.1f}s  "
                       f"{result['source_count']} src{kw_info}")
 

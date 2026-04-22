@@ -41,10 +41,13 @@ async def _emit_query_event(
     cache_hit: bool,
     source_count: int,
     analytics_url: str,
+    http_client: Optional[httpx.AsyncClient] = None,
 ) -> None:
     """Fire-and-forget: POST query telemetry to analytics-service."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        client = http_client or httpx.AsyncClient(timeout=3.0)
+        close_after = http_client is None
+        try:
             await client.post(
                 f"{analytics_url}/events/query",
                 json={
@@ -56,7 +59,11 @@ async def _emit_query_event(
                     "cache_hit": cache_hit,
                     "source_count": source_count,
                 },
+                timeout=3.0,
             )
+        finally:
+            if close_after:
+                await client.aclose()
     except Exception as e:
         logger.debug("Query telemetry emit failed (non-fatal): %s", e)
 
@@ -104,6 +111,10 @@ async def lifespan(app: FastAPI):
     # Probe LLM engines — log reachability and available models (non-fatal)
     await _probe_llm_engine(settings)
 
+    # Fail-fast guard: verify Haystack private symbols used by ThinkingAwareChatGenerator
+    # are still present. Catches silent breakage from a Haystack upgrade before any query.
+    _selftest_thinking_adapter()
+
     # Trigger chat model pre-load in LMForge/Ollama (fire-and-forget).
     # Local engines load models lazily on first request (can take 2-5 s).
     # Sending a tiny request now ensures the model is hot before users query.
@@ -139,10 +150,37 @@ async def lifespan(app: FastAPI):
     app.state.llm_semaphore = asyncio.Semaphore(settings.llm_concurrency_limit)
     logger.info("LLM concurrency limit: %d", settings.llm_concurrency_limit)
 
+    # Shared HTTP client — connection pool reused across requests (healthcheck,
+    # model list, analytics telemetry). Avoids opening a new TCP connection per
+    # call. The probe / pre-warm helpers use their own short-lived clients since
+    # they fire only at startup before the pool is needed.
+    app.state.http = httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+    )
+
     yield
 
     logger.info("RAG Service shutting down")
     tracer.shutdown()
+    await app.state.http.aclose()
+
+
+def _selftest_thinking_adapter() -> None:
+    """
+    Verify that Haystack's private symbols used by ThinkingAwareChatGenerator
+    still exist. Fails loudly at startup so broken Haystack upgrades are caught
+    before any user query rather than mid-stream.
+    """
+    from ..components.llm_adapter import ThinkingAwareChatGenerator
+    from haystack.components.generators.chat.openai import OpenAIChatGenerator
+
+    if not hasattr(OpenAIChatGenerator, "_handle_stream_response"):
+        raise RuntimeError(
+            "Haystack OpenAIChatGenerator._handle_stream_response is missing. "
+            "ThinkingAwareChatGenerator's override will not fire — thinking tokens "
+            "will be silently dropped. Update llm_adapter.py or pin haystack-ai~=2.18."
+        )
+    logger.info("ThinkingAwareChatGenerator self-test passed")
 
 
 async def _probe_llm_engine(settings: Settings) -> None:
@@ -175,7 +213,7 @@ async def _prewarm_rag_service(rag_service) -> None:
     (60-120 s on CPU) happens during startup instead of blocking the first query.
     """
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, rag_service.warm_up)
         logger.info("RAG pipeline warm-up complete (reranker ready)")
     except Exception as e:
@@ -348,7 +386,7 @@ class VectorStatsResponse(BaseModel):
 # =============================================================================
 
 @app.get("/health", response_model=HealthResponse)
-async def health_check(settings: SettingsDep):
+async def health_check(settings: SettingsDep, http_request: Request):
     qdrant_status = "unknown"
     llm_status = "unknown"
 
@@ -360,9 +398,9 @@ async def health_check(settings: SettingsDep):
         qdrant_status = f"error: {str(e)[:50]}"
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{settings.llm_chat_url}/models")
-            llm_status = "connected" if r.status_code == 200 else f"error: HTTP {r.status_code}"
+        client: httpx.AsyncClient = http_request.app.state.http
+        r = await client.get(f"{settings.llm_chat_url}/models", timeout=5.0)
+        llm_status = "connected" if r.status_code == 200 else f"error: HTTP {r.status_code}"
     except Exception as e:
         llm_status = f"error: {str(e)[:50]}"
 
@@ -402,24 +440,24 @@ async def list_models(
 
     models: list[ModelInfo] = []
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{settings.llm_chat_url}/models")
-            if r.status_code == 200:
-                raw_models = r.json().get("data", [])
-                for m in raw_models:
-                    name: str = m.get("id", "") or m.get("name", "")
-                    name_lower = name.lower()
-                    if not name or any(kw in name_lower for kw in _EMBED_KEYWORDS):
-                        continue
-                    # LMForge exposes capabilities.thinking — use it when available
-                    capabilities: dict = m.get("capabilities", {})
-                    supports_thinking = capabilities.get("thinking", _model_supports_thinking(name))
-                    models.append(ModelInfo(
-                        name=name,
-                        size=m.get("size"),
-                        modified_at=m.get("modified_at") or m.get("created"),
-                        supports_thinking=supports_thinking,
-                    ))
+        client: httpx.AsyncClient = http_request.app.state.http
+        r = await client.get(f"{settings.llm_chat_url}/models", timeout=10.0)
+        if r.status_code == 200:
+            raw_models = r.json().get("data", [])
+            for m in raw_models:
+                name: str = m.get("id", "") or m.get("name", "")
+                name_lower = name.lower()
+                if not name or any(kw in name_lower for kw in _EMBED_KEYWORDS):
+                    continue
+                # LMForge exposes capabilities.thinking — use it when available
+                capabilities: dict = m.get("capabilities", {})
+                supports_thinking = capabilities.get("thinking", _model_supports_thinking(name))
+                models.append(ModelInfo(
+                    name=name,
+                    size=m.get("size"),
+                    modified_at=m.get("modified_at") or m.get("created"),
+                    supports_thinking=supports_thinking,
+                ))
     except Exception as exc:
         logger.warning("Failed to fetch model list from %s: %s", settings.llm_chat_url, exc)
 
@@ -561,6 +599,7 @@ async def query_documents(
             cache_hit=result["cache_hit"],
             source_count=len(result["sources"]),
             analytics_url=settings.analytics_service_url,
+            http_client=http_request.app.state.http,
         ))
         return QueryResponse(
             answer=result["answer"],
@@ -630,8 +669,10 @@ async def query_documents_stream(
             stream_history: list[dict] = []
             context_state: dict = {}
             if request.conversation_id:
-                stream_history, context_state = rag_service._load_conversation_history(
-                    request.conversation_id, tenant_id
+                stream_history, context_state = await _run_db(
+                    lambda: rag_service._load_conversation_history(
+                        request.conversation_id, tenant_id
+                    )
                 )
 
             metadata_payload: dict = {"query_id": query_id, "cache_hit": False}
@@ -756,8 +797,8 @@ async def query_documents_stream(
                 if request.conversation_id:
                     try:
                         from ..db import add_message
-                        add_message(request.conversation_id, "user", request.question, tenant_id=tenant_id)
-                        add_message(request.conversation_id, "assistant", response_text, tenant_id=tenant_id, sources=[])
+                        await _run_db(lambda: add_message(request.conversation_id, "user", request.question, tenant_id=tenant_id))
+                        await _run_db(lambda: add_message(request.conversation_id, "assistant", response_text, tenant_id=tenant_id, sources=[]))
                     except Exception as _e:
                         logger.warning("Failed to persist no-docs conversation: %s", _e)
                 yield f"data: {json.dumps({'token': response_text})}\n\n"
@@ -886,11 +927,10 @@ async def query_documents_stream(
             if request.conversation_id:
                 try:
                     from ..db import add_message
-                    import asyncio as _asyncio
-                    add_message(request.conversation_id, "user", request.question, tenant_id=tenant_id)
-                    add_message(request.conversation_id, "assistant", answer, tenant_id=tenant_id, sources=sources)
+                    await _run_db(lambda: add_message(request.conversation_id, "user", request.question, tenant_id=tenant_id))
+                    await _run_db(lambda: add_message(request.conversation_id, "assistant", answer, tenant_id=tenant_id, sources=sources))
                     # Async fire-and-forget: compress history if threshold reached
-                    _asyncio.ensure_future(
+                    asyncio.ensure_future(
                         rag_service._maybe_compress_history(
                             request.conversation_id, tenant_id, summarizer
                         )
@@ -908,6 +948,7 @@ async def query_documents_stream(
                 cache_hit=False,
                 source_count=len(sources),
                 analytics_url=settings.analytics_service_url,
+                http_client=http_request.app.state.http,
             ))
 
             yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
