@@ -49,11 +49,12 @@
   let updatingRoleFor: string | null = $state(null);
 
   // Platform model
-  interface ModelInfo { name: string; size?: number }
+  interface ModelInfo { name: string; size?: number; supports_thinking?: boolean }
   interface PlatformSettings { llmModel: string | null }
   let availableModels: ModelInfo[] = $state([]);
   let platformSettings: PlatformSettings | null = $state(null);
   let selectedPlatformModel: string | null = $state(null); // null = "Tenant Choice"
+  let configuredDefaultModel: string | null = $state(null); // from .env via API
   let modelLoading = $state(false);
   let modelSaving = $state(false);
   let platformModelConfirmOpen = $state(false);
@@ -258,7 +259,11 @@
         apiFetch('/api/v1/models'),
         apiFetch('/api/v1/admin/platform/settings'),
       ]);
-      if (modelsRes.ok) availableModels = (await modelsRes.json()).models ?? [];
+      if (modelsRes.ok) {
+        const mdata = await modelsRes.json();
+        availableModels = mdata.models ?? [];
+        configuredDefaultModel = mdata.default_model ?? null;
+      }
       if (settingsRes.ok) {
         platformSettings = await settingsRes.json();
         selectedPlatformModel = platformSettings?.llmModel ?? null;
@@ -837,9 +842,9 @@
                     px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500
                     disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <option value={null}>Tenant Choice (no override)</option>
+                  <option value={null}>Tenant Choice{configuredDefaultModel ? ` — using: ${configuredDefaultModel}` : ' (no override)'}</option>
                   {#each availableModels as model}
-                    <option value={model.name}>{model.name}</option>
+                    <option value={model.name}>{model.name}{model.supports_thinking ? ' ✦' : ''}</option>
                   {/each}
                 </select>
               </div>

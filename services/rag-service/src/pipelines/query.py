@@ -46,7 +46,7 @@ from ..components.cache import SemanticCacheChecker, SemanticCacheWriter
 from ..components.embedders import BM25SparseTextEmbedder
 from ..components.opa import OpaChunkValidator
 from ..components.prompt import PromptBuilder
-from ..components.reranker import LocalCrossEncoderRanker
+from ..components.reranker import InfinityReranker
 from ..components.retrieval import SecureRetriever
 from docintel_common.domain import DOMAIN_LABELS
 from docintel_common.security import Classification, UserContext
@@ -90,7 +90,8 @@ def build_query_pipeline(settings: Settings) -> AsyncPipeline:
     )
     pipeline.add_component(
         "reranker",
-        LocalCrossEncoderRanker(
+        InfinityReranker(
+            url=settings.reranker_url,
             model=settings.reranker_model,
             top_k=settings.rag_reranker_top_k,
         ),
@@ -183,6 +184,7 @@ class RAGService:
     def __init__(self, settings: Settings | None = None):
         self._settings = settings or get_settings()
         self._ready = False
+        self._warm_up_lock = __import__("threading").Lock()
 
         # Components managed outside the pipeline
         self._dense_embedder: Optional[OpenAITextEmbedder] = None
@@ -202,50 +204,53 @@ class RAGService:
         Initialise and warm up all components.
 
         Called once at application startup (FastAPI lifespan). Subsequent calls
-        are no-ops.
+        are no-ops. Thread-safe: concurrent calls block until the first completes.
         """
         if self._ready:
             return
+        with self._warm_up_lock:
+            if self._ready:  # re-check after acquiring lock
+                return
 
-        cfg = self._settings
+            cfg = self._settings
 
-        self._dense_embedder = OpenAITextEmbedder(
-            model=cfg.llm_embed_model,
-            api_base_url=cfg.llm_embed_url,
-            api_key=Secret.from_token(cfg.llm_api_key),
-        )
-
-        # BM25 sparse embedder
-        self._sparse_embedder = BM25SparseTextEmbedder()
-        self._sparse_embedder.warm_up()
-
-        # Semantic cache
-        if cfg.use_cache:
-            self._cache_checker = SemanticCacheChecker(
-                qdrant_url=cfg.qdrant_url,
-                threshold=cfg.rag_cache_similarity_threshold,
+            self._dense_embedder = OpenAITextEmbedder(
+                model=cfg.llm_embed_model,
+                api_base_url=cfg.llm_embed_url,
+                api_key=Secret.from_token(cfg.llm_api_key),
             )
-            self._cache_writer = SemanticCacheWriter(qdrant_url=cfg.qdrant_url)
 
-        # Domain router (optional)
-        if cfg.rag_use_domain_routing:
-            try:
-                self._domain_router = TransformersZeroShotTextRouter(
-                    labels=DOMAIN_LABELS,
-                    model=cfg.rag_domain_router_model,
+            # BM25 sparse embedder
+            self._sparse_embedder = BM25SparseTextEmbedder()
+            self._sparse_embedder.warm_up()
+
+            # Semantic cache
+            if cfg.use_cache:
+                self._cache_checker = SemanticCacheChecker(
+                    qdrant_url=cfg.qdrant_url,
+                    threshold=cfg.rag_cache_similarity_threshold,
                 )
-                self._domain_router.warm_up()
-                self._domain_filter_builder = DomainFilterBuilder()
-            except Exception as e:
-                logger.warning("Domain router unavailable, routing disabled: %s", e)
-                self._domain_router = None
+                self._cache_writer = SemanticCacheWriter(qdrant_url=cfg.qdrant_url)
 
-        # Core Haystack Pipeline
-        self._pipeline = build_query_pipeline(cfg)
-        self._pipeline.warm_up()
+            # Domain router (optional)
+            if cfg.rag_use_domain_routing:
+                try:
+                    self._domain_router = TransformersZeroShotTextRouter(
+                        labels=DOMAIN_LABELS,
+                        model=cfg.rag_domain_router_model,
+                    )
+                    self._domain_router.warm_up()
+                    self._domain_filter_builder = DomainFilterBuilder()
+                except Exception as e:
+                    logger.warning("Domain router unavailable, routing disabled: %s", e)
+                    self._domain_router = None
 
-        self._ready = True
-        logger.info("RAGService ready (cache=%s, domain_routing=%s)", cfg.use_cache, cfg.rag_use_domain_routing)
+            # Core Haystack Pipeline
+            self._pipeline = build_query_pipeline(cfg)
+            self._pipeline.warm_up()
+
+            self._ready = True
+            logger.info("RAGService ready (cache=%s, domain_routing=%s)", cfg.use_cache, cfg.rag_use_domain_routing)
 
     # ── Conversation helpers ─────────────────────────────────────────────────
 

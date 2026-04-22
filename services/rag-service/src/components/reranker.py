@@ -14,6 +14,7 @@ InfinityReranker (optional, for NVIDIA TensorRT deployments)
 """
 
 import logging
+import math
 from typing import Any, Optional
 
 import httpx
@@ -79,12 +80,15 @@ class LocalCrossEncoderRanker:
 
         scored = []
         for doc, score in zip(documents, scores):
+            # ms-marco cross-encoders output raw logits (unbounded). Apply sigmoid
+            # to map them to [0, 1] so the UI can display them as meaningful percentages.
+            normalized = 1.0 / (1.0 + math.exp(-float(score)))
             scored.append(
                 Document(
                     id=doc.id,
                     content=doc.content,
                     meta=doc.meta,
-                    score=float(score),
+                    score=normalized,
                     embedding=doc.embedding,
                     sparse_embedding=doc.sparse_embedding,
                 )

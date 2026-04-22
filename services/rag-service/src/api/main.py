@@ -104,12 +104,19 @@ async def lifespan(app: FastAPI):
     # Probe LLM engines — log reachability and available models (non-fatal)
     await _probe_llm_engine(settings)
 
+    # Trigger chat model pre-load in LMForge/Ollama (fire-and-forget).
+    # Local engines load models lazily on first request (can take 2-5 s).
+    # Sending a tiny request now ensures the model is hot before users query.
+    asyncio.ensure_future(_prewarm_chat_model(settings))
+
     # Ensure Qdrant collection and payload indexes exist
     _ensure_qdrant_ready(settings)
 
-    # RAGService (warm-up happens lazily on first query to avoid blocking startup)
+    # RAGService — create now; warm up in background so the reranker JIT
+    # compilation (can be 60-120 s on CPU) finishes before the first user query.
     rag_service = RAGService(settings)
     app.state.rag_service = rag_service
+    asyncio.ensure_future(_prewarm_rag_service(rag_service))
 
     # Model resolver — resolves effective LLM per tenant from PostgreSQL (60s TTL cache)
     app.state.model_resolver = TenantModelResolver(
@@ -160,6 +167,43 @@ async def _probe_llm_engine(settings: Settings) -> None:
                     logger.warning("LLM engine [%s] at %s returned HTTP %s", label, url, r.status_code)
             except Exception as e:
                 logger.warning("LLM engine [%s] not reachable at %s (non-fatal): %s", label, url, e)
+
+
+async def _prewarm_rag_service(rag_service) -> None:
+    """
+    Run RAGService.warm_up() in a thread so the cross-encoder JIT compilation
+    (60-120 s on CPU) happens during startup instead of blocking the first query.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, rag_service.warm_up)
+        logger.info("RAG pipeline warm-up complete (reranker ready)")
+    except Exception as e:
+        logger.warning("RAG pipeline warm-up failed (non-fatal): %s", e)
+
+
+async def _prewarm_chat_model(settings: Settings) -> None:
+    """
+    Fire a minimal non-streaming chat request at startup so the local LLM
+    engine (LMForge/Ollama) loads the model weights before the first real query.
+    Non-fatal — failures are logged and ignored.
+    """
+    await asyncio.sleep(2)  # give engine a moment after probe
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            payload = {
+                "model": settings.llm_model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            r = await client.post(f"{settings.llm_chat_url}/chat/completions", json=payload)
+            if r.status_code == 200:
+                logger.info("Chat model pre-warm OK (model=%s)", settings.llm_model)
+            else:
+                logger.warning("Chat model pre-warm returned HTTP %s", r.status_code)
+    except Exception as e:
+        logger.warning("Chat model pre-warm failed (non-fatal): %s", e)
 
 
 def _ensure_qdrant_ready(settings: Settings) -> None:
@@ -612,6 +656,7 @@ async def query_documents_stream(
                     lambda: rag_service._cache_checker.run(  # type: ignore[union-attr]
                         query_embedding=query_embedding,
                         tenant_id=tenant_id,
+                        user_context=user_ctx,
                     ),
                 )
                 if cache_result["cache_hit"]:
@@ -736,6 +781,7 @@ async def query_documents_stream(
 
             full_thinking = ""
             full_answer = ""
+            llm_error: list = []  # mutable container so nonlocal works inside nested async def
 
             def streaming_callback(chunk):
                 reasoning = extract_reasoning_content(chunk)
@@ -746,9 +792,10 @@ async def query_documents_stream(
 
             # num_ctx: always set — default 4096 is too tight for RAG prompts that include
             # retrieved chunks + conversation history on top of the question.
-            # max_tokens: uncapped for thinking (thinking tokens share the budget with answer).
+            # max_tokens: None (omitted) for thinking so the engine uses its own unlimited
+            # budget — -1 is Ollama-specific and rejected as invalid by LMForge/OpenAI.
             num_ctx = settings.llm_thinking_ctx if effective_thinking else settings.llm_ctx
-            max_tokens = -1 if effective_thinking else settings.llm_max_tokens
+            max_tokens = None if effective_thinking else settings.llm_max_tokens
 
             llm = build_streaming_generator(
                 model=effective_model,
@@ -759,6 +806,7 @@ async def query_documents_stream(
                 num_ctx=num_ctx,
                 max_tokens=max_tokens,
                 temperature=settings.llm_temperature,
+                frequency_penalty=settings.llm_frequency_penalty,
             )
 
             # Notify the client if it will have to wait for an LLM slot.
@@ -774,6 +822,7 @@ async def query_documents_stream(
                         logger.info("LLM task cancelled (client disconnected)")
                     except Exception as e:
                         logger.error("Streaming LLM failed: %s", e)
+                        llm_error.append(e)
                     finally:
                         queue.put_nowait(None)
 
@@ -798,6 +847,12 @@ async def query_documents_stream(
                 return
 
             await task
+
+            # If LLM crashed with no output at all, surface the error to the client
+            # instead of yielding empty answer + sources (which shows a blank panel).
+            if llm_error and not full_answer and not full_thinking:
+                yield f"data: {json.dumps({'error': f'LLM generation failed: {llm_error[0]}'})}\n\n"
+                return
 
             answer = full_answer.strip()
 

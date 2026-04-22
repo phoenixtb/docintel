@@ -78,6 +78,16 @@ ok "lmforge init complete"
 CHAT_MODEL="$LLM_MODEL"
 EMBED_MODEL="$LLM_EMBED_MODEL"
 
+# Select chat model based on hardware.
+# Apple Silicon (arm64 macOS) → LLM_MODEL (4B 4-bit by default).
+# Everything else             → LLM_FALLBACK_MODEL (2B 4-bit by default).
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
+    ok "Apple Silicon detected — chat model: $CHAT_MODEL"
+else
+    CHAT_MODEL="$LLM_FALLBACK_MODEL"
+    ok "Non-Apple Silicon detected — using fallback chat model: $CHAT_MODEL"
+fi
+
 echo ""
 echo "================================================"
 echo "Pulling LMForge Models"

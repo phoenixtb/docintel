@@ -58,7 +58,8 @@ class Settings(BaseSettings):
 
     # LLM generation settings
     llm_temperature: float = 0.1
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 1024
+    llm_frequency_penalty: float = 0.3  # suppresses repetition loops in small models
     # Fast model used only for async conversation summarization (not main queries).
     llm_expansion_model: str = "qwen3:1.7b"
 
@@ -72,13 +73,12 @@ class Settings(BaseSettings):
     #   system prompt + 5-10 retrieved chunks (~3k tokens) + history + question + answer.
     # Override via LLM_CTX / LLM_THINKING_CTX in .env.
     llm_ctx: int = 16384          # standard queries
-    llm_thinking_ctx: int = 32768  # thinking mode (thinking block eats extra context)
+    llm_thinking_ctx: int = 16384  # thinking mode — same budget as normal; 32K caused OOM on 4b models when reranker + embedder are co-loaded
 
-    # ── Reranker — in-process sentence-transformers (MPS/CUDA/CPU) ───────────
-    # LocalCrossEncoderRanker auto-selects device: mps → cuda → cpu.
-    # Model is downloaded once and cached by HuggingFace Hub.
-    # For NVIDIA TensorRT opt-in via Infinity: docker compose --profile infinity up
+    # ── Reranker — Infinity ONNX server (no in-process JIT, instant startup) ─
+    # Infinity runs as a sidecar container and exposes a Cohere-compatible /rerank.
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranker_url: str = "http://infinity:7997"
     use_reranking: bool = True
 
     # ── RAG parameters ────────────────────────────────────────────────────────

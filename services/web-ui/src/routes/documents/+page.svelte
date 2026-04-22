@@ -418,10 +418,7 @@
     }
     expandedDocId = doc.id;
 
-    // For sample docs with no DB chunks, we use content_preview from metadata
-    if (doc.metadata?.source === 'sample_dataset') return;
-
-    // For uploaded docs, fetch chunks if not cached
+    // Fetch persisted chunks for preview (uploads and HF samples both ingest into PG).
     if (chunkCache[doc.id]) return;
 
     loadingPreviewFor = doc.id;
@@ -1230,7 +1227,24 @@
                 {#if expandedDocId === doc.id}
                   <tr class="bg-gray-50 dark:bg-gray-900/40 border-b border-gray-100 dark:border-gray-700/50">
                     <td colspan="7" class="px-8 py-4">
-                      {#if doc.metadata?.content_preview}
+                      {#if loadingPreviewFor === doc.id}
+                        <div class="flex items-center gap-2 text-gray-400 text-sm">
+                          <div class="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
+                          Loading content...
+                        </div>
+                      {:else if chunkCache[doc.id]?.length}
+                        <div class="space-y-3 max-h-64 overflow-y-auto pr-2">
+                          {#each chunkCache[doc.id] as chunk, i}
+                            <div class="text-sm">
+                              <span class="text-xs text-gray-400 dark:text-gray-500 font-mono">Chunk {chunk.chunkIndex + 1} · {chunk.tokenCount} tokens</span>
+                              <p class="mt-1 text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">{chunk.content}</p>
+                            </div>
+                            {#if i < chunkCache[doc.id].length - 1}
+                              <hr class="border-gray-200 dark:border-gray-700" />
+                            {/if}
+                          {/each}
+                        </div>
+                      {:else if doc.metadata?.content_preview}
                         <div>
                           <p class="text-xs text-gray-400 dark:text-gray-500 mb-2">Content preview (first 500 chars)</p>
                           <p class="text-sm text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">{doc.metadata.content_preview}</p>

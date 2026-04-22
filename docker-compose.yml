@@ -92,6 +92,8 @@ services:
     build:
       context: .
       dockerfile: services/rag-service/Dockerfile
+      args:
+        - RERANKER_MODEL=${DEFAULT_RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
     environment:
       - QDRANT_URL=http://qdrant:6333
       # LLM Engine — OpenAI-compatible chat completions endpoint.
@@ -109,10 +111,11 @@ services:
       #   Ollama   (any platform):       http://host.docker.internal:11434/v1
       #   vLLM     (Linux/NVIDIA):       http://host.docker.internal:8000/v1
       - LLM_EMBED_URL=${LLM_EMBED_URL:-http://host.docker.internal:11430/v1}
-      - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-qwen3-embed:0.6b:4bit}
+      - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-qwen3-embed:0.6b:8bit}
       - LLM_EMBED_DIM=1024
-      # Reranker — in-process sentence-transformers (MPS/CUDA/CPU auto-selected)
+      # Reranker — delegated to Infinity ONNX server (no in-process JIT)
       - RERANKER_MODEL=${DEFAULT_RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
+      - RERANKER_URL=http://infinity:7997
       # RAG Pipeline Configuration
       - RAG_RETRIEVER_TOP_K=50
       - RAG_RERANKER_TOP_K=10
@@ -135,6 +138,8 @@ services:
       qdrant:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      infinity:
         condition: service_healthy
     networks:
       - docintel-network
@@ -192,7 +197,7 @@ services:
       - QDRANT_URL=http://qdrant:6333
       # Embeddings via OpenAI-compatible endpoint (LMForge by default)
       - LLM_EMBED_URL=${LLM_EMBED_URL:-http://host.docker.internal:11430/v1}
-      - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-qwen3-embed:0.6b:4bit}
+      - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-qwen3-embed:0.6b:8bit}
       - LLM_API_KEY=${LLM_API_KEY:-none}
       - DOCUMENT_SERVICE_URL=http://document-service:8081
       - DOCLING_ARTIFACTS_PATH=/app/docling-cache
@@ -232,16 +237,15 @@ services:
           memory: 4G
 
   infinity:
-    # Optional — activate with: docker compose --profile infinity up
+    # Reranker service — runs cross-encoder via ONNX Runtime (CPU, no JIT cold-start).
+    # Always on; LMForge handles chat + embeddings separately.
     # Dev (Apple Silicon / CPU): michaelf34/infinity:0.0.77  + --engine optimum (ONNX Runtime)
     # Prod (NVIDIA GPU):         michaelf34/infinity:0.0.77-trt-onnx + --engine tensorrt
-    profiles: [infinity]
     image: ${INFINITY_IMAGE:-michaelf34/infinity:0.0.77}
     platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
     command: >
       v2
-      --model-id cross-encoder/ms-marco-MiniLM-L-6-v2
-      --model-id nomic-ai/nomic-embed-text-v1.5
+      --model-id ${RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
       --port 7997
       --engine ${INFINITY_ENGINE:-optimum}
     # No host port — rag-service reaches infinity via internal network (infinity:7997)

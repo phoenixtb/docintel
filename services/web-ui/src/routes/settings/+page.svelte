@@ -342,17 +342,18 @@
         userPreferences = await res.json();
         thinkingMode = userPreferences?.thinkingMode ?? false;
       }
-      // Also load models so we can check if active model supports thinking
-      if (availableModels.length === 0) {
-        const modelsRes = await apiFetch('/api/v1/models');
-        if (modelsRes.ok) {
-          const data = await modelsRes.json();
-          availableModels = data.models ?? [];
-          platformDefaultModel = data.default_model ?? null;
-        }
-        const settingsRes = await apiFetch(`/api/v1/tenants/${tenantId}/settings`);
-        if (settingsRes.ok) tenantSettings = await settingsRes.json();
+      // Always refresh models + tenant settings on preferences load so
+      // activeModelSupportsThinking reflects the current LLM engine state.
+      const [modelsRes, settingsRes] = await Promise.all([
+        apiFetch('/api/v1/models'),
+        apiFetch(`/api/v1/tenants/${tenantId}/settings`),
+      ]);
+      if (modelsRes.ok) {
+        const data = await modelsRes.json();
+        availableModels = data.models ?? [];
+        platformDefaultModel = data.default_model ?? null;
       }
+      if (settingsRes.ok) tenantSettings = await settingsRes.json();
     } catch (e) {
       toast.error(`Failed to load preferences: ${e}`);
     }
@@ -372,6 +373,9 @@
       thinkingMode = userPreferences?.thinkingMode ?? false;
       // Bust the user-scoped resolver cache so the next query picks up the new preference.
       await apiFetch('/api/v1/users/me/preferences/invalidate-cache', { method: 'DELETE' });
+      // Also clear the semantic cache — cached answers are keyed by embedding only (not
+      // by thinking flag), so stale non-thinking entries must be evicted on toggle.
+      await apiFetch(`/api/v1/admin/cache/clear/${tenantId}`, { method: 'POST' });
       toast.success(enabled ? 'Thinking mode enabled.' : 'Thinking mode disabled.');
     } catch (e) {
       toast.error(`Failed to update thinking mode: ${e}`);
