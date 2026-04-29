@@ -3,6 +3,7 @@ package com.docintel.admin.controller
 import com.docintel.admin.dto.*
 import com.docintel.admin.service.CacheService
 import com.docintel.admin.service.HealthService
+import com.docintel.admin.service.ModelProfileService
 import com.docintel.admin.service.PlatformSettingsService
 import com.docintel.admin.service.StatsService
 import com.docintel.admin.service.TenantManagementService
@@ -22,6 +23,7 @@ class AdminController(
     private val tenantManagementService: TenantManagementService,
     private val platformSettingsService: PlatformSettingsService,
     private val userPreferencesService: UserPreferencesService,
+    private val modelProfileService: ModelProfileService,
 ) {
     /**
      * System health check with component status.
@@ -202,4 +204,83 @@ class AdminController(
         @RequestBody req: UpdateUserPreferencesRequest,
     ): ResponseEntity<UserPreferences> =
         ResponseEntity.ok(userPreferencesService.updatePreferences(userId, tenantId, req))
+
+    // -----------------------------------------------------------------------
+    // Model Profiles — sampling parameter overrides per model pattern.
+    // Platform profiles: platform_admin only.
+    // Tenant profiles: tenant_admin for own tenant.
+    // Cache invalidation is UI-driven (caller calls DELETE /model-profiles-cache on rag-service).
+    // -----------------------------------------------------------------------
+
+    @GetMapping("/model-profiles")
+    fun listPlatformProfiles(): ResponseEntity<List<ModelProfile>> =
+        ResponseEntity.ok(modelProfileService.listPlatformProfiles())
+
+    @PostMapping("/model-profiles")
+    fun createPlatformProfile(@RequestBody req: UpsertModelProfileRequest): ResponseEntity<ModelProfile> =
+        ResponseEntity.ok(modelProfileService.createPlatformProfile(req))
+
+    @PutMapping("/model-profiles/{id}")
+    fun updateProfile(
+        @PathVariable id: String,
+        @RequestBody req: UpsertModelProfileRequest,
+    ): ResponseEntity<ModelProfile> {
+        val updated = modelProfileService.updateProfile(id, req)
+            ?: return ResponseEntity.notFound().build()
+        return ResponseEntity.ok(updated)
+    }
+
+    @DeleteMapping("/model-profiles/{id}")
+    fun deleteProfile(@PathVariable id: String): ResponseEntity<Void> {
+        return if (modelProfileService.deleteProfile(id)) ResponseEntity.noContent().build()
+        else ResponseEntity.notFound().build()
+    }
+
+    @GetMapping("/tenants/{tenantId}/model-profiles")
+    fun listTenantProfiles(@PathVariable tenantId: String): ResponseEntity<List<ModelProfile>> =
+        ResponseEntity.ok(modelProfileService.listTenantProfiles(tenantId))
+
+    @PostMapping("/tenants/{tenantId}/model-profiles")
+    fun createTenantProfile(
+        @PathVariable tenantId: String,
+        @RequestBody req: UpsertModelProfileRequest,
+    ): ResponseEntity<ModelProfile> =
+        ResponseEntity.ok(modelProfileService.createTenantProfile(tenantId, req))
+
+    /**
+     * Update a tenant-owned model profile.
+     * Returns 404 if the profile doesn't exist or belongs to a different tenant/scope.
+     */
+    @PutMapping("/tenants/{tenantId}/model-profiles/{id}")
+    fun updateTenantProfile(
+        @PathVariable tenantId: String,
+        @PathVariable id: String,
+        @RequestBody req: UpsertModelProfileRequest,
+    ): ResponseEntity<ModelProfile> {
+        val updated = modelProfileService.updateTenantProfile(tenantId, id, req)
+            ?: return ResponseEntity.notFound().build()
+        return ResponseEntity.ok(updated)
+    }
+
+    /**
+     * Delete a tenant-owned model profile.
+     * Returns 404 if the profile doesn't exist or belongs to a different tenant/scope.
+     */
+    @DeleteMapping("/tenants/{tenantId}/model-profiles/{id}")
+    fun deleteTenantProfile(
+        @PathVariable tenantId: String,
+        @PathVariable id: String,
+    ): ResponseEntity<Void> {
+        return if (modelProfileService.deleteTenantProfile(tenantId, id))
+            ResponseEntity.noContent().build()
+        else ResponseEntity.notFound().build()
+    }
+
+    /**
+     * Seed a tenant's model profiles from platform defaults.
+     * Idempotent — only copies patterns not already present.
+     */
+    @PostMapping("/tenants/{tenantId}/model-profiles/seed")
+    fun seedTenantProfiles(@PathVariable tenantId: String): ResponseEntity<List<ModelProfile>> =
+        ResponseEntity.ok(modelProfileService.seedTenantProfiles(tenantId))
 }

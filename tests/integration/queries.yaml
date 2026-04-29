@@ -21,7 +21,7 @@ config:
   # Override key path via E2E_SA_KEY_FILE env var.
   # Pass --no-auth to disable entirely (only works if gateway security is off).
   auth:
-    token_url: "http://localhost:9090/oauth/v2/token"
+    token_url: "http://localhost:9095/oauth/v2/token"
     scopes: "openid email profile"
 
 suites:
@@ -146,3 +146,25 @@ suites:
       - question: "What is the work from home policy?"
         expect_cache_hit: true
         expect_keywords: ["policy"]
+
+  # ---------------------------------------------------------------------------
+  # OPA Denied (Streaming security gap regression)
+  # Proves that the streaming path now enforces OPA — previously the streaming
+  # handler skipped OpaChunkValidator entirely (security gap closed by A6).
+  #
+  # The test user "e2e" must NOT have clearance for "secret" classification.
+  # Documents ingested with classification=secret should be denied.
+  #
+  # To run: set ENABLE_OPA_DENIED_SUITE=1 and ensure at least one document
+  # with classification=secret exists in the tenant corpus.
+  # The suite uses /query/stream to specifically prove the streaming path.
+  # ---------------------------------------------------------------------------
+  - name: "OPA Denied"
+    skip_if_env_missing: ["ENABLE_OPA_DENIED_SUITE"]
+    config_overrides:
+      rag_path: "/api/v1/query/stream"
+    queries:
+      - question: "What is in the classified documents?"
+        expect_opa_denied: true
+        expect_no_sources: true
+        expect_keywords: ["not find", "relevant", "no relevant"]

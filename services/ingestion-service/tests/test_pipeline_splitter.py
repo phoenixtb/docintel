@@ -123,6 +123,75 @@ def test_bert_token_count_matches_raw_chunk_not_overlap_extended(splitter: Token
         assert reported <= 512
 
 
+# ---------------------------------------------------------------------------
+# Idempotency — warm_up() must not call from_pretrained more than once
+# ---------------------------------------------------------------------------
+
+
+def test_warm_up_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """from_pretrained must be called exactly once even when warm_up() is invoked N times."""
+    import transformers
+
+    call_count = 0
+    real_from_pretrained = transformers.AutoTokenizer.from_pretrained
+
+    def _mock_from_pretrained(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_from_pretrained(*args, **kwargs)
+
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", _mock_from_pretrained)
+
+    s = TokenAwareSplitter()
+    for _ in range(5):
+        s.warm_up()
+
+    assert call_count == 1, f"from_pretrained called {call_count} times; expected exactly 1"
+
+
+def test_warm_up_does_not_replace_existing_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second warm_up() call must NOT overwrite the already-loaded tokenizer."""
+    import transformers
+
+    s = TokenAwareSplitter()
+    s.warm_up()
+    sentinel = object()
+    s._tokenizer = sentinel  # type: ignore[assignment]
+    s.warm_up()
+    assert s._tokenizer is sentinel, "warm_up() replaced an already-loaded tokenizer"
+
+
+def test_run_warms_up_tokenizer_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Calling splitter.run() 10 times must not invoke from_pretrained more than once."""
+    import transformers
+
+    call_count = 0
+    real_from_pretrained = transformers.AutoTokenizer.from_pretrained
+
+    def _mock_from_pretrained(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_from_pretrained(*args, **kwargs)
+
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", _mock_from_pretrained)
+
+    s = TokenAwareSplitter()
+    docs_in = [Document(content="short doc", meta={})]
+    for _ in range(10):
+        s.run(documents=docs_in)
+
+    assert call_count == 1, f"from_pretrained called {call_count} times across 10 runs; expected 1"
+
+
+def test_run_without_prior_warm_up_still_loads_tokenizer() -> None:
+    """run() on a fresh splitter must call warm_up() and produce results."""
+    s = TokenAwareSplitter()
+    assert s._tokenizer is None
+    result = s.run(documents=[Document(content="hello world", meta={})])
+    assert s._tokenizer is not None
+    assert len(result["documents"]) >= 1
+
+
 def test_overlap_prefix_appears_in_second_chunk(splitter: TokenAwareSplitter) -> None:
     sentence = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet. "
     text = sentence * 80

@@ -77,10 +77,13 @@ pick_from_list() {
     local key seq
     while IFS= read -r -n1 -s key; do
         if [[ "$key" == $'\x1b' ]]; then
-            IFS= read -r -n2 -s -t 1 seq
+            # -t 1 is bash 3.2 compatible (macOS); fractional timeouts require bash 4+.
+            # Arrow keys send ESC + 2 bytes almost instantaneously — the 1s timeout
+            # is just a guard for a bare Escape keypress.
+            IFS= read -r -n2 -s -t 1 seq || true
             case "$seq" in
-                '[A') ((cur > 0))     && ((cur--)) ;;
-                '[B') ((cur < n - 1)) && ((cur++)) ;;
+                '[A'|'OA') [[ $cur -gt 0 ]]       && (( cur-- )) || true ;;
+                '[B'|'OB') [[ $cur -lt $((n-1)) ]] && (( cur++ )) || true ;;
             esac
         elif [[ "$key" == '' ]]; then
             break
@@ -214,10 +217,11 @@ draw_menu $start_row
 
 while IFS= read -r -n1 -s key; do
     if [[ "$key" == $'\x1b' ]]; then
-        IFS= read -r -n2 -s -t 1 seq
-        case "$seq" in
-            '[A') ((cursor > 0)) && ((cursor--)) ;;
-            '[B') ((cursor < ${#ACTIONS[@]} - 1)) && ((cursor++)) ;;
+        _seq=''
+        IFS= read -r -n2 -s -t 1 _seq || true
+        case "$_seq" in
+            '[A'|'OA') [[ $cursor -gt 0 ]]                    && (( cursor-- )) || true ;;
+            '[B'|'OB') [[ $cursor -lt $((${#ACTIONS[@]}-1)) ]] && (( cursor++ )) || true ;;
         esac
     elif [[ "$key" == '' ]]; then
         break

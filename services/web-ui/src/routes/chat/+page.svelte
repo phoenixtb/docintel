@@ -373,11 +373,11 @@
     streamAbort?.abort();
   });
 
-  // Auto-scroll to bottom whenever messages or the streaming response change
+  // Auto-scroll to bottom whenever messages, streaming response, or thinking tokens change
   $effect(() => {
-    // Access reactive deps
     const _ = messages.length;
     const __ = currentResponse;
+    const ___ = currentThinking;
     messagesEndEl?.scrollIntoView({ behavior: 'smooth' });
   });
 </script>

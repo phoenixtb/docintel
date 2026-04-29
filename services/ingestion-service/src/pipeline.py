@@ -143,6 +143,12 @@ class TokenAwareSplitter:
         self._tokenizer = None
 
     def warm_up(self) -> None:
+        # Guard: Haystack calls warm_up() on every Pipeline.run(). Without this
+        # check, AutoTokenizer.from_pretrained makes 4+ HuggingFace HEAD/GET
+        # requests per document even when the model is locally cached, because
+        # the transformers library validates cache freshness on every call.
+        if self._tokenizer is not None:
+            return
         from transformers import AutoTokenizer
         # model_max_length=int(1e9): we use this tokenizer only for counting tokens,
         # not for model inference. Setting an effectively unlimited model_max_length
@@ -151,7 +157,7 @@ class TokenAwareSplitter:
         self._tokenizer = AutoTokenizer.from_pretrained(
             "bert-base-uncased", model_max_length=int(1e9)
         )
-        logger.debug("TokenAwareSplitter: tokenizer loaded (vocab=%d)", self._tokenizer.vocab_size)
+        logger.info("TokenAwareSplitter: tokenizer loaded (vocab=%d)", self._tokenizer.vocab_size)
 
     def _count(self, text: str) -> int:
         assert self._tokenizer is not None, "warm_up() was not called"

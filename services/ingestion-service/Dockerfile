@@ -32,10 +32,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-sources .
 
 # ── Layer 3: baked assets (cached; only reruns when deps layer above changes) ─
+# Set HF_HOME to a neutral path that is not tied to any user's $HOME.
+# This ensures the bake step, the Docker volume mount, and the runtime lookup
+# all resolve to the same directory, regardless of which user the process runs as.
+ENV HF_HOME=/opt/hf-cache
+RUN mkdir -p /opt/hf-cache && chmod 0777 /opt/hf-cache
+
 # Pre-download bert-base-uncased tokenizer vocabulary files (~700KB) at build time.
 # TokenAwareSplitter uses this tokenizer — the exact one nomic-embed-text uses —
 # to count BERT tokens before chunking.
+# With HF_HOME set, files land in /opt/hf-cache and are found at runtime.
 RUN python3 -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('bert-base-uncased')"
+# Make the baked cache world-writable so that appuser (uid 1001) and any other
+# service sharing this volume can write additional models into sub-directories.
+# Without this, HF hub creates 'hub/' owned by root (0755), blocking writes at runtime.
+RUN chmod -R 0777 /opt/hf-cache
 
 # Docling models are cached in a Docker volume (DOCLING_ARTIFACTS_PATH).
 ENV DOCLING_ARTIFACTS_PATH=/app/docling-cache

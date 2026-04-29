@@ -232,6 +232,7 @@
    * Returns 'done' when the stream completed normally,
    * 'error' with a reason when the server signals an error,
    * or throws a network/HTTP error when the connection drops.
+   * Throws a PermanentSseError (non-retriable) on HTTP 404 or other 4xx.
    */
   async function consumeSSE(jobId: string): Promise<{ status: 'done'; processed: number; totalChunks: number } | { status: 'error'; reason: string }> {
     sseAbort = new AbortController();
@@ -239,6 +240,11 @@
       signal: sseAbort.signal,
     });
 
+    if (sseRes.status === 404) {
+      // Job was evicted from memory (completed + TTL elapsed) or service restarted.
+      // This is permanent — do not retry.
+      throw Object.assign(new Error('job_not_found'), { permanent: true });
+    }
     if (!sseRes.ok || !sseRes.body) throw new Error(`SSE connect failed: HTTP ${sseRes.status}`);
 
     const reader = sseRes.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -292,6 +298,7 @@
    * Connect to an existing job's SSE stream with automatic reconnect on network drop.
    * The backend replays all events from pos=0 on each new subscriber, so reconnecting
    * transparently recovers the full progress state regardless of how long we were away.
+   * Throws immediately on permanent errors (404, abort) without retrying.
    * Throws when max retries are exhausted or the server sends an error event.
    * Returns silently when the job completed successfully.
    */
@@ -303,7 +310,9 @@
         if (result.status === 'error') throw new Error(result.reason);
         return { processed: result.processed, totalChunks: result.totalChunks };
       } catch (netErr: unknown) {
+        // Permanent errors: user abort or job-not-found (404) — never retry.
         if (netErr instanceof DOMException && netErr.name === 'AbortError') throw netErr;
+        if ((netErr as { permanent?: boolean })?.permanent) throw netErr;
         attempt++;
         if (attempt > maxRetries) throw netErr;
         const delayMs = Math.min(1000 * 2 ** (attempt - 1), 30_000);
@@ -688,8 +697,14 @@
       await refreshAll();
     } catch (e: unknown) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      error = e instanceof Error ? e.message : 'Failed to reconnect to running job';
       sessionStorage.removeItem(INGEST_JOB_KEY);
+      // 404 = job evicted from memory after completion — treat as success and refresh.
+      if ((e as { permanent?: boolean })?.permanent && (e as Error)?.message === 'job_not_found') {
+        loadingProgress = { phase: 'done', message: 'Job completed (status unavailable after navigation)' };
+        await refreshAll();
+      } else {
+        error = e instanceof Error ? e.message : 'Failed to reconnect to running job';
+      }
     } finally {
       isLoadingDatasets = false;
       sseAbort = null;

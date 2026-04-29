@@ -555,6 +555,7 @@ def evaluate(
     expect_no_sources: bool = False,
     expect_thinking_length_min: int | None = None,
     expect_cache_hit: bool = False,
+    expect_opa_denied: bool = False,
 ) -> dict:
     """
     Evaluate a streaming result against expectations.
@@ -562,6 +563,9 @@ def evaluate(
     expect_no_sources        : pass when sources list is empty (min score strict mode).
     expect_thinking_length_min: pass only when thinking token count >= this value.
     expect_cache_hit         : pass only when the metadata cache_hit flag is True.
+    expect_opa_denied        : pass when OPA denied all chunks — sources must be empty
+                               and the answer must contain the no-docs sentinel message.
+                               Specifically verifies the streaming security gap (A6) is closed.
     """
     answer = result["answer"].lower()
 
@@ -576,8 +580,9 @@ def evaluate(
     keyword_hits = [kw for kw in expect_keywords if kw.lower() in combined]
     keyword_miss = [kw for kw in expect_keywords if kw.lower() not in combined]
 
-    if expect_no_sources:
-        # No-sources mode: answer must be non-empty, sources must be empty.
+    # OPA denied implies empty sources — treat identically to expect_no_sources
+    effective_no_sources = expect_no_sources or expect_opa_denied
+    if effective_no_sources:
         sources_ok = result["source_count"] == 0
     else:
         sources_ok = result["source_count"] > 0
@@ -610,6 +615,7 @@ def evaluate(
         "answer_length": len(result["answer"]),
         "thinking_length": result.get("thinking_length", 0),
         "cache_hit": result.get("cache_hit", False),
+        "opa_denied": expect_opa_denied and result["source_count"] == 0,
     }
 
 
@@ -818,6 +824,7 @@ def main() -> int:
                 expect_no_sources = bool(qdef.get("expect_no_sources", False))
                 expect_thinking_min = qdef.get("expect_thinking_length_min")
                 expect_cache_hit = bool(qdef.get("expect_cache_hit", False))
+                expect_opa_denied = bool(qdef.get("expect_opa_denied", False))
 
                 # Refresh token if expiry is within 2 minutes (checked per-query
                 # because individual LLM responses can take 2-4 minutes each)
@@ -857,6 +864,7 @@ def main() -> int:
                     expect_no_sources=expect_no_sources,
                     expect_thinking_length_min=expect_thinking_min,
                     expect_cache_hit=expect_cache_hit,
+                    expect_opa_denied=expect_opa_denied,
                 )
 
                 icon = PASS if ev["passed"] else FAIL
@@ -867,6 +875,8 @@ def main() -> int:
                     kw_info += f" think={ev['thinking_length']}"
                 if expect_cache_hit:
                     kw_info += f" cache={'HIT' if ev['cache_hit'] else 'MISS'}"
+                if expect_opa_denied:
+                    kw_info += f" opa={'DENIED' if ev['opa_denied'] else 'ALLOWED(unexpected)'}"
                 print(f"\r   {icon}  {question[:60]:<60} {result['latency_seconds']:5.1f}s  "
                       f"{result['source_count']} src{kw_info}")
 

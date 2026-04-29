@@ -79,10 +79,12 @@ async def ingest_query_event(event: QueryEvent):
                 event.query_id, event.tenant_id, event.user_id,
                 event.latency_ms, event.model_used,
                 event.cache_hit, event.source_count,
+                event.thinking_truncated,
             ]],
             column_names=[
                 "query_id", "tenant_id", "user_id",
                 "latency_ms", "model_used", "cache_hit", "source_count",
+                "thinking_truncated",
             ],
         )
     except Exception as e:
@@ -186,6 +188,136 @@ async def queries_summary(
         }
     except Exception as e:
         logger.error("Analytics query failed: %s", e)
+        raise HTTPException(status_code=500, detail="Analytics query failed")
+
+
+@app.get("/analytics/queries/timeseries")
+async def queries_timeseries(
+    request: Request,
+    tenant_id: str | None = None,
+    bucket: str = "day",
+    days: int = 30,
+):
+    """Time-series of query count + avg latency bucketed by hour or day."""
+    effective_tenant = _resolve_tenant(request, tenant_id)
+    settings = _settings()
+    db = settings.clickhouse_database
+    trunc = "toStartOfHour" if bucket == "hour" else "toStartOfDay"
+    try:
+        client = get_client(settings)
+        if effective_tenant:
+            result = client.query(
+                f"SELECT {trunc}(created_at) AS ts, count() AS cnt,"
+                f" avg(latency_ms) AS avg_ms, quantile(0.95)(latency_ms) AS p95_ms,"
+                f" countIf(cache_hit) / count() AS hit_rate"
+                f" FROM {db}.query_events"
+                f" WHERE tenant_id = {{tenant_id:String}}"
+                f"   AND created_at >= now() - INTERVAL {{days:UInt32}} DAY"
+                f" GROUP BY ts ORDER BY ts",
+                parameters={"tenant_id": effective_tenant, "days": days},
+            )
+        else:
+            result = client.query(
+                f"SELECT {trunc}(created_at) AS ts, count() AS cnt,"
+                f" avg(latency_ms) AS avg_ms, quantile(0.95)(latency_ms) AS p95_ms,"
+                f" countIf(cache_hit) / count() AS hit_rate"
+                f" FROM {db}.query_events"
+                f" WHERE created_at >= now() - INTERVAL {{days:UInt32}} DAY"
+                f" GROUP BY ts ORDER BY ts",
+                parameters={"days": days},
+            )
+        return [
+            {
+                "ts": str(row[0]),
+                "count": row[1],
+                "avg_latency_ms": round(row[2], 1),
+                "p95_latency_ms": round(row[3], 1),
+                "cache_hit_rate": round(row[4], 3),
+            }
+            for row in result.result_rows
+        ]
+    except Exception as e:
+        logger.error("Analytics timeseries failed: %s", e)
+        raise HTTPException(status_code=500, detail="Analytics query failed")
+
+
+@app.get("/analytics/queries/by-model")
+async def queries_by_model(
+    request: Request,
+    tenant_id: str | None = None,
+    days: int = 30,
+):
+    """Query count and avg latency grouped by model_used."""
+    effective_tenant = _resolve_tenant(request, tenant_id)
+    settings = _settings()
+    db = settings.clickhouse_database
+    try:
+        client = get_client(settings)
+        if effective_tenant:
+            result = client.query(
+                f"SELECT model_used, count() AS cnt, avg(latency_ms) AS avg_ms"
+                f" FROM {db}.query_events"
+                f" WHERE tenant_id = {{tenant_id:String}}"
+                f"   AND created_at >= now() - INTERVAL {{days:UInt32}} DAY"
+                f" GROUP BY model_used ORDER BY cnt DESC",
+                parameters={"tenant_id": effective_tenant, "days": days},
+            )
+        else:
+            result = client.query(
+                f"SELECT model_used, count() AS cnt, avg(latency_ms) AS avg_ms"
+                f" FROM {db}.query_events"
+                f" WHERE created_at >= now() - INTERVAL {{days:UInt32}} DAY"
+                f" GROUP BY model_used ORDER BY cnt DESC",
+                parameters={"days": days},
+            )
+        return [
+            {"model": row[0], "count": row[1], "avg_latency_ms": round(row[2], 1)}
+            for row in result.result_rows
+        ]
+    except Exception as e:
+        logger.error("Analytics by-model failed: %s", e)
+        raise HTTPException(status_code=500, detail="Analytics query failed")
+
+
+@app.get("/analytics/feedback/timeseries")
+async def feedback_timeseries(
+    request: Request,
+    tenant_id: str | None = None,
+    bucket: str = "day",
+    days: int = 30,
+):
+    """Time-series of likes/dislikes bucketed by day."""
+    effective_tenant = _resolve_tenant(request, tenant_id)
+    settings = _settings()
+    db = settings.clickhouse_database
+    trunc = "toStartOfHour" if bucket == "hour" else "toStartOfDay"
+    try:
+        client = get_client(settings)
+        if effective_tenant:
+            result = client.query(
+                f"SELECT {trunc}(created_at) AS ts,"
+                f" countIf(liked = true) AS likes, countIf(liked = false) AS dislikes"
+                f" FROM {db}.feedback_events"
+                f" WHERE tenant_id = {{tenant_id:String}}"
+                f"   AND created_at >= now() - INTERVAL {{days:UInt32}} DAY"
+                f" GROUP BY ts ORDER BY ts",
+                parameters={"tenant_id": effective_tenant, "days": days},
+            )
+        else:
+            result = client.query(
+                f"SELECT {trunc}(created_at) AS ts,"
+                f" countIf(liked = true) AS likes, countIf(liked = false) AS dislikes"
+                f" FROM {db}.feedback_events"
+                f" WHERE created_at >= now() - INTERVAL {{days:UInt32}} DAY"
+                f" GROUP BY ts ORDER BY ts",
+                parameters={"days": days},
+            )
+        return [
+            {"ts": str(row[0]), "likes": row[1], "dislikes": row[2]}
+            for row in result.result_rows
+        ]
+    except Exception as e:
+        logger.error("Analytics feedback timeseries failed: %s", e)
         raise HTTPException(status_code=500, detail="Analytics query failed")
 
 

@@ -104,6 +104,7 @@ services:
       - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b}
       - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-phi3:mini}
       - LLM_API_KEY=${LLM_API_KEY:-none}
+      - LLM_EXPANSION_MODEL=${LLM_EXPANSION_MODEL:-qwen3:1.7b}
       # Embeddings — same engine as chat by default; override LLM_EMBED_URL to switch
       #   LMForge (macOS/Apple Silicon): http://host.docker.internal:11430/v1  [default]
       #   Ollama   (any platform):       http://host.docker.internal:11434/v1
@@ -111,6 +112,15 @@ services:
       - LLM_EMBED_URL=${LLM_EMBED_URL:-http://host.docker.internal:11430/v1}
       - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-qwen3-embed:0.6b:8bit}
       - LLM_EMBED_DIM=1024
+      # Sampling parameters — global env-level fallbacks (lowest priority in resolution chain).
+      # Override in .env to change the baseline for all models without a DB profile.
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.1}
+      - LLM_TOP_P=${LLM_TOP_P:-}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-1024}
+      - LLM_FREQUENCY_PENALTY=${LLM_FREQUENCY_PENALTY:-0.3}
+      - LLM_THINKING_TEMPERATURE=${LLM_THINKING_TEMPERATURE:-0.6}
+      - LLM_THINKING_TOP_P=${LLM_THINKING_TOP_P:-0.95}
+      - LLM_THINKING_MAX_TOKENS=${LLM_THINKING_MAX_TOKENS:-8192}
       # Reranker — delegated to Infinity ONNX server (no in-process JIT)
       - RERANKER_MODEL=${DEFAULT_RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
       - RERANKER_URL=http://infinity:7997
@@ -119,6 +129,7 @@ services:
       - RAG_RERANKER_TOP_K=10
       - RAG_DEFAULT_TOP_K=5
       # Domain router — rag-service reads RAG_DOMAIN_ROUTER_MODEL (field: rag_domain_router_model)
+      - RAG_USE_DOMAIN_ROUTING=${RAG_USE_DOMAIN_ROUTING:-true}
       - RAG_DOMAIN_ROUTER_MODEL=${DEFAULT_DOMAIN_CLASSIFIER_MODEL:-MoritzLaurer/deberta-v3-base-zeroshot-v1.1-all-33}
       # Document Service (for sample dataset record creation)
       - DOCUMENT_SERVICE_URL=http://document-service:8081
@@ -144,6 +155,8 @@ services:
     # Allow container to reach host's LMForge/Ollama/vLLM (works on macOS by default, needed for Linux)
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - huggingface-cache:/opt/hf-cache
     deploy:
       resources:
         reservations:
@@ -170,7 +183,7 @@ services:
       document-service:
         condition: service_started
     volumes:
-      - huggingface-cache:/root/.cache/huggingface
+      - huggingface-cache:/opt/hf-cache
     networks:
       - docintel-network
     healthcheck:
@@ -218,7 +231,7 @@ services:
         condition: service_healthy
     volumes:
       - docling-cache:/app/docling-cache
-      - huggingface-cache:/root/.cache/huggingface
+      - huggingface-cache:/opt/hf-cache
     networks:
       - docintel-network
     extra_hosts:
@@ -887,6 +900,7 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/00-overview.json
     volumes:

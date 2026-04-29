@@ -62,6 +62,20 @@ async def lifespan(app: FastAPI):
     logger.info("Ingestion service starting up")
     app.state.job_registry = _job_registry
 
+    # Haystack emits "Warming up component X..." on every Pipeline.run(), even when
+    # warm_up() is already a no-op. Silence that per-run noise at INFO level.
+    logging.getLogger("haystack.core.pipeline.base").setLevel(logging.WARNING)
+
+    # Pre-warm the tokenizer once at startup so the first user document is fast.
+    # Combined with the HF_HOME volume fix, this is a local cache hit (~10ms).
+    try:
+        from ..pipeline import TokenAwareSplitter
+        _splitter = TokenAwareSplitter()
+        _splitter.warm_up()
+        logger.info("TokenAwareSplitter pre-warmed at startup")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TokenAwareSplitter pre-warm failed (non-fatal): %s", exc)
+
     async def _eviction_loop() -> None:
         while True:
             await asyncio.sleep(60)

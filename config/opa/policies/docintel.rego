@@ -194,6 +194,34 @@ route_requires_role(method, path, "admin.tenants.settings:rw") {
     glob.match("/api/v1/tenants/*/users/*/role", [], path)
 }
 
+# Tenant model profiles — tenant_admin can manage their own tenant's sampling overrides
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "GET"
+    glob.match("/api/v1/tenants/*/model-profiles*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "POST"
+    glob.match("/api/v1/tenants/*/model-profiles*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "PUT"
+    glob.match("/api/v1/tenants/*/model-profiles/*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "DELETE"
+    glob.match("/api/v1/tenants/*/model-profiles/*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "DELETE"
+    glob.match("/api/v1/tenants/*/model-profiles-cache*", [], path)
+}
+
+# Resolve effective params — rag-service (tenant_admin for own tenant, platform_admin for any)
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "GET"
+    glob.match("/api/v1/tenants/*/model-profiles/resolve*", [], path)
+}
+
 # Tenant management (platform_admin only — list/create/delete tenants)
 route_requires_role(method, path, "admin:rw") {
     glob.match("/api/v1/tenants*", [], path)

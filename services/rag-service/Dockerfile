@@ -35,6 +35,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY services/rag-service/src/ ./src/
 
 # ── Layer 4: non-root user ────────────────────────────────────────────────────
+# Set HF_HOME to a neutral path so the Docker volume mount resolves correctly
+# for appuser regardless of $HOME. Must be set before USER switch.
+ENV HF_HOME=/opt/hf-cache
+RUN mkdir -p /opt/hf-cache && chmod 0777 /opt/hf-cache
+
 # -m creates home dir so Haystack/HF libs that write to ~/.config
 # don't fail with PermissionError at startup.
 # Reranker runs in the Infinity sidecar (no model weights in this image).

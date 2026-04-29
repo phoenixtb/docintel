@@ -20,7 +20,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ── Layer 3: actual source ─────────────────────────────────────────────────────
 COPY services/data-loader/src/ ./src/
 
+ENV HF_HOME=/opt/hf-cache
+RUN mkdir -p /opt/hf-cache && chmod 0777 /opt/hf-cache
+
 RUN useradd -r -u 1001 -g root -m appuser
+ENV HOME=/home/appuser
 USER 1001
 
 EXPOSE 8002

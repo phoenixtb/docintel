@@ -10,6 +10,7 @@ class QueryEvent(BaseModel):
     model_used: str = ""
     cache_hit: bool = False
     source_count: int = 0
+    thinking_truncated: bool = False
 
 
 class FeedbackEvent(BaseModel):

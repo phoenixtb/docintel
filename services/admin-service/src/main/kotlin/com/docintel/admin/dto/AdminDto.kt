@@ -129,6 +129,63 @@ data class TenantSettings(
     val effectiveModel: String?,   // what actually resolves (platform override or own pref)
 )
 
+// ---- Model Profiles DTOs ----
+
+data class ModelProfile(
+    val id: String,
+    val scope: String,                   // "platform" | "tenant"
+    val tenantId: String?,
+    val modelPattern: String,
+    val displayName: String?,
+    // Standard (non-thinking) params — null = inherit from next resolution level
+    val temperature: Double?,
+    val topP: Double?,
+    val maxTokens: Int?,
+    val frequencyPenalty: Double?,
+    val presencePenalty: Double?,
+    val repetitionPenalty: Double?,
+    val topK: Int?,
+    val minP: Double?,
+    // Thinking-mode params — null = inherit
+    val thinkingTemperature: Double?,
+    val thinkingTopP: Double?,
+    val thinkingMaxTokens: Int?,
+    val thinkingFrequencyPenalty: Double?,
+    val thinkingPresencePenalty: Double?,
+    val thinkingRepetitionPenalty: Double?,
+    val thinkingTopK: Int?,
+    val thinkingMinP: Double?,
+    val thinkingBudget: Int?,
+    val streamThinking: Boolean?,
+    val notes: String?,
+    val createdAt: Instant,
+    val updatedAt: Instant,
+)
+
+data class UpsertModelProfileRequest(
+    val modelPattern: String,
+    val displayName: String? = null,
+    val temperature: Double? = null,
+    val topP: Double? = null,
+    val maxTokens: Int? = null,
+    val frequencyPenalty: Double? = null,
+    val presencePenalty: Double? = null,
+    val repetitionPenalty: Double? = null,
+    val topK: Int? = null,
+    val minP: Double? = null,
+    val thinkingTemperature: Double? = null,
+    val thinkingTopP: Double? = null,
+    val thinkingMaxTokens: Int? = null,
+    val thinkingFrequencyPenalty: Double? = null,
+    val thinkingPresencePenalty: Double? = null,
+    val thinkingRepetitionPenalty: Double? = null,
+    val thinkingTopK: Int? = null,
+    val thinkingMinP: Double? = null,
+    val thinkingBudget: Int? = null,
+    val streamThinking: Boolean? = null,
+    val notes: String? = null,
+)
+
 // ---- User Preferences DTOs ----
 
 data class UserPreferences(

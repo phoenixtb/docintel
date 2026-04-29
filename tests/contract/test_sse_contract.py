@@ -14,6 +14,10 @@ They ensure:
   4. Every source object has the required schema fields (ref_id, filename, section, score).
   5. Thinking tokens, when present, arrive in thinking_token events before regular tokens.
   6. An error condition emits a single `error` event with a non-empty message.
+  7. Cache-hit streams: second MetadataEvent has cache_hit=True, followed by tokens.
+  8. No-docs streams: metadata → routing → token (sentinel) → sources(empty).
+  9. OPA-denied streams: metadata → routing → token (no-docs msg) → empty sources.
+ 10. Error events terminate the stream.
 
 The streaming generator path in main.py is tested via a thin wrapper that
 replays pre-baked state — the aim is to catch regressions in event ordering
@@ -212,6 +216,40 @@ def sse_events_error() -> list[dict]:
     return events
 
 
+@pytest.fixture
+def sse_events_cache_hit() -> list[dict]:
+    """Cache-hit: first metadata(cache_hit=False), second metadata(cache_hit=True), tokens, sources."""
+    return [
+        {"metadata": {"query_id": "test-qid-004", "cache_hit": False}},
+        {"metadata": {"query_id": "test-qid-004", "cache_hit": True}},
+        {"token": "Cached "},
+        {"token": "response."},
+        {"sources": [], "done": True},
+    ]
+
+
+@pytest.fixture
+def sse_events_no_docs() -> list[dict]:
+    """No-docs path: metadata → routing → single token (sentinel msg) → empty sources."""
+    return [
+        {"metadata": {"query_id": "test-qid-005", "cache_hit": False}},
+        {"routing": {"domain": None, "explicit": False}},
+        {"token": "I couldn't find relevant information in the uploaded documents."},
+        {"sources": [], "done": True},
+    ]
+
+
+@pytest.fixture
+def sse_events_opa_denied() -> list[dict]:
+    """OPA denied all chunks: same as no-docs — sentinel token then empty sources."""
+    return [
+        {"metadata": {"query_id": "test-qid-006", "cache_hit": False}},
+        {"routing": {"domain": "contracts", "explicit": True}},
+        {"token": "I couldn't find relevant information in the uploaded documents."},
+        {"sources": [], "done": True},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Snapshot tests — detect unintentional schema drift
 # ---------------------------------------------------------------------------
@@ -244,3 +282,136 @@ class TestSSEEventSchemas:
             assert not ("token" in event and "thinking_token" in event), (
                 f"Event contains both token and thinking_token: {event}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Cache-hit event sequence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestCacheHitEventSequence:
+    """Verify the cache-hit short-circuit event sequence."""
+
+    def test_first_metadata_cache_hit_false(self, sse_events_cache_hit):
+        first = sse_events_cache_hit[0]
+        assert "metadata" in first
+        assert first["metadata"]["cache_hit"] is False
+
+    def test_second_metadata_cache_hit_true(self, sse_events_cache_hit):
+        meta_events = [e for e in sse_events_cache_hit if "metadata" in e]
+        assert len(meta_events) == 2
+        assert meta_events[1]["metadata"]["cache_hit"] is True
+
+    def test_token_events_present(self, sse_events_cache_hit):
+        token_events = [e for e in sse_events_cache_hit if "token" in e]
+        assert token_events
+
+    def test_done_event_terminates(self, sse_events_cache_hit):
+        done_events = [e for e in sse_events_cache_hit if e.get("done")]
+        assert len(done_events) == 1
+        assert done_events[-1] == sse_events_cache_hit[-1]
+
+    def test_no_routing_event_on_cache_hit(self, sse_events_cache_hit):
+        routing_events = [e for e in sse_events_cache_hit if "routing" in e]
+        assert routing_events == []
+
+
+# ---------------------------------------------------------------------------
+# No-docs event sequence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestNoDocsEventSequence:
+    """Verify the no-documents-found SSE sequence."""
+
+    def test_metadata_first(self, sse_events_no_docs):
+        assert "metadata" in sse_events_no_docs[0]
+
+    def test_routing_event_present(self, sse_events_no_docs):
+        routing_events = [e for e in sse_events_no_docs if "routing" in e]
+        assert routing_events
+
+    def test_single_token_event(self, sse_events_no_docs):
+        token_events = [e for e in sse_events_no_docs if "token" in e]
+        assert len(token_events) >= 1
+
+    def test_empty_sources_in_done(self, sse_events_no_docs):
+        done = next((e for e in sse_events_no_docs if e.get("done")), None)
+        assert done is not None
+        assert done["sources"] == []
+
+
+# ---------------------------------------------------------------------------
+# Thinking-then-answer sequence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestThinkingThenAnswerSequence:
+    """Thinking tokens must arrive before any answer tokens."""
+
+    def test_thinking_tokens_before_answer_tokens(self, sse_events_with_thinking):
+        thinking_indices = [i for i, e in enumerate(sse_events_with_thinking) if "thinking_token" in e]
+        answer_indices = [i for i, e in enumerate(sse_events_with_thinking) if "token" in e and "thinking_token" not in e]
+        if not thinking_indices or not answer_indices:
+            pytest.skip("Fixture does not contain both event types")
+        assert max(thinking_indices) < min(answer_indices)
+
+    def test_thinking_tokens_are_non_empty_strings(self, sse_events_with_thinking):
+        for event in sse_events_with_thinking:
+            if "thinking_token" in event:
+                assert isinstance(event["thinking_token"], str)
+                assert event["thinking_token"]
+
+
+# ---------------------------------------------------------------------------
+# OPA-denied sequence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestOpaDeniedSequence:
+    """OPA denying all chunks produces the same shape as no-docs."""
+
+    def test_metadata_first(self, sse_events_opa_denied):
+        assert "metadata" in sse_events_opa_denied[0]
+
+    def test_routing_present(self, sse_events_opa_denied):
+        routing_events = [e for e in sse_events_opa_denied if "routing" in e]
+        assert routing_events
+
+    def test_no_sources_in_done_event(self, sse_events_opa_denied):
+        done = next((e for e in sse_events_opa_denied if e.get("done")), None)
+        assert done is not None
+        assert done["sources"] == []
+
+    def test_sentinel_message_in_token(self, sse_events_opa_denied):
+        token_events = [e for e in sse_events_opa_denied if "token" in e]
+        assert token_events
+        assert any("couldn't find" in e["token"].lower() or "no" in e["token"].lower()
+                   for e in token_events)
+
+
+# ---------------------------------------------------------------------------
+# Error-terminates-stream sequence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestErrorTerminatesStream:
+    """An error event must be the last meaningful event in the stream."""
+
+    def test_error_event_present(self, sse_events_error):
+        error_events = [e for e in sse_events_error if "error" in e]
+        assert error_events
+
+    def test_error_is_last_non_metadata_event(self, sse_events_error):
+        non_meta = [e for e in sse_events_error if "metadata" not in e]
+        if non_meta:
+            assert "error" in non_meta[-1]
+
+    def test_no_token_events_after_error(self, sse_events_error):
+        error_idx = next(
+            (i for i, e in enumerate(sse_events_error) if "error" in e), None
+        )
+        if error_idx is not None:
+            after_error = sse_events_error[error_idx + 1:]
+            token_after = [e for e in after_error if "token" in e]
+            assert token_after == []

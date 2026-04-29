@@ -529,6 +529,29 @@ class DocumentService(
     fun listDataSources(tenantId: String): List<DataSourceResponse> =
         dataSourceRepository.findByTenantId(tenantId).map { it.toResponse() }
 
+    fun getStats(tenantId: String): DocumentStatsResponse {
+        val byStatus = documentRepository.countByStatusForTenant(tenantId)
+            .associate { row -> (row[0] as ProcessingStatus).name to (row[1] as Long) }
+        val byDomain = documentRepository.countByDomainForTenant(tenantId)
+            .associate { row -> row[0].toString() to (row[1] as Number).toLong() }
+        val bySource = documentRepository.countBySourceForTenant(tenantId)
+            .associate { row -> row[0].toString() to (row[1] as Number).toLong() }
+        val totalBytes = documentRepository.sumFileSizeForTenant(tenantId)
+        val totalChunks = documentRepository.sumChunkCountForTenant(tenantId)
+        val latestTs = documentRepository.findLatestCreatedAtForTenant(tenantId)
+        val lastUploadedAt = latestTs?.toInstant()
+        val totalDocuments = byStatus.values.sum()
+        return DocumentStatsResponse(
+            totalDocuments = totalDocuments,
+            totalChunks = totalChunks,
+            totalBytes = totalBytes,
+            byStatus = byStatus,
+            byDomain = byDomain,
+            bySource = bySource,
+            lastUploadedAt = lastUploadedAt,
+        )
+    }
+
     // ==========================================================================
     // Private mapping helpers
     // ==========================================================================

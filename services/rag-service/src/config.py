@@ -29,6 +29,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        env_ignore_empty=True,   # LLM_TOP_P="" → None, not a parse error
     )
 
     # ── Qdrant ───────────────────────────────────────────────────────────────
@@ -54,10 +55,34 @@ class Settings(BaseSettings):
     llm_embed_model: str = "qwen3-embed:0.6b:4bit"
     llm_embed_dim: int = 1024
 
-    # LLM generation settings
+    # LLM generation sampling parameters — global env-level fallbacks.
+    # Resolution order at query time:
+    #   tenant DB profile → platform DB profile → built-in code defaults → these values.
+    # Override in .env (generated from config/defaults.env) to change the baseline.
     llm_temperature: float = 0.1
+    llm_top_p: float | None = None        # LLM_TOP_P="" in defaults.env → use model default
     llm_max_tokens: int = 1024
-    llm_frequency_penalty: float = 0.3  # suppresses repetition loops in small models
+    llm_frequency_penalty: float = 0.3
+    llm_presence_penalty: float = 0.0
+    llm_repetition_penalty: float | None = 1.05  # NULL → LMForge oMLX derives from f+p penalty
+    llm_top_k: int | None = None
+    llm_min_p: float | None = None
+    llm_thinking_temperature: float = 0.6
+    llm_thinking_top_p: float = 0.95
+    llm_thinking_max_tokens: int = 6144
+    llm_thinking_frequency_penalty: float = 0.0  # Qwen3 spec: 0 in thinking mode
+    llm_thinking_presence_penalty: float = 0.3   # Qwen3 spec
+    llm_thinking_repetition_penalty: float = 1.2  # explicit; wins over oMLX derived value
+    llm_thinking_top_k: int = 20                 # Qwen3 spec
+    llm_thinking_min_p: float = 0.0              # Qwen3 spec
+    llm_thinking_budget: int = 4096              # LMForge two-call hard cap on reasoning tokens
+    llm_stream_thinking: bool = True             # send stream_reasoning_deltas to LMForge
+    # HTTP stream timeout (seconds). Haystack/OpenAI client default is 30s which
+    # is far too short for thinking mode where the first token may take >60s.
+    llm_stream_timeout_s: float = 120.0          # normal mode
+    llm_thinking_stream_timeout_s: float = 360.0 # thinking mode (6 min for complex reasoning)
+    llm_stream_max_retries: int = 1              # retries for normal mode
+    llm_thinking_stream_max_retries: int = 0     # no retry for thinking — already waited long
     # Fast model used only for async conversation summarization (not main queries).
     llm_expansion_model: str = "qwen3:1.7b"
 
@@ -66,12 +91,6 @@ class Settings(BaseSettings):
     # summary, keeping only the last N messages verbatim for the LLM.
     conversation_summary_threshold: int = 8   # compress when total messages exceed this
     conversation_verbatim_recent: int = 4     # always keep last N messages verbatim
-
-    # Context windows.
-    #   system prompt + 5-10 retrieved chunks (~3k tokens) + history + question + answer.
-    # Override via LLM_CTX / LLM_THINKING_CTX in .env.
-    llm_ctx: int = 16384          # standard queries
-    llm_thinking_ctx: int = 16384  # thinking mode — same budget as normal; 32K caused OOM on 4b models when reranker + embedder are co-loaded
 
     # ── Reranker — Infinity ONNX server (no in-process JIT, instant startup) ─
     # Infinity runs as a sidecar container and exposes a Cohere-compatible /rerank.
@@ -89,6 +108,10 @@ class Settings(BaseSettings):
     # Set to 1 to always return at least one result regardless of score.
     rag_min_score_fallback_topk: int = 0
     rag_cache_similarity_threshold: float = 0.92
+    # Typewriter replay for cache hits: chunk the cached response into small
+    # TokenEvents to preserve the streaming UX. Set delay_ms=0 for instant replay.
+    rag_cache_replay_chunk_chars: int = 24
+    rag_cache_replay_chunk_delay_ms: int = 15
 
     # ── Hybrid search (BM25 sparse via fastembed, always local) ──────────────
     rag_use_hybrid_search: bool = True

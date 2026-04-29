@@ -102,9 +102,13 @@ class DocumentController(
     fun getDocument(
         @PathVariable id: UUID,
         @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
-        @RequestParam("include_chunks", defaultValue = "false") includeChunks: Boolean
+        @RequestHeader("X-User-Roles", defaultValue = "") rolesHeader: String,
+        @RequestParam("include_chunks", defaultValue = "false") includeChunks: Boolean,
+        @RequestParam("tenant_id", required = false) tenantOverride: String?,
     ): ResponseEntity<DocumentDetailResponse> {
-        val document = documentService.getDocument(id, tenantId, includeChunks)
+        val effectiveTenant = resolveAdminTenantOverride(tenantId, tenantOverride, rolesHeader)
+            ?: return ResponseEntity.status(403).build()
+        val document = documentService.getDocument(id, effectiveTenant, includeChunks)
             ?: return ResponseEntity.notFound().build()
         return ResponseEntity.ok(document)
     }
@@ -112,11 +116,26 @@ class DocumentController(
     @GetMapping
     fun listDocuments(
         @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
+        @RequestHeader("X-User-Roles", defaultValue = "") rolesHeader: String,
         @RequestParam("status", required = false) status: ProcessingStatus?,
+        @RequestParam("tenant_id", required = false) tenantOverride: String?,
         @PageableDefault(size = 20) pageable: Pageable
     ): ResponseEntity<Page<DocumentResponse>> {
-        val documents = documentService.listDocuments(tenantId, status, pageable)
+        val effectiveTenant = resolveAdminTenantOverride(tenantId, tenantOverride, rolesHeader)
+            ?: return ResponseEntity.status(403).build()
+        val documents = documentService.listDocuments(effectiveTenant, status, pageable)
         return ResponseEntity.ok(documents)
+    }
+
+    @GetMapping("/stats")
+    fun getDocumentStats(
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
+        @RequestHeader("X-User-Roles", defaultValue = "") rolesHeader: String,
+        @RequestParam("tenant_id", required = false) tenantOverride: String?,
+    ): ResponseEntity<Any> {
+        val effectiveTenant = resolveAdminTenantOverride(tenantId, tenantOverride, rolesHeader)
+            ?: return ResponseEntity.status(403).body(mapOf("error" to "Cross-tenant stats requires documents:delete_all role"))
+        return ResponseEntity.ok(documentService.getStats(effectiveTenant))
     }
 
     @DeleteMapping("/{id}")
@@ -347,6 +366,19 @@ class DocumentController(
     // ==========================================================================
     // Private helpers
     // ==========================================================================
+
+    /**
+     * Resolves effective tenant for read/stats endpoints.
+     * Returns tenantId unchanged when no override is requested.
+     * Returns tenantOverride if caller holds documents:delete_all.
+     * Returns null (403) if cross-tenant override is requested without the required role.
+     */
+    private fun resolveAdminTenantOverride(tenantId: String, tenantOverride: String?, rolesHeader: String): String? {
+        if (tenantOverride == null || tenantOverride == tenantId) return tenantId
+        val roles = rolesHeader.split(",").map { it.trim() }
+        if ("documents:delete_all" !in roles) return null
+        return tenantOverride
+    }
 
     // ==========================================================================
     // SSE — real-time document status updates

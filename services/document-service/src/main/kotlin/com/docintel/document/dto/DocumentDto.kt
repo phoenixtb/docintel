@@ -93,6 +93,16 @@ data class ChunkPersistRequest(
     val metadata: Map<String, Any> = emptyMap()
 )
 
+data class DocumentStatsResponse(
+    val totalDocuments: Long,
+    val totalChunks: Long,
+    val totalBytes: Long,
+    val byStatus: Map<String, Long>,
+    val byDomain: Map<String, Long>,
+    val bySource: Map<String, Long>,
+    val lastUploadedAt: Instant?,
+)
+
 data class DataSourceRequest(
     val sourceType: String,
     val sourceConfig: Map<String, Any?> = emptyMap()
