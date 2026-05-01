@@ -1,0 +1,37 @@
+# ==============================================================================
+# docker-compose.gpu.yml — GPU device reservation overlay
+# ==============================================================================
+# Applied by scripts/start.sh and scripts/build.sh when the detected hardware
+# profile is NOT cpu (i.e. cu126 / cu128 / cu129 / cu130).
+#
+# Usage (handled automatically by the DocIntel scripts):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Only ingestion-service and rag-service receive GPU access:
+#   - ingestion-service: domain classification (DeBERTa zero-shot on GPU)
+#   - rag-service:       domain router (same DeBERTa model, faster on GPU)
+#   - data-loader:       no ML inference at runtime — no GPU needed ever
+#
+# Requires: nvidia-container-toolkit installed on the host and Docker daemon
+# configured to use the NVIDIA runtime (nvidia-ctk runtime configure --runtime=docker).
+# ==============================================================================
+
+services:
+  rag-service:
+    deploy:
+      resources:
+        reservations:
+          memory: 4G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  ingestion-service:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

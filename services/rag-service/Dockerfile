@@ -5,6 +5,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Hardware profile build arguments.
+# TORCH_INDEX selects the PyTorch wheel channel (cpu / cu126 / cu128 / cu129 / cu130).
+# Default is CPU-only — keeps images ~3.4 GB lighter on hosts without GPU.
+# scripts/build.sh sets this automatically based on detected hardware.
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
+ARG TORCH_VERSION=2.11.0
+
 # Pull uv binary — 10-100x faster than pip
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
@@ -18,6 +25,16 @@ RUN apt-get update && apt-get install -y \
 COPY lib/docintel-common/ /app/lib/docintel-common/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /app/lib/docintel-common/
+
+# ── Layer 1b: pre-install torch from the hardware-specific wheel index ────────
+# Must happen BEFORE project deps so uv finds torch already satisfied in the
+# environment and does not replace it with the CUDA-bundled PyPI default.
+# --extra-index-url pypi allows all other packages to resolve from PyPI normally.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system \
+        --index-url "${TORCH_INDEX}" \
+        --extra-index-url https://pypi.org/simple \
+        "torch==${TORCH_VERSION}"
 
 # ── Layer 2: service deps (only reruns when pyproject.toml changes) ───────────
 # Cache mount = persistent host-side package cache across builds (like ~/.gradle).

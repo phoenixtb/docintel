@@ -6,8 +6,10 @@
 # Use arrow keys to navigate, space to select/deselect, enter to build.
 #
 # Usage:
-#   ./scripts/build.sh          # Interactive mode
-#   ./scripts/build.sh --all    # Build all services
+#   ./scripts/build.sh                  # Interactive mode (auto-detect hardware)
+#   ./scripts/build.sh --all            # Build all services
+#   ./scripts/build.sh --profile=cpu    # Force CPU profile
+#   PROFILE=cu130 ./scripts/build.sh    # Force cu130 profile via env
 # ==============================================================================
 
 set -e
@@ -18,6 +20,60 @@ cd "$PROJECT_DIR"
 
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
+
+# ==============================================================================
+# Hardware profile — detect or read override
+# ==============================================================================
+
+# shellcheck source=lib/profile_config.sh
+source "${SCRIPT_DIR}/lib/profile_config.sh"
+# shellcheck source=lib/install_nvidia_toolkit.sh
+source "${SCRIPT_DIR}/lib/install_nvidia_toolkit.sh"
+
+# Parse --profile= from args (before the --all check)
+_FLAG_PROFILE=""
+_ARGS_REMAINING=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --profile=*) _FLAG_PROFILE="${_arg#--profile=}" ;;
+        *)           _ARGS_REMAINING+=("$_arg") ;;
+    esac
+done
+set -- "${_ARGS_REMAINING[@]+"${_ARGS_REMAINING[@]}"}"
+
+read_profile ${_FLAG_PROFILE:+--flag-profile="$_FLAG_PROFILE"}
+
+# If GPU hardware present but Docker can't reach it, offer toolkit install (TTY only)
+if [ "${PROFILE_DOCKER_GPU:-}" = "no_toolkit" ] && [ -t 0 ] && [ -t 1 ]; then
+    source "${SCRIPT_DIR}/lib/install_nvidia_toolkit.sh"
+    if offer_install_nvidia_toolkit; then
+        # Retry detection after successful toolkit install
+        read_profile ${_FLAG_PROFILE:+--flag-profile="$_FLAG_PROFILE"}
+    fi
+fi
+
+# Emit profile info
+if [ -t 1 ]; then
+    # Interactive: show summary on first build, brief line on subsequent builds
+    if [ ! -f "${PROJECT_DIR}/.docintel-profile-shown" ]; then
+        print_profile_summary
+        echo -n "  Proceed? [Y/n] "
+        read -r _confirm </dev/tty
+        if [[ "$_confirm" =~ ^[Nn]$ ]]; then
+            echo "  Aborted."
+            exit 0
+        fi
+        touch "${PROJECT_DIR}/.docintel-profile-shown"
+    else
+        echo "  [hardware] profile=${PROFILE} source=${PROFILE_SOURCE}"
+    fi
+else
+    # Non-interactive / CI: single machine-readable line
+    print_profile_summary_ci
+fi
+
+# Export build vars consumed by docker-compose.yml
+torch_vars_for_profile "$PROFILE"
 
 # Service definitions: name -> docker compose service name
 SERVICES=(
@@ -62,7 +118,7 @@ if [[ "$1" == "--all" ]]; then
     echo ""
     echo -e "${GREEN}All services built.${NC}"
     echo ""
-    read -p "Restart services? (y/N): " restart
+    read -rp "Restart services? (y/N): " restart
     if [[ "$restart" =~ ^[Yy]$ ]]; then
         docker compose up -d
         echo -e "${GREEN}Services restarted.${NC}"
@@ -215,7 +271,7 @@ fi
 
 echo -e "${GREEN}All builds successful.${NC}"
 echo ""
-read -p "Restart built services? (y/N): " restart
+read -rp "Restart built services? (y/N): " restart
 if [[ "$restart" =~ ^[Yy]$ ]]; then
     echo ""
     for svc in "${to_build[@]}"; do

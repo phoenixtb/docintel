@@ -22,6 +22,27 @@ for arg in "$@"; do
     esac
 done
 
+# ==============================================================================
+# Hardware profile — read (never re-detect at start time; build.sh already did)
+# ==============================================================================
+
+# shellcheck source=lib/profile_config.sh
+source "${SCRIPT_DIR}/lib/profile_config.sh"
+read_profile
+
+# Export torch vars so docker compose can resolve ${PROFILE_TAG} in image: fields
+torch_vars_for_profile "$PROFILE"
+
+# Build compose file chain: base + GPU overlay when profile != cpu
+COMPOSE_FILES="-f docker-compose.yml"
+if [ "$PROFILE" != "cpu" ]; then
+    if [ -f "${PROJECT_DIR}/docker-compose.gpu.yml" ]; then
+        COMPOSE_FILES="${COMPOSE_FILES} -f docker-compose.gpu.yml"
+    fi
+fi
+
+echo "  [hardware] profile=${PROFILE} source=${PROFILE_SOURCE}"
+
 log()  { echo "  $*"; }
 ok()   { echo "  ✓ $*"; }
 fail() { echo "  ✗ $*" >&2; exit 1; }
@@ -125,7 +146,8 @@ esac
 
 if [ "$DO_BUILD" = true ]; then
     echo "Building images..."
-    docker compose build
+    # shellcheck disable=SC2086
+    docker compose $COMPOSE_FILES build
     echo ""
 fi
 
@@ -151,7 +173,8 @@ fi
 # =============================================================================
 
 echo "Starting backing infrastructure services..."
-docker compose up -d postgres redis minio qdrant clickhouse langfuse-web langfuse-worker infinity
+# shellcheck disable=SC2086
+docker compose $COMPOSE_FILES up -d postgres redis minio qdrant clickhouse langfuse-web langfuse-worker infinity
 
 log "Waiting for Postgres..."
 for i in $(seq 1 30); do
@@ -203,7 +226,8 @@ ok "Infrastructure provisioned."
 
 echo ""
 echo "Starting Zitadel services..."
-docker compose up -d zitadel-api zitadel-login zitadel-proxy docintel-actions
+# shellcheck disable=SC2086
+docker compose $COMPOSE_FILES up -d zitadel-api zitadel-login zitadel-proxy docintel-actions
 
 log "Waiting for zitadel-proxy healthy (first boot may take 2-3 min)..."
 for i in $(seq 1 72); do
@@ -384,7 +408,8 @@ done
 
 echo ""
 echo "Starting application services..."
-docker compose up -d
+# shellcheck disable=SC2086
+docker compose $COMPOSE_FILES up -d
 
 # =============================================================================
 # Wait for application services

@@ -27,6 +27,10 @@ build/
 *.swo
 .DS_Store
 
+# DocIntel hardware profile (auto-generated, machine-local)
+.docintel-profile
+.docintel-profile-shown
+
 # Docker
 *.log
 

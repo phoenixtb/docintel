@@ -92,6 +92,10 @@ services:
     build:
       context: .
       dockerfile: services/rag-service/Dockerfile
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+        TORCH_VERSION: ${TORCH_VERSION:-2.11.0}
+    image: docintel-rag-service:${PROFILE_TAG:-cpu}
     environment:
       - QDRANT_URL=http://qdrant:6333
       # LLM Engine — OpenAI-compatible chat completions endpoint.
@@ -166,6 +170,10 @@ services:
     build:
       context: .
       dockerfile: services/data-loader/Dockerfile
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+        TORCH_VERSION: ${TORCH_VERSION:-2.11.0}
+    image: docintel-data-loader:${PROFILE_TAG:-cpu}
     environment:
       - MINIO_URL=http://minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
@@ -201,6 +209,10 @@ services:
     build:
       context: .
       dockerfile: services/ingestion-service/Dockerfile
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+        TORCH_VERSION: ${TORCH_VERSION:-2.11.0}
+    image: docintel-ingestion-service:${PROFILE_TAG:-cpu}
     environment:
       - MINIO_URL=http://minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
