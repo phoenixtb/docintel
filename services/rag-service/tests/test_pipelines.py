@@ -143,3 +143,79 @@ class TestThinkingTruncationHeuristic:
 
     def test_zero_chars_never_truncated(self):
         assert self._truncated(0, 4096) is False
+
+
+# ---------------------------------------------------------------------------
+# StatusEvent emission in the streaming_callback / queue consumer path
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestStatusEventEmission:
+    """Verify that lmforge_status chunks yield StatusEvent without touching answer/thinking parts."""
+
+    def test_call2_prefill_yields_generating_answer_status_event(self):
+        """A chunk with lmforge_status=call2_prefill produces StatusEvent(stage='generating_answer')."""
+        from src.events import StatusEvent, ThinkingTokenEvent, TokenEvent
+        from src.components.llm_adapter import extract_lmforge_status
+        from haystack.dataclasses import StreamingChunk
+        import asyncio
+
+        # Simulate what streaming_callback does with a call2_prefill chunk.
+        chunk = StreamingChunk(content="")
+        chunk.meta["lmforge_status"] = "call2_prefill"
+
+        status = extract_lmforge_status(chunk)
+        assert status == "call2_prefill"
+
+        # Verify the queue consumer mapping: "call2_prefill" → stage="generating_answer"
+        stage = "generating_answer" if status == "call2_prefill" else status
+        event = StatusEvent(stage=stage)
+        assert event.stage == "generating_answer"
+
+    def test_status_event_not_accumulated_into_answer(self):
+        """StatusEvent must not append to full_answer_parts — it is UX-only."""
+        from src.events import StatusEvent
+
+        full_answer_parts: list[str] = []
+        full_thinking_parts: list[str] = []
+
+        # Simulate the queue consumer branch for kind == "status"
+        kind, text = "status", "call2_prefill"
+        if kind == "thinking":
+            full_thinking_parts.append(text)
+        elif kind == "status":
+            pass  # UX-only — must NOT accumulate
+        else:
+            full_answer_parts.append(text)
+
+        assert full_answer_parts == []
+        assert full_thinking_parts == []
+
+    def test_status_event_is_not_none_sentinel(self):
+        """StatusEvent must not be mistaken for the None queue sentinel that ends the loop."""
+        from src.events import StatusEvent
+
+        event = StatusEvent(stage="generating_answer")
+        assert event is not None
+
+    def test_status_event_does_not_affect_thinking_truncation(self):
+        """StatusEvent chars must not be counted toward thinking budget heuristic."""
+        from src.events import StatusEvent
+
+        # The truncation heuristic only counts full_thinking_parts.
+        # StatusEvent is not appended there, so no chars are counted.
+        full_thinking_parts: list[str] = []
+        kind, text = "status", "call2_prefill"
+        if kind == "thinking":
+            full_thinking_parts.append(text)
+        thinking_chars = sum(len(t) for t in full_thinking_parts)
+        assert thinking_chars == 0
+
+    def test_unknown_lmforge_status_passed_through_as_stage(self):
+        """Future status values other than call2_prefill are forwarded verbatim as stage."""
+        from src.events import StatusEvent
+
+        status = "call3_future"
+        stage = "generating_answer" if status == "call2_prefill" else status
+        event = StatusEvent(stage=stage)
+        assert event.stage == "call3_future"

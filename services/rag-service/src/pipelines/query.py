@@ -37,7 +37,7 @@ from haystack.utils import Secret
 
 from ..components.cache import SemanticCacheChecker, SemanticCacheWriter
 from ..components.embedders import BM25SparseTextEmbedder
-from ..components.llm_adapter import build_streaming_generator, extract_reasoning_content
+from ..components.llm_adapter import build_streaming_generator, extract_lmforge_status, extract_reasoning_content
 from ..components.model_profile_resolver import ModelProfileResolver
 from ..components.opa import OpaChunkValidator
 from ..components.prompt import PromptBuilder
@@ -50,6 +50,7 @@ from ..events import (
     QueuedEvent,
     RoutingEvent,
     SourcesEvent,
+    StatusEvent,
     ThinkingTokenEvent,
     TokenEvent,
 )
@@ -683,6 +684,18 @@ class RAGService:
         llm_error: list = []
 
         def streaming_callback(chunk):
+            # LMForge lifecycle status events — only enqueue the status signal when
+            # the chunk carries no content/reasoning (it's a pure lifecycle event).
+            # If LMForge includes the status field on content chunks (observed in
+            # v0.1.1 for call2 answer tokens), we must NOT return early — let the
+            # content branch below process the actual token.
+            lmf_status = extract_lmforge_status(chunk)
+            has_reasoning = bool(extract_reasoning_content(chunk)) if effective_thinking else False
+            has_content = bool(chunk.content)
+            if lmf_status and not has_content and not has_reasoning:
+                loop.call_soon_threadsafe(queue.put_nowait, ("status", lmf_status))
+                return
+
             # Gate reasoning on effective_thinking — some engines leak reasoning_content
             # even when think:false, so we filter client-side as defence-in-depth.
             if effective_thinking:
@@ -738,6 +751,10 @@ class RAGService:
                 if kind == "thinking":
                     full_thinking_parts.append(text)
                     yield ThinkingTokenEvent(text=text)
+                elif kind == "status":
+                    # UX-only lifecycle signal — not accumulated into answer/thinking.
+                    # "call2_prefill" → LMForge is prefilling Call 2 KV cache.
+                    yield StatusEvent(stage="generating_answer" if text == "call2_prefill" else text)
                 else:
                     full_answer_parts.append(text)
                     yield TokenEvent(text=text)
@@ -880,6 +897,8 @@ class RAGService:
                     raise RuntimeError(m)
                 case QueuedEvent():
                     pass
+                case StatusEvent():
+                    pass  # UX-only signal — not relevant in non-streaming path
 
         return {
             "answer": "".join(full_answer).strip(),

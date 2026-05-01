@@ -32,6 +32,7 @@ from ..events import (
     QueuedEvent,
     RoutingEvent,
     SourcesEvent,
+    StatusEvent,
     ThinkingTokenEvent,
     TokenEvent,
 )
@@ -634,6 +635,8 @@ def _serialize_sse(event: PipelineEvent) -> str:
             payload = {"queued": True, "message": m}
         case ThinkingTokenEvent(text=t):
             payload = {"thinking_token": t}
+        case StatusEvent(stage=s):
+            payload = {"status": s}
         case TokenEvent(text=t):
             payload = {"token": t}
         case SourcesEvent(sources=s, done=d):

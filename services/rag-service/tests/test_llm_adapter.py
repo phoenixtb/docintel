@@ -197,6 +197,125 @@ class TestExtractReasoningContent:
         assert result is None
 
 
+class TestExtractLmforgeStatus:
+    """Verify extract_lmforge_status and the ThinkingAwareChatGenerator lmforge field extraction."""
+
+    def _make_fake_chunk_with_lmforge(self, status: str):
+        """Build a fake openai ChatCompletionChunk with a top-level lmforge extension field."""
+        delta = MagicMock()
+        delta.content = None
+        delta.reasoning_content = None
+        delta.model_extra = {}
+        choice = MagicMock()
+        choice.delta = delta
+        chunk = MagicMock()
+        chunk.choices = [choice]
+        # LMForge puts the extension at the top level of the SSE event, not inside delta.
+        chunk.model_extra = {"lmforge": {"status": status, "reasoning_len": 16384}}
+        return chunk
+
+    def test_lmforge_status_written_to_meta(self):
+        """call2_prefill status event is extracted from raw chunk and stored in chunk.meta."""
+        from src.components.llm_adapter import ThinkingAwareChatGenerator
+        from haystack.dataclasses import StreamingChunk
+
+        received_chunks = []
+
+        def callback(chunk):
+            received_chunks.append(chunk)
+
+        fake_raw_chunk = self._make_fake_chunk_with_lmforge("call2_prefill")
+
+        with (
+            patch("src.components.llm_adapter._convert_chat_completion_chunk_to_streaming_chunk") as mock_convert,
+            patch("src.components.llm_adapter._convert_streaming_chunks_to_chat_message") as mock_finish,
+        ):
+            fake_sc = StreamingChunk(content="")
+            mock_convert.return_value = fake_sc
+            mock_finish.return_value = MagicMock()
+
+            gen = ThinkingAwareChatGenerator.__new__(ThinkingAwareChatGenerator)
+            gen._handle_stream_response([fake_raw_chunk], callback)
+
+        assert len(received_chunks) == 1
+        assert received_chunks[0].meta.get("lmforge_status") == "call2_prefill"
+
+    def test_unknown_lmforge_status_preserved(self):
+        """Future status values are forwarded as-is, not filtered."""
+        from src.components.llm_adapter import ThinkingAwareChatGenerator
+        from haystack.dataclasses import StreamingChunk
+
+        received_chunks = []
+
+        def callback(chunk):
+            received_chunks.append(chunk)
+
+        fake_raw_chunk = self._make_fake_chunk_with_lmforge("call3_future")
+
+        with (
+            patch("src.components.llm_adapter._convert_chat_completion_chunk_to_streaming_chunk") as mock_convert,
+            patch("src.components.llm_adapter._convert_streaming_chunks_to_chat_message") as mock_finish,
+        ):
+            fake_sc = StreamingChunk(content="")
+            mock_convert.return_value = fake_sc
+            mock_finish.return_value = MagicMock()
+
+            gen = ThinkingAwareChatGenerator.__new__(ThinkingAwareChatGenerator)
+            gen._handle_stream_response([fake_raw_chunk], callback)
+
+        assert received_chunks[0].meta.get("lmforge_status") == "call3_future"
+
+    def test_no_lmforge_field_returns_none(self):
+        """Regular chunks without lmforge extension return None from extract_lmforge_status."""
+        from src.components.llm_adapter import extract_lmforge_status
+        from haystack.dataclasses import StreamingChunk
+
+        chunk = StreamingChunk(content="hello")
+        assert extract_lmforge_status(chunk) is None
+
+    def test_lmforge_field_with_no_status_returns_none(self):
+        """lmforge dict present but no status key → returns None."""
+        from src.components.llm_adapter import extract_lmforge_status
+        from haystack.dataclasses import StreamingChunk
+
+        chunk = StreamingChunk(content="")
+        chunk.meta["lmforge_status"] = None  # simulate absent/null status
+        assert extract_lmforge_status(chunk) is None
+
+    def test_no_lmforge_field_does_not_set_lmforge_status_meta(self):
+        """Chunks from non-LMForge engines do not accidentally set lmforge_status in meta."""
+        from src.components.llm_adapter import ThinkingAwareChatGenerator
+        from haystack.dataclasses import StreamingChunk
+
+        received_chunks = []
+
+        def callback(chunk):
+            received_chunks.append(chunk)
+
+        delta = MagicMock()
+        delta.content = "word"
+        delta.reasoning_content = None
+        delta.model_extra = {}
+        choice = MagicMock()
+        choice.delta = delta
+        raw_chunk = MagicMock()
+        raw_chunk.choices = [choice]
+        raw_chunk.model_extra = {}  # no lmforge field
+
+        with (
+            patch("src.components.llm_adapter._convert_chat_completion_chunk_to_streaming_chunk") as mock_convert,
+            patch("src.components.llm_adapter._convert_streaming_chunks_to_chat_message") as mock_finish,
+        ):
+            fake_sc = StreamingChunk(content="word")
+            mock_convert.return_value = fake_sc
+            mock_finish.return_value = MagicMock()
+
+            gen = ThinkingAwareChatGenerator.__new__(ThinkingAwareChatGenerator)
+            gen._handle_stream_response([raw_chunk], callback)
+
+        assert "lmforge_status" not in received_chunks[0].meta
+
+
 @pytest.mark.unit
 class TestBuildStreamingGenerator:
     """Tests for build_streaming_generator factory."""

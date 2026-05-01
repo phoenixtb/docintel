@@ -10,6 +10,7 @@ Event order in a normal stream:
   RoutingEvent(domain=..., explicit=...)
   [QueuedEvent — only when semaphore is saturated]
   ThinkingTokenEvent* (only when effective_thinking=True)
+  [StatusEvent(stage="generating_answer") — only when LMForge Call 2 prefill begins]
   TokenEvent+
   SourcesEvent(done=True)
 
@@ -74,12 +75,26 @@ class ErrorEvent:
     message: str
 
 
+@dataclass(frozen=True)
+class StatusEvent:
+    """UX-only lifecycle signal — not persisted to conversation history.
+
+    stage values:
+      "generating_answer" — LMForge began Call 2 prefill (thinking budget exhausted).
+                            The engine is re-processing the reasoning block; no tokens
+                            will arrive for several seconds. The UI should show an
+                            indicator so users know the request is still active.
+    """
+    stage: str
+
+
 # Union type alias used for type hints throughout the codebase.
 PipelineEvent = Union[
     MetadataEvent,
     RoutingEvent,
     QueuedEvent,
     ThinkingTokenEvent,
+    StatusEvent,
     TokenEvent,
     SourcesEvent,
     ErrorEvent,
@@ -90,6 +105,7 @@ __all__ = [
     "RoutingEvent",
     "QueuedEvent",
     "ThinkingTokenEvent",
+    "StatusEvent",
     "TokenEvent",
     "SourcesEvent",
     "ErrorEvent",

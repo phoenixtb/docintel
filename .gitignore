@@ -69,3 +69,7 @@ htmlcov/
 tests/integration/reports/
 tests/integration/.venv/
 services/ingestion-service/.venv/
+
+# Local-only docs (scratch space, not committed)
+docs/future_features/
+docs/intermediate_thoughts/

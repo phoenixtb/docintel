@@ -48,6 +48,7 @@
   let input = $state('');
   let isStreaming = $state(false);
   let isQueued = $state(false);
+  let isGeneratingAnswer = $state(false);
   let currentResponse = $state('');
   let currentThinking = $state('');
   let currentSources: Source[] = $state([]);
@@ -207,6 +208,7 @@
     messages = [...messages, { id: generateId(), role: 'user', content: userMessage }];
     
     isStreaming = true;
+    isGeneratingAnswer = false;
     currentResponse = '';
     currentThinking = '';
     currentSources = [];
@@ -262,7 +264,8 @@
             if (data.routing?.domain) currentRoutedDomain = data.routing.domain;
             if (data.queued) { isQueued = true; }
             if (data.thinking_token) { isQueued = false; currentThinking += data.thinking_token; }
-            if (data.token) { isQueued = false; currentResponse += data.token; }
+            if (data.status === 'generating_answer') { isQueued = false; isGeneratingAnswer = true; }
+            if (data.token) { isQueued = false; isGeneratingAnswer = false; currentResponse += data.token; }
             if (data.sources) currentSources = data.sources;
             if (data.error) { serverError = data.error; streamDone = true; break; }
             if (data.done) { streamDone = true; break; }
@@ -304,6 +307,7 @@
       streamAbort = null;
       isStreaming = false;
       isQueued = false;
+      isGeneratingAnswer = false;
       currentResponse = '';
       currentThinking = '';
       currentSources = [];
@@ -373,11 +377,12 @@
     streamAbort?.abort();
   });
 
-  // Auto-scroll to bottom whenever messages, streaming response, or thinking tokens change
+  // Auto-scroll to bottom whenever messages, streaming response, thinking tokens, or status changes
   $effect(() => {
     const _ = messages.length;
     const __ = currentResponse;
     const ___ = currentThinking;
+    const ____ = isGeneratingAnswer;
     messagesEndEl?.scrollIntoView({ behavior: 'smooth' });
   });
 </script>
@@ -603,6 +608,12 @@
                   <span class="text-slate-700">(auto-routed)</span>
                 </div>
               {/if}
+              {#if isGeneratingAnswer && !currentResponse}
+                <div class="flex items-center gap-2 px-3 py-2 text-emerald-500/70 text-xs">
+                  <span class="animate-pulse w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.8)]"></span>
+                  <span>Generating answer…</span>
+                </div>
+              {/if}
               {#if currentResponse}
                 <div class="px-4 py-3 rounded-2xl glass border border-emerald-500/10 text-slate-200 text-sm leading-relaxed">
                   <p class="whitespace-pre-wrap">{currentResponse}<span class="animate-pulse text-emerald-400 ml-px">▌</span></p>
@@ -628,7 +639,7 @@
         {/if}
 
         <!-- Loading dots (before first token, not queued) -->
-        {#if isStreaming && !isQueued && !currentResponse && !currentThinking}
+        {#if isStreaming && !isQueued && !currentResponse && !currentThinking && !isGeneratingAnswer}
           <div class="flex justify-start">
             <div class="px-4 py-3 rounded-2xl glass border border-emerald-500/10">
               <div class="flex items-center gap-1.5">

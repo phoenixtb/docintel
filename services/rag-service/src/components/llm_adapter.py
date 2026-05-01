@@ -107,6 +107,20 @@ class ThinkingAwareChatGenerator(OpenAIChatGenerator):
                 if rc:
                     chunk_delta.meta["reasoning_content"] = rc
 
+            # Extract LMForge extension field. openai-python places unknown fields
+            # in model_extra at whichever level they appear in the JSON. LMForge may
+            # put `lmforge` at the top-level chunk OR inside delta — check both so
+            # the extraction is robust to LMForge format evolution.
+            lmf = None
+            if hasattr(raw_chunk, "model_extra") and raw_chunk.model_extra:
+                lmf = raw_chunk.model_extra.get("lmforge")
+            if lmf is None and raw_chunk.choices:
+                delta = raw_chunk.choices[0].delta
+                if hasattr(delta, "model_extra") and delta.model_extra:
+                    lmf = delta.model_extra.get("lmforge")
+            if isinstance(lmf, dict) and lmf.get("status"):
+                chunk_delta.meta["lmforge_status"] = lmf["status"]
+
             chunks.append(chunk_delta)
             callback(chunk_delta)
 
@@ -209,4 +223,14 @@ def extract_reasoning_content(chunk: StreamingChunk) -> Optional[str]:
     return chunk.meta.get("reasoning_content")
 
 
-__all__ = ["build_streaming_generator", "extract_reasoning_content", "ThinkingAwareChatGenerator"]
+def extract_lmforge_status(chunk: StreamingChunk) -> Optional[str]:
+    """
+    Extract LMForge lifecycle status from a StreamingChunk.
+
+    Returns the value of lmforge.status from the raw SSE event when present
+    (e.g. "call2_prefill"), or None for all other chunks and all non-LMForge engines.
+    """
+    return chunk.meta.get("lmforge_status")
+
+
+__all__ = ["build_streaming_generator", "extract_reasoning_content", "extract_lmforge_status", "ThinkingAwareChatGenerator"]
