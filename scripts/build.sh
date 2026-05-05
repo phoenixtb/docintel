@@ -75,6 +75,9 @@ fi
 # Export build vars consumed by docker-compose.yml
 torch_vars_for_profile "$PROFILE"
 
+# Full compose file chain (base + override + GPU overlay)
+compose_file_chain "$PROJECT_DIR"
+
 # Service definitions: name -> docker compose service name
 SERVICES=(
   "web-ui"
@@ -114,13 +117,15 @@ NC='\033[0m'
 if [[ "$1" == "--all" ]]; then
     echo -e "${BOLD}Building all services in parallel...${NC}"
     echo ""
-    docker compose build --parallel "${SERVICES[@]}"
+    # shellcheck disable=SC2086
+    docker compose $COMPOSE_FILES build --parallel "${SERVICES[@]}"
     echo ""
     echo -e "${GREEN}All services built.${NC}"
     echo ""
     read -rp "Restart services? (y/N): " restart
     if [[ "$restart" =~ ^[Yy]$ ]]; then
-        docker compose up -d
+        # shellcheck disable=SC2086
+        docker compose $COMPOSE_FILES up -d
         echo -e "${GREEN}Services restarted.${NC}"
     fi
     exit 0
@@ -255,7 +260,8 @@ failed=()
 for i in "${!to_build[@]}"; do
     svc="${to_build[$i]}"
     echo -e "${BLUE}[$(($i + 1))/${#to_build[@]}]${NC} Building ${BOLD}${svc}${NC}..."
-    if docker compose build "$svc"; then
+    # shellcheck disable=SC2086
+    if docker compose $COMPOSE_FILES build "$svc"; then
         echo -e "  ${GREEN}Done${NC}"
     else
         echo -e "  ${RED}Failed${NC}"
@@ -276,7 +282,8 @@ if [[ "$restart" =~ ^[Yy]$ ]]; then
     echo ""
     for svc in "${to_build[@]}"; do
         echo -e "Restarting ${BOLD}${svc}${NC}..."
-        docker compose up -d "$svc" 2>&1 | grep -E "Started|Recreated" || true
+        # shellcheck disable=SC2086
+        docker compose $COMPOSE_FILES up -d "$svc" 2>&1 | grep -E "Started|Recreated" || true
     done
     echo ""
     echo -e "${GREEN}Done.${NC}"

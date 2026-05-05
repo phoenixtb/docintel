@@ -33,13 +33,11 @@ read_profile
 # Export torch vars so docker compose can resolve ${PROFILE_TAG} in image: fields
 torch_vars_for_profile "$PROFILE"
 
-# Build compose file chain: base + GPU overlay when profile != cpu
-COMPOSE_FILES="-f docker-compose.yml"
-if [ "$PROFILE" != "cpu" ]; then
-    if [ -f "${PROJECT_DIR}/docker-compose.gpu.yml" ]; then
-        COMPOSE_FILES="${COMPOSE_FILES} -f docker-compose.gpu.yml"
-    fi
-fi
+# Build the full compose file chain:
+#   docker-compose.yml → docker-compose.override.yml → docker-compose.gpu.yml (GPU profiles)
+# Using explicit -f instead of relying on auto-load so GPU overlay can be appended,
+# but override.yml MUST be included explicitly to restore Docker Compose's auto-load semantics.
+compose_file_chain "$PROJECT_DIR"
 
 echo "  [hardware] profile=${PROFILE} source=${PROFILE_SOURCE}"
 
@@ -187,7 +185,7 @@ done
 
 log "Waiting for MinIO..."
 for i in $(seq 1 20); do
-    if curl -sf http://localhost:19000/minio/health/live > /dev/null 2>&1; then
+    if docker compose exec -T minio curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
         ok "MinIO ready"; break
     fi
     [ $i -eq 20 ] && fail "MinIO timed out. Check: docker compose logs minio"

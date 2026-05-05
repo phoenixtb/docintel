@@ -76,7 +76,7 @@ class DocumentServiceClient:
         tenant_id: str,
         chunks: list[ChunkPayload],
     ) -> None:
-        """POST /internal/documents/{id}/chunks/bulk — synchronous (called from thread pool)."""
+        """POST /internal/documents/{id}/chunks/bulk — clears + replaces the full chunk set."""
         if not chunks:
             return
 
@@ -104,4 +104,53 @@ class DocumentServiceClient:
             raise
         except Exception as e:
             logger.error("document-service bulk chunk persist error: %s", e)
+            raise
+
+    def append_chunks(
+        self,
+        document_id: str,
+        tenant_id: str,
+        chunks: list[ChunkPayload],
+        clear_existing: bool = False,
+    ) -> int:
+        """
+        POST /internal/documents/{id}/chunks/append — additive upsert (no clear).
+
+        Used by the sharded PDF pipeline: each shard appends its chunks without
+        clearing the chunks from previous shards.  Pass clear_existing=True on the
+        first shard to purge stale chunks from a prior failed attempt.
+
+        Returns the number of chunks saved in this call.
+        """
+        if not chunks:
+            return 0
+
+        url = f"{self._base}/internal/documents/{document_id}/chunks/append"
+        payload = [c.to_dict() for c in chunks]
+        params = {"clearExisting": "true" if clear_existing else "false"}
+
+        try:
+            resp = httpx.post(
+                url,
+                json=payload,
+                params=params,
+                headers=self._headers(tenant_id),
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            saved: int = result.get("saved", len(chunks))
+            logger.debug(
+                "Appended %d chunks (clearExisting=%s) for document %s (saved=%d)",
+                len(chunks), clear_existing, document_id, saved,
+            )
+            return saved
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "document-service append chunks failed: status=%s body=%s",
+                e.response.status_code, e.response.text,
+            )
+            raise
+        except Exception as e:
+            logger.error("document-service append chunks error: %s", e)
             raise

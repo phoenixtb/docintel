@@ -96,6 +96,7 @@ services:
         TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
         TORCH_VERSION: ${TORCH_VERSION:-2.11.0}
     image: docintel-rag-service:${PROFILE_TAG:-cpu}
+    pull_policy: never
     environment:
       - QDRANT_URL=http://qdrant:6333
       # LLM Engine — OpenAI-compatible chat completions endpoint.
@@ -174,6 +175,7 @@ services:
         TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
         TORCH_VERSION: ${TORCH_VERSION:-2.11.0}
     image: docintel-data-loader:${PROFILE_TAG:-cpu}
+    pull_policy: never
     environment:
       - MINIO_URL=http://minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
@@ -213,6 +215,7 @@ services:
         TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
         TORCH_VERSION: ${TORCH_VERSION:-2.11.0}
     image: docintel-ingestion-service:${PROFILE_TAG:-cpu}
+    pull_policy: never
     environment:
       - MINIO_URL=http://minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
@@ -227,6 +230,9 @@ services:
       - DOCLING_DO_OCR=${DOCLING_DO_OCR:-true}
       - DOCLING_DO_TABLE_STRUCTURE=${DOCLING_DO_TABLE_STRUCTURE:-true}
       - DOCLING_MAX_WORKERS=${DOCLING_MAX_WORKERS:-2}
+      - DOCLING_SHARD_PAGES=${DOCLING_SHARD_PAGES:-25}
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-32}
+      - INGESTION_REST_ENABLED=false
       - HAYSTACK_TELEMETRY_ENABLED=false
       # DOMAIN_CLASSIFIER_MODEL is consumed by docintel-common inside the container image
       - INTERNAL_GATEWAY_SECRET=${INTERNAL_GATEWAY_SECRET:-}
@@ -242,7 +248,9 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - docling-cache:/app/docling-cache
+      # NOTE: docling-cache used to be a named volume mounted at /app/docling-cache,
+      # but that shadowed the layout/tableformer/easyocr models baked into the image.
+      # The image is now self-contained — no volume needed for docling artifacts.
       - huggingface-cache:/opt/hf-cache
     networks:
       - docintel-network
@@ -941,6 +949,5 @@ volumes:
   clickhouse-data:
   clickhouse-logs:
   huggingface-cache:
-  docling-cache:
   prometheus-data:
   grafana-data:

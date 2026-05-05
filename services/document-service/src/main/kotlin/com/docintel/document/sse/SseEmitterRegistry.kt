@@ -65,14 +65,21 @@ class SseEmitterRegistry {
     fun onDocumentStatusEvent(event: DocumentStatusEvent) {
         val list = emitters[event.tenantId] ?: return
         val eventId = eventSequence.incrementAndGet().toString()
-        val payload = mapOf(
-            "documentId"   to event.documentId,
-            "status"       to event.status,
-            "stage"        to event.stage,
-            "filename"     to event.filename,
-            "chunkCount"   to event.chunkCount,
-            "errorMessage" to event.errorMessage,
-        )
+        val payload = buildMap<String, Any?> {
+            put("documentId",   event.documentId)
+            put("status",       event.status)
+            put("stage",        event.stage)
+            put("filename",     event.filename)
+            put("chunkCount",   event.chunkCount)
+            put("errorMessage", event.errorMessage)
+            event.progress?.let {
+                put("progress", mapOf(
+                    "currentPage"  to it.currentPage,
+                    "totalPages"   to it.totalPages,
+                    "currentStage" to it.currentStage,
+                ))
+            }
+        }
         val dead = mutableListOf<SseEmitter>()
         for (emitter in list) {
             try {

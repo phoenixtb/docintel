@@ -1,5 +1,6 @@
 package com.docintel.document.config
 
+import com.docintel.document.messaging.DocumentProgressConsumer
 import com.docintel.document.messaging.FilesAvailableConsumer
 import com.docintel.document.messaging.IngestionCompleteConsumer
 import com.docintel.document.messaging.StreamTopics
@@ -49,6 +50,7 @@ class StreamConsumerStarter(
     private val container: StreamMessageListenerContainer<String, MapRecord<String, String, String>>,
     private val filesAvailableConsumer: FilesAvailableConsumer,
     private val ingestionCompleteConsumer: IngestionCompleteConsumer,
+    private val documentProgressConsumer: DocumentProgressConsumer,
     private val redisTemplate: StringRedisTemplate,
     @Value("\${messaging.streams.consumer-name:document-service-1}") private val consumerName: String
 ) {
@@ -58,6 +60,7 @@ class StreamConsumerStarter(
     fun start() {
         ensureGroup(StreamTopics.FILES_AVAILABLE, FilesAvailableConsumer.CONSUMER_GROUP)
         ensureGroup(StreamTopics.INGESTION_COMPLETE, IngestionCompleteConsumer.CONSUMER_GROUP)
+        ensureGroup(StreamTopics.DOCUMENTS_PROGRESS, DocumentProgressConsumer.CONSUMER_GROUP)
 
         container.receive(
             Consumer.from(FilesAvailableConsumer.CONSUMER_GROUP, consumerName),
@@ -69,11 +72,19 @@ class StreamConsumerStarter(
             StreamOffset.create(StreamTopics.INGESTION_COMPLETE, ReadOffset.lastConsumed()),
             ingestionCompleteConsumer
         )
+        container.receive(
+            Consumer.from(DocumentProgressConsumer.CONSUMER_GROUP, consumerName),
+            StreamOffset.create(StreamTopics.DOCUMENTS_PROGRESS, ReadOffset.lastConsumed()),
+            documentProgressConsumer
+        )
 
         container.start()
         logger.info(
-            "Redis Stream consumers started (consumer='{}') — listening on: {}, {}",
-            consumerName, StreamTopics.FILES_AVAILABLE, StreamTopics.INGESTION_COMPLETE
+            "Redis Stream consumers started (consumer='{}') — listening on: {}, {}, {}",
+            consumerName,
+            StreamTopics.FILES_AVAILABLE,
+            StreamTopics.INGESTION_COMPLETE,
+            StreamTopics.DOCUMENTS_PROGRESS,
         )
     }
 

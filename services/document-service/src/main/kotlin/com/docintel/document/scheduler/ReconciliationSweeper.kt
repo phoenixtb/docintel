@@ -46,7 +46,15 @@ class ReconciliationSweeper(
         val start = Instant.now()
         logger.info("ReconciliationSweeper: starting")
 
-        val tenants = documentRepository.findDistinctActiveTenantIds()
+        // Scheduled threads have no HTTP context — RLS hides every row without an admin
+        // role. Elevate just for the cross-tenant discovery; per-tenant work below sets
+        // the real tenant.
+        val tenants = try {
+            TenantContextHolder.setUserRole("platform_admin")
+            documentRepository.findDistinctActiveTenantIds()
+        } finally {
+            TenantContextHolder.clear()
+        }
         var totalOrphansDeleted = 0
         var totalReverseOrphans = 0
 

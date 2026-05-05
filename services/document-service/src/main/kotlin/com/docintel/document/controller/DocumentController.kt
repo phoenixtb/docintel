@@ -6,6 +6,7 @@ import com.docintel.document.service.DocumentService
 import com.docintel.document.service.cleanup.CleanupJobService
 import com.docintel.document.sse.CleanupSseRegistry
 import com.docintel.document.sse.SseEmitterRegistry
+import com.docintel.document.tenant.TenantCoroutineContext
 import com.fasterxml.jackson.databind.ObjectMapper
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -64,7 +65,10 @@ class DocumentController(
         val (document, deduplicated) = documentService.uploadDocument(file, tenantId, metadata)
 
         if (!deduplicated) {
-            processingScope.launch {
+            // processDocument publishes to the documents.ready stream — non-blocking.
+            // Still runs in a background coroutine so the HTTP response returns immediately
+            // and tenant context (for the markDocumentProcessing DB call) is preserved.
+            processingScope.launch(TenantCoroutineContext(tenantId)) {
                 documentService.processDocument(document.id, tenantId, domain)
             }
         }
@@ -89,7 +93,7 @@ class DocumentController(
         val (document, deduplicated) = documentService.registerFromPath(request, tenantId)
 
         if (!deduplicated) {
-            processingScope.launch {
+            processingScope.launch(TenantCoroutineContext(tenantId)) {
                 documentService.processDocument(document.id, tenantId, request.domainHint)
             }
         }
@@ -162,7 +166,7 @@ class DocumentController(
     }
 
     @PostMapping("/{id}/reprocess")
-    suspend fun reprocessDocument(
+    fun reprocessDocument(
         @PathVariable id: UUID,
         @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
         @RequestParam("domain", defaultValue = "auto") domain: String
@@ -172,12 +176,10 @@ class DocumentController(
     }
 
     /**
-     * Bulk chunk persist — called by ingestion-service after embedding.
+     * Bulk chunk persist — replaces the full chunk set (used by single-shard/text path).
      *
-     * Replaces the direct psycopg2 INSERT that ingestion-service used to perform
-     * against the chunks table. Validates document ownership and persists atomically.
-     *
-     * Auth: X-Internal-Service-Token (gateway-injected or direct internal call).
+     * Clears existing chunks, saves the new set, and returns the count.
+     * Does NOT flip document status — [IngestionCompleteConsumer] handles that.
      */
     @PostMapping("/{id}/chunks/bulk")
     fun bulkPersistChunks(
@@ -187,6 +189,28 @@ class DocumentController(
     ): ResponseEntity<Map<String, Any>> {
         return try {
             val saved = documentService.bulkPersistChunks(id, tenantId, chunks)
+            ResponseEntity.ok(mapOf("saved" to saved, "documentId" to id.toString()))
+        } catch (e: IllegalArgumentException) {
+            ResponseEntity.notFound().build()
+        }
+    }
+
+    /**
+     * Append chunks for one shard of a multi-shard PDF ingestion.
+     *
+     * Unlike [bulkPersistChunks], does NOT clear existing chunks — additively upserts.
+     * Pass [clearExisting]=true on the first shard to purge stale chunks from a prior run.
+     * Status transition is handled by [IngestionCompleteConsumer] after the final shard.
+     */
+    @PostMapping("/{id}/chunks/append")
+    fun appendChunks(
+        @PathVariable id: UUID,
+        @RequestHeader("X-Tenant-Id", defaultValue = "default") tenantId: String,
+        @RequestParam("clearExisting", defaultValue = "false") clearExisting: Boolean,
+        @RequestBody chunks: List<ChunkPersistRequest>
+    ): ResponseEntity<Map<String, Any>> {
+        return try {
+            val saved = documentService.appendChunks(id, tenantId, chunks, clearExisting)
             ResponseEntity.ok(mapOf("saved" to saved, "documentId" to id.toString()))
         } catch (e: IllegalArgumentException) {
             ResponseEntity.notFound().build()

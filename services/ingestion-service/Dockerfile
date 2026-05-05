@@ -65,9 +65,13 @@ RUN python3 -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretr
 # Without this, HF hub creates 'hub/' owned by root (0755), blocking writes at runtime.
 RUN chmod -R 0777 /opt/hf-cache
 
-# Docling models are cached in a Docker volume (DOCLING_ARTIFACTS_PATH).
+# Bake Docling layout (~280MB) + tableformer (~70MB) models into the image.
+# RapidOCR ONNX models are bundled with the rapidocr-onnxruntime package itself
+# so no separate download step is needed for OCR models.
 ENV DOCLING_ARTIFACTS_PATH=/app/docling-cache
-RUN mkdir -p /app/docling-cache
+RUN mkdir -p /app/docling-cache && \
+    docling-tools models download layout tableformer \
+        -o /app/docling-cache --quiet
 
 # ── Layer 4: actual source (changes here don't bust dep layers above) ─────────
 COPY services/ingestion-service/src/ ./src/

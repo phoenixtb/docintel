@@ -37,7 +37,8 @@ class DocumentControllerTest : BaseIntegrationTest() {
     @Autowired private lateinit var chunkRepository: ChunkRepository
     @Autowired private lateinit var dataSourceRepository: DataSourceRepository
 
-    @MockkBean private lateinit var ingestionServiceClient: IngestionServiceClient
+    @MockkBean private lateinit var vectorStoreClient: VectorStoreClient
+    @MockkBean(relaxed = true) private lateinit var documentStreamPublisher: com.docintel.document.messaging.DocumentStreamPublisher
 
     private val testTenantId = "integration-test-tenant"
 
@@ -47,10 +48,8 @@ class DocumentControllerTest : BaseIntegrationTest() {
         documentRepository.deleteAll()
         dataSourceRepository.deleteAll()
 
-        coEvery { ingestionServiceClient.triggerIngestion(any(), any(), any(), any(), any(), any(), any()) } returns
-            IngestionTriggerResponse("accepted", "test-doc-id")
-        coEvery { ingestionServiceClient.deleteDocumentVectors(any(), any()) } returns true
-        coEvery { ingestionServiceClient.deleteTenantVectors(any()) } returns true
+        coEvery { vectorStoreClient.deleteDocumentVectors(any(), any()) } returns true
+        coEvery { vectorStoreClient.deleteTenantVectors(any()) } returns true
     }
 
     // ─── Upload ───────────────────────────────────────────────────────────────
@@ -220,7 +219,7 @@ class DocumentControllerTest : BaseIntegrationTest() {
     fun `DELETE should return 503 when vector store is unavailable`() {
         val docId = uploadTestDocument("vector-fail-doc.txt")
 
-        coEvery { ingestionServiceClient.deleteDocumentVectors(any(), any()) } returns false
+        coEvery { vectorStoreClient.deleteDocumentVectors(any(), any()) } returns false
 
         val asyncResult = mockMvc.perform(
             delete("/internal/documents/$docId")
@@ -233,7 +232,7 @@ class DocumentControllerTest : BaseIntegrationTest() {
             .andExpect(status().isServiceUnavailable)
             .andExpect(jsonPath("$.error").value("Vector store unavailable"))
 
-        coEvery { ingestionServiceClient.deleteDocumentVectors(any(), any()) } returns true
+        coEvery { vectorStoreClient.deleteDocumentVectors(any(), any()) } returns true
     }
 
     // ─── File content ─────────────────────────────────────────────────────────

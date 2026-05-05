@@ -42,11 +42,20 @@ class Settings(BaseSettings):
     docling_do_table_structure: bool = Field(default=True, alias="DOCLING_DO_TABLE_STRUCTURE")
 
     # --- Ingestion pipeline ---
-    # Maximum workers for CPU-bound Docling execution
+    # Maximum concurrent documents processed (asyncio.Semaphore + ProcessPoolExecutor size)
     docling_max_workers: int = Field(default=2, alias="DOCLING_MAX_WORKERS")
+
+    # Pages per shard for memory-bounded PDF processing (Phase 3)
+    docling_shard_pages: int = Field(default=25, alias="DOCLING_SHARD_PAGES")
+
+    # Embedding batch size (chunks per OpenAI API call)
+    embedding_batch_size: int = Field(default=32, alias="EMBEDDING_BATCH_SIZE")
 
     # Minimum content length (chars) for a chunk to be indexed
     min_chunk_chars: int = Field(default=20, alias="MIN_CHUNK_CHARS")
+
+    # Enable REST /ingest endpoint (test/debug only; disabled in production)
+    ingestion_rest_enabled: bool = Field(default=False, alias="INGESTION_REST_ENABLED")
 
     # --- Redis Streams ---
     redis_host: str = Field(default="redis", alias="REDIS_HOST")

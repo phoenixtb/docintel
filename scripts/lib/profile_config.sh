@@ -242,3 +242,30 @@ torch_vars_for_profile() {
     export TORCH_VERSION="${TORCH_VERSION_DEFAULT}"
     export PROFILE_TAG="${_p}"
 }
+
+# ------------------------------------------------------------------------------
+# compose_file_chain [PROJECT_ROOT]
+#
+# Sets COMPOSE_FILES to the correct -f chain for the active profile:
+#   1. docker-compose.yml           (always)
+#   2. docker-compose.override.yml  (always, if it exists — restores Docker Compose
+#                                    auto-load semantics that explicit -f flags break)
+#   3. docker-compose.gpu.yml       (only when PROFILE != cpu)
+#
+# Call after read_profile + torch_vars_for_profile.
+# ------------------------------------------------------------------------------
+compose_file_chain() {
+    local _root="${1:-${PROJECT_DIR:-.}}"
+
+    COMPOSE_FILES="-f ${_root}/docker-compose.yml"
+
+    if [ -f "${_root}/docker-compose.override.yml" ]; then
+        COMPOSE_FILES="${COMPOSE_FILES} -f ${_root}/docker-compose.override.yml"
+    fi
+
+    if [ "${PROFILE:-cpu}" != "cpu" ] && [ -f "${_root}/docker-compose.gpu.yml" ]; then
+        COMPOSE_FILES="${COMPOSE_FILES} -f ${_root}/docker-compose.gpu.yml"
+    fi
+
+    export COMPOSE_FILES
+}

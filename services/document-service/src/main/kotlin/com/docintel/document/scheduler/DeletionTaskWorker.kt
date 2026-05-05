@@ -5,7 +5,7 @@ import com.docintel.document.entity.DeletionTaskStatus
 import com.docintel.document.repository.ChunkRepository
 import com.docintel.document.repository.DeletionTaskRepository
 import com.docintel.document.repository.DocumentRepository
-import com.docintel.document.service.IngestionServiceClient
+import com.docintel.document.service.VectorStoreClient
 import com.docintel.document.service.StorageService
 import com.docintel.document.tenant.TenantContextHolder
 import io.micrometer.core.instrument.MeterRegistry
@@ -36,7 +36,7 @@ class DeletionTaskWorker(
     private val deletionTaskRepository: DeletionTaskRepository,
     private val documentRepository: DocumentRepository,
     private val chunkRepository: ChunkRepository,
-    private val ingestionServiceClient: IngestionServiceClient,
+    private val vectorStoreClient: VectorStoreClient,
     private val storageService: StorageService,
     private val meterRegistry: MeterRegistry,
 ) {
@@ -49,24 +49,31 @@ class DeletionTaskWorker(
 
     @Scheduled(fixedDelay = 30_000L, initialDelay = 15_000L)
     fun process() {
-        val tasks = deletionTaskRepository.findByTaskStatus(
-            DeletionTaskStatus.PENDING, PageRequest.of(0, BATCH_SIZE)
-        )
-        if (tasks.isEmpty()) return
+        // Scheduled threads have no HTTP request context, so TenantContextHolder is empty
+        // and RLS would hide every cross-tenant row. Elevate to platform_admin for the
+        // discovery + counting queries; per-task work below sets the real tenant.
+        TenantContextHolder.setUserRole("platform_admin")
+        try {
+            val tasks = deletionTaskRepository.findByTaskStatus(
+                DeletionTaskStatus.PENDING, PageRequest.of(0, BATCH_SIZE)
+            )
+            if (tasks.isEmpty()) return
 
-        val now = Instant.now()
-        logger.debug("DeletionTaskWorker: found {} PENDING tasks", tasks.size)
+            val now = Instant.now()
+            logger.debug("DeletionTaskWorker: found {} PENDING tasks", tasks.size)
 
-        for (task in tasks) {
-            if (!isReadyForRetry(task, now)) continue
-            processTask(task)
+            for (task in tasks) {
+                if (!isReadyForRetry(task, now)) continue
+                processTask(task)
+            }
+
+            meterRegistry.gauge("docintel.deletion_tasks.pending",
+                deletionTaskRepository.countByTaskStatus(DeletionTaskStatus.PENDING).toDouble())
+            meterRegistry.gauge("docintel.deletion_tasks.dead",
+                deletionTaskRepository.countByTaskStatus(DeletionTaskStatus.DEAD).toDouble())
+        } finally {
+            TenantContextHolder.clear()
         }
-
-        // Update gauges after each batch
-        meterRegistry.gauge("docintel.deletion_tasks.pending",
-            deletionTaskRepository.countByTaskStatus(DeletionTaskStatus.PENDING).toDouble())
-        meterRegistry.gauge("docintel.deletion_tasks.dead",
-            deletionTaskRepository.countByTaskStatus(DeletionTaskStatus.DEAD).toDouble())
     }
 
     private fun isReadyForRetry(task: DeletionTask, now: Instant): Boolean {
@@ -82,7 +89,7 @@ class DeletionTaskWorker(
 
             if (!task.qdrantDone) {
                 val deleted = runBlocking {
-                    ingestionServiceClient.deleteDocumentVectors(task.tenantId, task.documentId)
+                    vectorStoreClient.deleteDocumentVectors(task.tenantId, task.documentId)
                 }
                 if (deleted) {
                     task.qdrantDone = true

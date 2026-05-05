@@ -27,9 +27,10 @@ from typing import AsyncIterator
 logger = logging.getLogger(__name__)
 
 # Redis Stream topics — centralised here so all services import from one place
-TOPIC_FILES_AVAILABLE = "files.available"
-TOPIC_DOCUMENTS_READY = "documents.ready"
+TOPIC_FILES_AVAILABLE    = "files.available"
+TOPIC_DOCUMENTS_READY    = "documents.ready"
 TOPIC_INGESTION_COMPLETE = "ingestion.complete"
+TOPIC_DOCUMENTS_PROGRESS = "documents.progress"   # per-shard SSE progress events
 
 
 class MessageBus(ABC):
@@ -175,6 +176,57 @@ class RedisStreamBus(MessageBus):
 
     async def ack(self, topic: str, group: str, message_id: str) -> None:
         await self._redis.xack(topic, group, message_id)
+
+    async def claim_idle(
+        self,
+        topic: str,
+        group: str,
+        consumer: str,
+        *,
+        min_idle_ms: int = 300_000,  # 5 minutes
+        batch_size: int = 10,
+    ) -> list[tuple[str, dict]]:
+        """
+        Claim idle messages from the PEL (pending-entry list) via XAUTOCLAIM.
+
+        Returns messages that have been pending for longer than [min_idle_ms] — these
+        are candidates for retry (worker crashed without acking). The caller checks the
+        delivery count and either reprocesses or moves to DLQ + acks.
+        """
+        try:
+            result = await self._redis.xautoclaim(
+                name=topic,
+                groupname=group,
+                consumername=consumer,
+                min_idle_time=min_idle_ms,
+                start_id="0-0",
+                count=batch_size,
+            )
+            # xautoclaim returns (next_start_id, entries, deleted_ids) in redis-py 5.x
+            entries = result[1] if isinstance(result, (list, tuple)) and len(result) > 1 else result
+            claimed: list[tuple[str, dict]] = []
+            for msg_id, fields in (entries or []):
+                raw = fields.get("payload", "{}")
+                try:
+                    payload = json.loads(raw)
+                    claimed.append((msg_id, payload))
+                except json.JSONDecodeError:
+                    logger.error("Malformed PEL payload id=%s: %r", msg_id, raw)
+                    await self.ack(topic, group, msg_id)
+            return claimed
+        except Exception as e:
+            logger.warning("XAUTOCLAIM failed on %s/%s: %s", topic, group, e)
+            return []
+
+    async def delivery_count(self, topic: str, group: str, message_id: str) -> int:
+        """Return how many times a message has been delivered (from XPENDING)."""
+        try:
+            entries = await self._redis.xpending_range(topic, group, min=message_id, max=message_id, count=1)
+            if entries:
+                return entries[0].get("times_delivered", 1)
+        except Exception:
+            pass
+        return 1
 
     async def close(self) -> None:
         await self._redis.aclose()
