@@ -41,7 +41,7 @@ from ..components.llm_adapter import build_streaming_generator, extract_lmforge_
 from ..components.model_profile_resolver import ModelProfileResolver
 from ..components.opa import OpaChunkValidator
 from ..components.prompt import PromptBuilder
-from ..components.reranker import InfinityReranker
+from ..components.reranker import LmforgeReranker
 from ..components.retrieval import SecureRetriever
 from ..events import (
     ErrorEvent,
@@ -176,7 +176,7 @@ class RAGService:
         # Core RAG components (direct references, replacing Haystack pipeline)
         self._retriever: Optional[SecureRetriever] = None
         self._opa_validator: Optional[OpaChunkValidator] = None
-        self._reranker: Optional[InfinityReranker] = None
+        self._reranker: Optional[LmforgeReranker] = None
         self._prompt_builder: Optional[PromptBuilder] = None
 
     # ── Initialisation ───────────────────────────────────────────────────────
@@ -227,7 +227,7 @@ class RAGService:
             # Core components — instantiate and warm up individually (no pipeline wrapper)
             self._retriever = SecureRetriever(settings=cfg)
             self._opa_validator = OpaChunkValidator(opa_url=cfg.opa_url)
-            self._reranker = InfinityReranker(
+            self._reranker = LmforgeReranker(
                 url=cfg.reranker_url,
                 model=cfg.reranker_model,
                 top_k=cfg.rag_reranker_top_k,

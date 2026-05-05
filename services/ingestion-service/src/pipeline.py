@@ -304,28 +304,23 @@ class TokenAwareSplitter:
 
 def _build_pdf_pipeline_options(cfg: Settings, profile=None) -> "PdfPipelineOptions":
     """Build PdfPipelineOptions for a given PDF profile (or safe defaults)."""
-    from docling.datamodel.pipeline_options import RapidOcrOptions, PdfPipelineOptions
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
 
     options = PdfPipelineOptions()
-    options.do_table_structure = True  # always on — TableFormer only fires on layout-detected tables
+    options.do_table_structure = True  # TableFormer only fires on layout-detected tables
 
-    if profile is None:
-        # Default: honour config flags (used for non-PDF files / text path)
-        options.do_ocr = cfg.docling_do_ocr
-    else:
+    if cfg.ingestion_use_page_routing:
+        # Per-page router handles OCR externally — Docling only does layout + TableFormer
+        options.do_ocr = False
+    elif profile is not None:
+        # Legacy Docling path: respect the profile's OCR recommendation
         options.do_ocr = profile.do_ocr
         if hasattr(options, "force_full_page_ocr") and profile.force_full_page_ocr:
             options.force_full_page_ocr = True
         if hasattr(options, "force_backend_text") and profile.force_backend_text:
             options.force_backend_text = True
-
-    if options.do_ocr:
-        # RapidOCR (ONNX) is 2-4x faster than EasyOCR on CPU and uses ~5x less peak RAM.
-        # bitmap_area_threshold=0.3: pages with <30% bitmap coverage skip OCR entirely
-        # and rely on Docling's digital text extraction — saves OCR on mostly-text pages.
-        options.ocr_options = RapidOcrOptions(
-            bitmap_area_threshold=0.3,
-        )
+    else:
+        options.do_ocr = cfg.docling_do_ocr
 
     device = detect_device()
     options.accelerator_options.device = device
@@ -827,6 +822,20 @@ def _run_pdf_sharded(
         return _run_text([path], document_id, tenant_id, filename, domain_hint, extra_meta, cfg, acl)
 
     first_shard = True
+    use_page_routing = cfg.ingestion_use_page_routing
+
+    if use_page_routing:
+        import asyncio
+        from .page_router import ExtractionPath, initial_path, should_escalate_to_vlm
+        from .pdf_probe import probe_pages
+        from .extractors.digital import extract_digital
+        from .extractors.layout import extract_layout
+        from .extractors.ocr_tesseract import extract_tesseract
+        from .extractors.vlm import extract_vlm
+        vlm_semaphore = asyncio.Semaphore(cfg.vlm_max_concurrency)
+        logger.info(
+            "PDF sharded ingestion: using per-page router (document_id=%s)", document_id
+        )
 
     while start_page < total_pages:
         end_page   = min(start_page + shard_size - 1, total_pages - 1)
@@ -846,20 +855,118 @@ def _run_pdf_sharded(
             cfg=cfg,
         )
 
-        try:
-            result = converter.convert(path, page_range=page_range)
-        except Exception as e:
-            logger.error(
-                "Docling conversion failed for shard pages=%d-%d of %s: %s",
-                start_page, end_page, document_id, e,
-            )
-            raise
+        if use_page_routing:
+            # ── Per-page router path ──────────────────────────────────────────
+            page_profiles = probe_pages(path, page_range=(start_page, end_page))
+            shard_docs: list[Document] = []
 
-        # Domain classification on the first shard only
-        if not domain_decided:
-            sample_text = result.document.export_to_markdown()[:5000]
-            domain = _classify_domain(sample_text, filename)
-            domain_decided = True
+            for pp in page_profiles:
+                path_choice = initial_path(pp)
+                extraction_path_label = path_choice.value
+
+                if path_choice == ExtractionPath.DIGITAL:
+                    text = extract_digital(path, pp.page_index)
+                    if not text:
+                        # fallback to layout
+                        text = extract_layout(path, pp.page_index, cfg.docling_artifacts_path)
+                        extraction_path_label = "layout_fallback"
+
+                elif path_choice == ExtractionPath.LAYOUT:
+                    text = extract_layout(path, pp.page_index, cfg.docling_artifacts_path)
+
+                elif path_choice == ExtractionPath.TESSERACT:
+                    text, conf, wv_ratio, noise = extract_tesseract(
+                        path, pp.page_index, cfg.vlm_render_dpi
+                    )
+                    escalate, reason = should_escalate_to_vlm(
+                        conf,
+                        word_validity_ratio=wv_ratio,
+                        noise_markers=noise,
+                        has_table=pp.has_table_hint,
+                        has_math=pp.has_math_hint,
+                    )
+                    logger.info(
+                        "Page %d: tesseract conf=%.0f word_ratio=%.2f noise=%d → %s (%s)",
+                        pp.page_index + 1, conf, wv_ratio, noise,
+                        "VLM" if escalate else "tesseract", reason,
+                    )
+                    if escalate:
+                        extraction_path_label = "vlm"
+                        loop = asyncio.new_event_loop()
+                        try:
+                            text = loop.run_until_complete(
+                                extract_vlm(
+                                    path, pp.page_index,
+                                    cfg.llm_vlm_url, cfg.llm_vlm_model,
+                                    vlm_semaphore,
+                                    dpi=cfg.vlm_render_dpi,
+                                )
+                            )
+                        finally:
+                            loop.close()
+                    else:
+                        extraction_path_label = "tesseract"
+
+                else:
+                    text = extract_layout(path, pp.page_index, cfg.docling_artifacts_path)
+
+                if not text.strip():
+                    continue
+
+                shard_docs.append(Document(
+                    content=text,
+                    meta={
+                        "split_id":         chunk_offset + len(shard_docs),
+                        "split_idx_start":  0,
+                        "split_idx_end":    len(text),
+                        "bert_token_count": max(1, len(text.split())),
+                        "page":             pp.page_index + 1,
+                        "extraction_path":  extraction_path_label,
+                    },
+                ))
+
+            # Domain classify from first shard's text concatenation
+            if not domain_decided and shard_docs:
+                sample_text = " ".join(d.content or "" for d in shard_docs[:5])[:5000]
+                domain = _classify_domain(sample_text, filename)
+                domain_decided = True
+
+        else:
+            # ── Existing Docling shard path (flag=False) ──────────────────────
+            try:
+                result = converter.convert(path, page_range=page_range)
+            except Exception as e:
+                logger.error(
+                    "Docling conversion failed for shard pages=%d-%d of %s: %s",
+                    start_page, end_page, document_id, e,
+                )
+                raise
+
+            if not domain_decided:
+                sample_text = result.document.export_to_markdown()[:5000]
+                domain = _classify_domain(sample_text, filename)
+                domain_decided = True
+
+            shard_docs = []
+            for raw_chunk in chunker.chunk(dl_doc=result.document):
+                try:
+                    text = chunker.serialize(raw_chunk)
+                except Exception:
+                    text = str(raw_chunk.text or "")
+                if not text.strip():
+                    continue
+                shard_docs.append(Document(
+                    content=text,
+                    meta={
+                        "split_id":         chunk_offset + len(shard_docs),
+                        "split_idx_start":  0,
+                        "split_idx_end":    len(text),
+                        "bert_token_count": max(1, len(text.split())),
+                    },
+                ))
+
+            del result
+            gc.collect()
 
         meta_override = {
             "tenant_id":     tenant_id,
@@ -870,29 +977,6 @@ def _run_pdf_sharded(
             **(extra_meta or {}),
             **effective_acl.to_meta(),
         }
-
-        # Chunk via HybridChunker then build Haystack Documents
-        shard_docs: list[Document] = []
-        for raw_chunk in chunker.chunk(dl_doc=result.document):
-            try:
-                text = chunker.serialize(raw_chunk)
-            except Exception:
-                text = str(raw_chunk.text or "")
-            if not text.strip():
-                continue
-            shard_docs.append(Document(
-                content=text,
-                meta={
-                    "split_id":       chunk_offset + len(shard_docs),
-                    "split_idx_start": 0,
-                    "split_idx_end":   len(text),
-                    "bert_token_count": max(1, len(text.split())),
-                },
-            ))
-
-        # Release conversion result before embedding (frees Docling internals)
-        del result
-        gc.collect()
 
         if shard_docs:
             # Embed + write to Qdrant via the shard ingestion pipeline

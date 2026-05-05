@@ -172,7 +172,7 @@ fi
 
 echo "Starting backing infrastructure services..."
 # shellcheck disable=SC2086
-docker compose $COMPOSE_FILES up -d postgres redis minio qdrant clickhouse langfuse-web langfuse-worker infinity
+docker compose $COMPOSE_FILES up -d postgres redis minio qdrant clickhouse langfuse-web langfuse-worker
 
 log "Waiting for Postgres..."
 for i in $(seq 1 30); do

@@ -6,7 +6,8 @@ docling uses internally). Measures:
   - average text-cell character count (high → digital PDF with embedded text)
   - average bitmap coverage (high → scanned / image-heavy PDF)
 
-Returns a PdfProfile that drives PdfPipelineOptions in pipeline.py.
+Returns a PdfProfile (document-level) and can return per-page PageProfile list
+(for the per-page router in Phase 2/3).
 """
 
 from __future__ import annotations
@@ -118,6 +119,80 @@ def probe_pdf(path: Path) -> PdfProfile:
     except Exception as exc:
         logger.warning("PDF probe failed for %s: %s — defaulting to hybrid", path, exc)
         return PdfProfile(strategy="hybrid", do_ocr=True, force_full_page_ocr=False, force_backend_text=False)
+
+
+def probe_pages(path: Path, page_range: tuple[int, int] | None = None) -> list:
+    """
+    Return a PageProfile for each page in the given range (0-based, inclusive).
+
+    If page_range is None, probe all pages. Imported lazily to avoid circular import
+    with page_router (which must stay import-free from pdf_probe at module level).
+
+    Falls back to an empty list on any error — callers must handle this gracefully.
+    """
+    from .page_router import PageProfile
+
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        return []
+
+    try:
+        doc = pdfium.PdfDocument(str(path))
+        total = len(doc)
+        start, end = (page_range if page_range else (0, total - 1))
+        end = min(end, total - 1)
+
+        profiles: list[PageProfile] = []
+        for idx in range(start, end + 1):
+            page = doc[idx]
+
+            # Text density
+            textpage = page.get_textpage()
+            text = textpage.get_text_range() or ""
+            text_chars = len(text)
+            textpage.close()
+
+            # Approximate page area in points² → normalise text chars
+            width = page.get_width()
+            height = page.get_height()
+            page_area = max(width * height, 1.0)
+            # chars per 1000 pt² → clamp to [0,1]
+            text_density = min(text_chars / (page_area / 1000.0) / 10.0, 1.0)
+
+            # Bitmap coverage
+            bitmap = page.render(scale=0.25)
+            pil_img = bitmap.to_pil()
+            bm_ratio = _bitmap_coverage(pil_img)
+            bitmap.close()
+            page.close()
+
+            # Simple table heuristic: look for | or tab-heavy text, or grid-like patterns
+            has_table_hint = (
+                text.count("|") > 5
+                or text.count("\t") > 10
+                or (text_chars > 50 and text.count("\n") > 5 and text.count("  ") > 10)
+            )
+
+            # Math heuristic: common LaTeX / equation symbols
+            math_symbols = {"=", "∑", "∫", "√", "π", "∆", "α", "β", "γ", "≤", "≥", "∈"}
+            has_math_hint = sum(1 for s in math_symbols if s in text) >= 3
+
+            profiles.append(PageProfile(
+                page_index=idx,
+                text_chars=text_chars,
+                text_density=text_density,
+                bitmap_ratio=bm_ratio,
+                has_table_hint=has_table_hint,
+                has_math_hint=has_math_hint,
+            ))
+
+        doc.close()
+        return profiles
+
+    except Exception as exc:
+        logger.warning("probe_pages failed for %s: %s", path, exc)
+        return []
 
 
 def _bitmap_coverage(pil_img) -> float:

@@ -73,8 +73,23 @@ async def run_stream_worker(settings: Settings) -> None:
     # Per-tenant pending queue for round-robin fairness
     tenant_queues: dict[str, list[tuple[str, dict]]] = {}
 
+    def _dispatch_queued() -> None:
+        """Dispatch all messages currently sitting in tenant_queues (round-robin)."""
+        for t in list(tenant_queues.keys()):
+            if tenant_queues[t]:
+                mid, pld = tenant_queues[t].pop(0)
+                if not tenant_queues[t]:
+                    del tenant_queues[t]
+                # Fire-and-forget: semaphore.acquire is non-blocking if slot available,
+                # otherwise the task will await it internally.
+                task = asyncio.create_task(
+                    _handle_message_with_semaphore(bus, mid, pld, settings, process_pool, semaphore)
+                )
+                pending_tasks.add(task)
+                task.add_done_callback(pending_tasks.discard)
+
     async def _claim_and_requeue() -> None:
-        """Background task: reclaim idle PEL messages and inject into tenant_queues."""
+        """Background task: reclaim idle PEL messages, inject into tenant_queues, and dispatch."""
         while True:
             try:
                 await asyncio.sleep(60)
@@ -90,6 +105,9 @@ async def run_stream_worker(settings: Settings) -> None:
                     logger.info(
                         "XAUTOCLAIM: reclaimed idle message id=%s tenant=%s", msg_id, tenant
                     )
+                if claimed:
+                    # Dispatch claimed messages immediately — don't wait for next XREADGROUP tick
+                    _dispatch_queued()
             except asyncio.CancelledError:
                 return
             except Exception as e:
@@ -106,21 +124,7 @@ async def run_stream_worker(settings: Settings) -> None:
             if tenant not in tenant_queues:
                 tenant_queues[tenant] = []
             tenant_queues[tenant].append((msg_id, payload))
-
-            # Dispatch one message per tenant in round-robin order (fairness)
-            for t in list(tenant_queues.keys()):
-                if tenant_queues[t]:
-                    mid, pld = tenant_queues[t].pop(0)
-                    if not tenant_queues[t]:
-                        del tenant_queues[t]
-
-                    await semaphore.acquire()
-
-                    task = asyncio.create_task(
-                        _handle_message_with_semaphore(bus, mid, pld, settings, process_pool, semaphore)
-                    )
-                    pending_tasks.add(task)
-                    task.add_done_callback(pending_tasks.discard)
+            _dispatch_queued()
 
     except asyncio.CancelledError:
         logger.info("Stream worker shutting down — waiting for in-flight tasks")
@@ -140,6 +144,7 @@ async def _handle_message_with_semaphore(
     process_pool: ThreadPoolExecutor,
     semaphore: asyncio.Semaphore,
 ) -> None:
+    await semaphore.acquire()
     try:
         await _handle_message(bus, msg_id, payload, settings, process_pool)
     finally:

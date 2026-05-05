@@ -92,11 +92,12 @@ class Settings(BaseSettings):
     conversation_summary_threshold: int = 8   # compress when total messages exceed this
     conversation_verbatim_recent: int = 4     # always keep last N messages verbatim
 
-    # ── Reranker — Infinity ONNX server (no in-process JIT, instant startup) ─
-    # Infinity runs as a sidecar container and exposes a Cohere-compatible /rerank.
-    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    reranker_url: str = "http://infinity:7997"
-    use_reranking: bool = True
+    # ── Reranker — LMForge /v1/rerank (oMLX on Mac; replaces Infinity sidecar) ─
+    reranker_model: str = "jina-reranker-v2:multilingual"
+    reranker_url: str = "http://host.docker.internal:11430/v1"
+    # Disabled until an MLX-format reranker is in the LMForge catalog.
+    # Enable by setting USE_RERANKING=true in .env once model is pulled.
+    use_reranking: bool = False
 
     # ── RAG parameters ────────────────────────────────────────────────────────
     rag_retriever_top_k: int = 50

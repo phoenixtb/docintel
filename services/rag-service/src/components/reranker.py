@@ -1,10 +1,10 @@
 """
 Reranker component for Haystack pipelines.
 
-InfinityReranker
-  Calls the Infinity ONNX server's Cohere-compatible /rerank endpoint.
-  Infinity runs as a sidecar container — no in-process model, no JIT cold-start.
-  Scores are already normalised to [0, 1] by Infinity (Cohere format).
+LmforgeReranker
+  Calls LMForge's OpenAI-compatible POST /v1/rerank endpoint.
+  Works with oMLX on Mac (Apple Silicon). Falls back gracefully if LMForge is unavailable.
+  Scores are normalised to [0, 1]; documents returned in descending score order.
 """
 
 import logging
@@ -17,24 +17,21 @@ logger = logging.getLogger(__name__)
 
 
 @component
-class InfinityReranker:
+class LmforgeReranker:
     """
-    Haystack component that calls an Infinity server to rerank documents.
-
-    Infinity exposes a Cohere-compatible POST /rerank endpoint. Scores are
-    written to Document.score; documents are returned in descending score order.
+    Haystack component that calls LMForge /v1/rerank to rerank documents.
 
     Args:
-        url:    Base URL of the Infinity server (e.g. "http://infinity:7997").
-        model:  Reranker model name served by Infinity.
-        top_k:  Maximum number of documents to return after reranking.
+        url:     Base URL of LMForge (e.g. "http://host.docker.internal:11430/v1").
+        model:   Reranker model ID registered in LMForge catalog.
+        top_k:   Maximum number of documents to return after reranking.
         timeout: HTTP request timeout in seconds.
     """
 
     def __init__(
         self,
-        url: str = "http://infinity:7997",
-        model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        url: str = "http://host.docker.internal:11430/v1",
+        model: str = "jina-reranker-v2:multilingual",
         top_k: int = 10,
         timeout: float = 30.0,
     ):
@@ -54,7 +51,6 @@ class InfinityReranker:
             return {"documents": []}
 
         effective_top_k = top_k or self.top_k
-
         doc_texts = [doc.content or "" for doc in documents]
 
         try:
@@ -91,8 +87,11 @@ class InfinityReranker:
             return {"documents": scored}
 
         except httpx.HTTPError as e:
-            logger.error("Infinity reranker request failed: %s — falling back to unranked", e)
-            # Graceful degradation: return documents unranked
-            for i, doc in enumerate(documents[:effective_top_k]):
+            logger.error("LMForge reranker request failed: %s — falling back to unranked", e)
+            for doc in documents[:effective_top_k]:
                 doc.score = doc.score or 0.0
             return {"documents": documents[:effective_top_k]}
+
+
+# Alias kept for backward compatibility during transition
+InfinityReranker = LmforgeReranker

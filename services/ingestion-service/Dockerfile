@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libgl1 \
     libgomp1 \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Layer 1: local common lib (not on PyPI) ──────────────────────────────────
