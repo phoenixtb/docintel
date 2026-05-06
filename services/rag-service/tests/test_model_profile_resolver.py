@@ -21,7 +21,14 @@ from src.components.model_profile_resolver import (
     _match_pattern,
     _merge,
     _row_to_params,
+    infer_kind,
 )
+
+
+def _is_vlm_family(family: str) -> bool:
+    """Helper: structural check for VLM families (no thinking_* params expected)."""
+    f = family.lower()
+    return "vl" in f or "vision" in f
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +90,7 @@ def _make_row(
         "thinking_min_p": None,
         "thinking_budget": None,
         "stream_thinking": None,
+        "kind": None,
     }
     row.update(kwargs)
     return row
@@ -113,6 +121,44 @@ class TestBestMatch:
 
     def test_empty_rows(self):
         assert _best_match("model-a:v1", []) is None
+
+    def test_kind_specific_wildcard_beats_universal(self):
+        """A `kind=vlm` wildcard should win over a `kind=null` universal wildcard
+        even when the universal pattern is longer."""
+        rows = [
+            _make_row("*", temperature=0.5, kind=None),                    # universal
+            _make_row("qwen2.5-vl*", temperature=0.1, kind="vlm"),         # kind-specific
+        ]
+        result = _best_match("qwen2.5-vl:3b:4bit", rows, target_kind="vlm")
+        assert result is not None
+        assert result.temperature == 0.1
+
+    def test_wrong_kind_wildcard_excluded(self):
+        """A `kind=chat` wildcard must NOT apply to a VLM model — even if it matches."""
+        rows = [
+            _make_row("qwen*", temperature=0.7, kind="chat"),
+            _make_row("*",     temperature=0.5, kind=None),
+        ]
+        result = _best_match("qwen2.5-vl:3b:4bit", rows, target_kind="vlm")
+        assert result is not None
+        assert result.temperature == 0.5  # falls through to universal
+
+    def test_universal_wildcard_used_when_no_kind_match(self):
+        rows = [
+            _make_row("*", temperature=0.5, kind=None),
+        ]
+        result = _best_match("anything:1b", rows, target_kind="chat")
+        assert result is not None
+        assert result.temperature == 0.5
+
+    def test_target_kind_none_disables_kind_filter(self):
+        """Backward-compat: when target_kind=None, kind is ignored entirely."""
+        rows = [
+            _make_row("qwen*", temperature=0.7, kind="chat"),
+        ]
+        result = _best_match("qwen2.5-vl:3b", rows, target_kind=None)
+        assert result is not None
+        assert result.temperature == 0.7
 
 
 # ---------------------------------------------------------------------------
@@ -343,18 +389,20 @@ class TestBuiltinProfiles:
                       "thinking_budget", "thinking_repetition_penalty"]:
             assert getattr(p, fname) is None, f"catch-all '{fname}' must be None"
 
-    def test_all_non_catchall_families_have_thinking_temperature(self):
-        """Every explicitly named family must set thinking_temperature (thinking budget is useless without it)."""
+    def test_all_thinking_families_have_thinking_temperature(self):
+        """Every chat/thinking family must set thinking_temperature (thinking budget is
+        useless without it). VLM families (qwen2.5-vl etc.) intentionally omit
+        thinking_* — VLMs don't think — so they're skipped here."""
         for family, p in BUILTIN_PROFILES.items():
-            if family == "*":
+            if family == "*" or _is_vlm_family(family):
                 continue
             assert p.thinking_temperature is not None, (
                 f"BUILTIN_PROFILES['{family}'] missing thinking_temperature"
             )
 
-    def test_all_non_catchall_families_have_thinking_max_tokens(self):
+    def test_all_thinking_families_have_thinking_max_tokens(self):
         for family, p in BUILTIN_PROFILES.items():
-            if family == "*":
+            if family == "*" or _is_vlm_family(family):
                 continue
             assert p.thinking_max_tokens is not None, (
                 f"BUILTIN_PROFILES['{family}'] missing thinking_max_tokens"
@@ -546,3 +594,122 @@ class TestResolveNewFields:
         )
         result = await resolver.resolve(_GENERIC_MODEL, "tenant-a")
         assert result.thinking_frequency_penalty == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# infer_kind — UI metadata helper used to badge / hide form fields
+# ---------------------------------------------------------------------------
+
+class TestInferKind:
+    def test_chat_default(self):
+        assert infer_kind("qwen3.5:4b") == "chat"
+        assert infer_kind("llama3:8b") == "chat"
+
+    def test_vlm_detected_by_vl_substring(self):
+        assert infer_kind("qwen2.5-vl:3b:4bit") == "vlm"
+        assert infer_kind("qwen2.5-vl:7b") == "vlm"
+
+    def test_vlm_detected_by_vision_substring(self):
+        assert infer_kind("phi3-vision:7b") == "vlm"
+
+    def test_embed_detected(self):
+        assert infer_kind("qwen3-embed:0.6b:8bit") == "embed"
+        assert infer_kind("nomic-embed-text:v1") == "embed"
+
+    def test_rerank_detected(self):
+        assert infer_kind("jina-reranker-v2:multilingual") == "rerank"
+        assert infer_kind("bge-reranker-large") == "rerank"
+
+    def test_rerank_takes_precedence_over_embed(self):
+        # Some catalogs name rerankers with both substrings — order matters.
+        assert infer_kind("custom-rerank-embed") == "rerank"
+
+    def test_case_insensitive(self):
+        assert infer_kind("QWEN2.5-VL:7B") == "vlm"
+
+
+# ---------------------------------------------------------------------------
+# qwen2.5-vl builtin — VLM family present, no thinking_* fields
+# ---------------------------------------------------------------------------
+
+class TestVlmBuiltin:
+    def test_qwen25_vl_present(self):
+        """The VLM model family must have a builtin entry so VLM extraction
+        gets sensible defaults even when no DB profile exists."""
+        p = _builtin_for("qwen2.5-vl:3b:4bit")
+        assert p.temperature is not None, "VLM builtin must set temperature"
+        assert p.frequency_penalty is not None, (
+            "VLM builtin must set frequency_penalty (anti-repetition)"
+        )
+
+    def test_qwen25_vl_has_no_thinking_params(self):
+        """VLMs don't think — thinking_* must stay None so the UI can hide them."""
+        p = _builtin_for("qwen2.5-vl:3b:4bit")
+        assert p.thinking_temperature is None
+        assert p.thinking_max_tokens is None
+        assert p.thinking_budget is None
+
+    def test_qwen25_vl_repetition_penalty_above_one(self):
+        """Repetition penalty < 1.0 rewards repetition — invalid for VLM OCR."""
+        p = _builtin_for("qwen2.5-vl:3b:4bit")
+        if p.repetition_penalty is not None:
+            assert p.repetition_penalty >= 1.0
+
+
+# ---------------------------------------------------------------------------
+# kind field — round-trips through DB row to ModelSamplingParams
+# ---------------------------------------------------------------------------
+
+class TestKindField:
+    def test_kind_propagates_from_row(self):
+        row = _make_row("qwen2.5-vl:*", kind="vlm")
+        p = _row_to_params(row)
+        assert p.kind == "vlm"
+
+    def test_kind_null_stays_none(self):
+        """NULL in DB means 'auto-infer at read time' — resolver leaves it None."""
+        row = _make_row("qwen2.5-vl:*")
+        p = _row_to_params(row)
+        assert p.kind is None
+
+    def test_kind_survives_merge_first_non_none_wins(self):
+        a = ModelSamplingParams(kind="vlm")
+        b = ModelSamplingParams(kind="chat")
+        assert _merge(a, b).kind == "vlm"
+        assert _merge(b, a).kind == "chat"
+
+    def test_kind_inherits_when_higher_layer_unset(self):
+        a = ModelSamplingParams()
+        b = ModelSamplingParams(kind="embed")
+        assert _merge(a, b).kind == "embed"
+
+
+# ---------------------------------------------------------------------------
+# resolve_sync — same logic as async resolve, callable from worker threads
+# ---------------------------------------------------------------------------
+
+class TestResolveSync:
+    def test_sync_returns_same_result_as_async(self, resolver):
+        """Sync and async paths share the cache + merge logic — must agree."""
+        _patch_db(
+            resolver,
+            platform_rows=[_make_row("*", temperature=0.4)],
+            tenant_rows=[_make_row("*", frequency_penalty=0.5)],
+        )
+        sync_result = resolver.resolve_sync(_GENERIC_MODEL, "tenant-sync")
+        assert sync_result.temperature == pytest.approx(0.4)
+        assert sync_result.frequency_penalty == pytest.approx(0.5)
+
+    def test_sync_uses_cache_on_second_call(self, resolver):
+        _patch_db(resolver, platform_rows=[], tenant_rows=[])
+        resolver.resolve_sync(_GENERIC_MODEL, "tenant-sync")
+        resolver.resolve_sync(_GENERIC_MODEL, "tenant-sync")
+        assert resolver._fetch_tenant_rows_sync.call_count == 1
+
+    def test_sync_falls_back_to_vlm_builtin(self, resolver):
+        """No DB rows → qwen2.5-vl builtin must kick in via the resolution chain."""
+        _patch_db(resolver, platform_rows=[], tenant_rows=[])
+        result = resolver.resolve_sync("qwen2.5-vl:3b:4bit", "tenant-sync")
+        assert result.frequency_penalty is not None, (
+            "VLM builtin frequency_penalty must reach the caller"
+        )

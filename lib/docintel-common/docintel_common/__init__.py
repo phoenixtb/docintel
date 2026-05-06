@@ -23,6 +23,12 @@ from .security import (
     UserContext,
     clearance_permits,
 )
+from .model_profile_resolver import (
+    BUILTIN_PROFILES,
+    ModelProfileResolver,
+    ModelSamplingParams,
+    infer_kind,
+)
 
 __all__ = [
     "DOMAIN_LABELS",
@@ -53,4 +59,9 @@ __all__ = [
     "DocumentACL",
     "UserContext",
     "RetrievalAuditEvent",
+    # model profile resolver
+    "BUILTIN_PROFILES",
+    "ModelProfileResolver",
+    "ModelSamplingParams",
+    "infer_kind",
 ]

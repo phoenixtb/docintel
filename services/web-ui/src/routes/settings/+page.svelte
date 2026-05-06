@@ -92,18 +92,35 @@
   let updatingRoleFor: string | null = $state(null);
 
   // Model
-  interface ModelInfo { name: string; size?: number; modified_at?: string; supports_thinking?: boolean }
-  interface TenantSettings { llmModel: string | null; effectiveModel: string | null }
+  interface ModelInfo {
+    name: string; size?: number; modified_at?: string;
+    supports_thinking?: boolean; supports_vision?: boolean;
+    is_reranker?: boolean; is_embed?: boolean;
+  }
+  interface TenantSettings {
+    llmModel: string | null;
+    llmVlmModel: string | null;
+    llmRerankModel: string | null;
+    effectiveModel: string | null;
+    effectiveVlmModel: string | null;
+    effectiveRerankModel: string | null;
+  }
   let modelLoading = $state(false);
   let availableModels: ModelInfo[] = $state([]);
   let platformDefaultModel: string | null = $state(null);
   let tenantSettings: TenantSettings | null = $state(null);
-  let selectedModel: string | null = $state(null);   // null = "Platform Default"
-  let modelSaving = $state(false);
+  // Per-kind in-flight selection for the Active Models row dropdowns.
+  // Initialized from activeModels.<kind>.model on load; "Save" diffs against it.
+  let pendingChatModel:   string | null = $state(null);
+  let pendingVlmModel:    string | null = $state(null);
+  let pendingRerankModel: string | null = $state(null);
+  let savingKind: ModelKind | null = $state(null);
+  // Confirm dialog state — generic across kinds now
   let modelConfirmOpen = $state(false);
-  let pendingModel: string | null = $state(null);
+  let pendingModelChange: { kind: ModelKind; model: string | null } | null = $state(null);
 
   // Tenant model profiles
+  type ModelKind = 'chat' | 'vlm' | 'embed' | 'rerank';
   interface ModelProfile {
     id: string; scope: string; tenantId: string | null; modelPattern: string;
     displayName: string | null;
@@ -116,6 +133,7 @@
     thinkingFrequencyPenalty: number | null; thinkingPresencePenalty: number | null;
     thinkingRepetitionPenalty: number | null; thinkingTopK: number | null;
     thinkingMinP: number | null; thinkingBudget: number | null;
+    kind: ModelKind | null;
     notes: string | null;
   }
   const EMPTY_PROFILE_FORM = () => ({
@@ -126,6 +144,7 @@
     thinkingFrequencyPenalty: '', thinkingPresencePenalty: '',
     thinkingRepetitionPenalty: '', thinkingTopK: '', thinkingMinP: '',
     thinkingBudget: '',
+    kind: '' as '' | ModelKind,
     notes: '',
   });
   let tenantProfiles: ModelProfile[] = $state([]);
@@ -135,6 +154,55 @@
   let profileForm = $state(EMPTY_PROFILE_FORM());
   let profileSaving = $state(false);
   let profileDeleteConfirmId: string | null = $state(null);
+  // When opened via "Tune…" from the Active Models panel, modelPattern + kind are locked
+  // so the user can't accidentally retarget the override at a different model.
+  let profileLockedFromActive = $state(false);
+
+  // Active models — DB-resolved chat/vlm/embed/rerank for the "Active Models" panel.
+  // admin-service computes: platform override → tenant pref → env fallback.
+  interface ActiveModelInfo {
+    model: string | null;
+    kind: ModelKind;
+    source: 'platform' | 'tenant' | 'env' | 'none';
+    envFallback: string | null;
+    tunable: boolean;
+    disabled: boolean;
+  }
+  interface ActiveModels {
+    chat: ActiveModelInfo; vlm: ActiveModelInfo;
+    embed: ActiveModelInfo; rerank: ActiveModelInfo;
+  }
+  let activeModels: ActiveModels | null = $state(null);
+
+  // Map source to a small badge displayed next to the resolved model id.
+  const SOURCE_META: Record<ActiveModelInfo['source'], { label: string; tooltip: string; cls: string }> = {
+    platform: { label: 'Platform',  tooltip: 'Set by platform admin — overrides tenant choice for all tenants',                                cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 border-amber-200 dark:border-amber-700/40' },
+    tenant:   { label: 'Tenant',    tooltip: 'Tenant preference — saved by a tenant admin',                                                    cls: 'bg-blue-100  text-blue-800  dark:bg-blue-900/30  dark:text-blue-300  border-blue-200  dark:border-blue-700/40'  },
+    env:      { label: 'Env',       tooltip: 'Deployment default from LLM_*_MODEL — no platform/tenant override set',                          cls: 'bg-gray-100  text-gray-700  dark:bg-gray-700/40   dark:text-gray-300  border-gray-200  dark:border-gray-700/40'  },
+    none:     { label: 'Unset',     tooltip: 'No model configured for this kind',                                                              cls: 'bg-red-100   text-red-700   dark:bg-red-900/30    dark:text-red-300   border-red-200   dark:border-red-700/40'   },
+  };
+
+  // Mirrors backend `infer_kind` (lib/docintel-common/.../model_profile_resolver.py).
+  // Used to badge / colour rows whose `kind` column is null in the DB.
+  function inferKind(modelNameOrPattern: string | null | undefined): ModelKind {
+    const s = (modelNameOrPattern ?? '').toLowerCase();
+    if (s.includes('rerank')) return 'rerank';
+    if (s.includes('embed')) return 'embed';
+    if (s.includes('-vl') || s.includes(':vl') || s.includes('vision') || s.startsWith('vl')) return 'vlm';
+    return 'chat';
+  }
+
+  // UI metadata for each kind — single source of truth for badge color / icon / label.
+  const KIND_META: Record<ModelKind, { label: string; icon: string; badge: string }> = {
+    chat:   { label: 'Chat',   icon: '💬', badge: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300 border-blue-200 dark:border-blue-700/40' },
+    vlm:    { label: 'VLM',    icon: '📷', badge: 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300 border-purple-200 dark:border-purple-700/40' },
+    embed:  { label: 'Embed',  icon: '🔤', badge: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300 border-green-200 dark:border-green-700/40' },
+    rerank: { label: 'Rerank', icon: '🎯', badge: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 border-amber-200 dark:border-amber-700/40' },
+  };
+
+  // Roles that have sampling params worth tuning (chat reasoning, VLM OCR).
+  // Embed / rerank ignore them — show "— fixed —" instead of a Tune button.
+  const TUNABLE_KINDS: ReadonlyArray<ModelKind> = ['chat', 'vlm'];
 
   // The tenant's * wildcard profile — the "tenant defaults" that are always edited in-place.
   let wildcardProfile = $derived(tenantProfiles.find(p => p.modelPattern === '*') ?? null);
@@ -294,17 +362,16 @@
   let clearingResolverCache = $state(false);
   let semanticCacheConfirmOpen = $state(false);
 
-  // Platform admin has a global override when effectiveModel differs from tenant's own llmModel
-  let isPlatformControlled = $derived(
-    tenantSettings != null &&
-    tenantSettings.effectiveModel !== null &&
-    tenantSettings.effectiveModel !== tenantSettings.llmModel
-  );
+  // Per-row "platform locked" — the chat row is locked when a platform
+  // admin set a global llm_model override. Same idea applies to vlm/rerank.
+  function isPlatformLocked(kind: ModelKind): boolean {
+    return activeModels?.[kind].source === 'platform';
+  }
 
-  // Whether the currently selected/active model supports thinking
-  let effectiveModelName = $derived(tenantSettings?.effectiveModel ?? selectedModel ?? platformDefaultModel ?? '');
-  let activeModelSupportsThinking = $derived(
-    availableModels.find(m => m.name === effectiveModelName)?.supports_thinking ?? false
+  // Does the **chat** model currently in use support thinking? Drives the
+  // small thinking toggle that lives on the chat row.
+  let activeChatModelSupportsThinking = $derived(
+    availableModels.find(m => m.name === activeModels?.chat.model)?.supports_thinking ?? false
   );
 
   const tenantId = getTenantId();
@@ -606,10 +673,12 @@
   async function loadModel() {
     modelLoading = true;
     try {
-      const [modelsRes, settingsRes, profilesRes] = await Promise.all([
+      const [modelsRes, settingsRes, profilesRes, activeRes, prefsRes] = await Promise.all([
         apiFetch('/api/v1/models'),
         apiFetch(`/api/v1/tenants/${tenantId}/settings`),
         isAdmin ? apiFetch(`/api/v1/tenants/${tenantId}/model-profiles`) : Promise.resolve(null),
+        apiFetch('/api/v1/admin/active-models'),
+        apiFetch('/api/v1/users/me/preferences'),
       ]);
       if (modelsRes.ok) {
         const data = await modelsRes.json();
@@ -618,12 +687,23 @@
       }
       if (settingsRes.ok) {
         tenantSettings = await settingsRes.json();
-        selectedModel = tenantSettings?.llmModel ?? tenantSettings?.effectiveModel ?? platformDefaultModel ?? null;
       }
       if (profilesRes?.ok) {
         tenantProfiles = await profilesRes.json();
         const wp = tenantProfiles.find(p => p.modelPattern === '*');
         if (wp) syncDefaultsForm(wp);
+      }
+      if (activeRes.ok) {
+        activeModels = await activeRes.json();
+        // Seed per-kind dropdowns to the currently effective model so "Save"
+        // is a no-op until the user actually changes selection.
+        pendingChatModel   = activeModels?.chat.model   ?? null;
+        pendingVlmModel    = activeModels?.vlm.model    ?? null;
+        pendingRerankModel = activeModels?.rerank.model ?? null;
+      }
+      if (prefsRes.ok) {
+        userPreferences = await prefsRes.json();
+        thinkingMode = userPreferences?.thinkingMode ?? false;
       }
     } catch (e) {
       toast.error(`Failed to load model settings: ${e}`);
@@ -631,16 +711,86 @@
     modelLoading = false;
   }
 
+  // Models the dropdown for a given kind should offer. Filters by capability
+  // flags from /api/v1/models. Always includes the currently active model in
+  // case it isn't reported by LMForge (e.g. server hot-swapped).
+  function modelOptionsFor(kind: ModelKind, currentlyActive: string | null): ModelInfo[] {
+    const matches = (m: ModelInfo) => {
+      if (kind === 'chat')   return !m.is_embed && !m.is_reranker && !m.supports_vision;
+      if (kind === 'vlm')    return m.supports_vision === true;
+      if (kind === 'rerank') return m.is_reranker === true;
+      if (kind === 'embed')  return m.is_embed === true;
+      return false;
+    };
+    const out = availableModels.filter(matches);
+    if (currentlyActive && !out.some(m => m.name === currentlyActive)) {
+      out.unshift({ name: currentlyActive });
+    }
+    return out;
+  }
+
   function openCreateProfileModal() {
     profileModalMode = 'create';
     editingProfileId = null;
     profileForm = EMPTY_PROFILE_FORM();
+    profileLockedFromActive = false;
+    resolvedPlaceholders = {};   // no model id yet → no placeholders
     profileModalOpen = true;
   }
+
+  /**
+   * Open the override modal for a specific active model. If a tenant override
+   * already exists for this exact model id, edit it; otherwise create a new
+   * one with `modelPattern` and `kind` pre-filled and locked. The lock
+   * prevents accidental retargeting from the Tune flow — explicit "Add
+   * Override" is still available for unconstrained edits.
+   */
+  function openTuneModalFor(modelId: string, kind: ModelKind) {
+    // Always pre-load effective resolved values for the placeholder hints,
+    // regardless of whether a tenant override already exists.
+    loadResolvedPlaceholders(modelId);
+    const existing = tenantProfiles.find(
+      p => p.modelPattern.toLowerCase() === modelId.toLowerCase()
+    );
+    if (existing) {
+      openEditProfileModal(existing);
+      profileLockedFromActive = true;
+      return;
+    }
+    profileModalMode = 'create';
+    editingProfileId = null;
+    profileForm = EMPTY_PROFILE_FORM();
+    profileForm.modelPattern = modelId;
+    profileForm.kind = kind;
+    profileLockedFromActive = true;
+    profileModalOpen = true;
+  }
+
+  /**
+   * "Sampling-relevant" iff the kind has at least one knob worth saving.
+   * Embed/rerank profiles are bookkeeping only — Display Name + Notes.
+   */
+  function kindHasSamplingFields(k: '' | ModelKind): boolean {
+    return k === '' || k === 'chat' || k === 'vlm';
+  }
+  function kindHasThinkingFields(k: '' | ModelKind): boolean {
+    return k === '' || k === 'chat';
+  }
+  // The kind actually shown in the modal — explicit form value, or inferred
+  // from the pattern if user left the dropdown on "Auto".
+  let modalEffectiveKind = $derived<ModelKind>(
+    profileForm.kind || inferKind(profileForm.modelPattern)
+  );
 
   function openEditProfileModal(p: ModelProfile) {
     profileModalMode = 'edit';
     editingProfileId = p.id;
+    // For editing existing profiles via the table (not the Tune flow),
+    // resolve placeholders based on the pattern itself so blank fields show
+    // what they would inherit from the next layer down.
+    if (Object.keys(resolvedPlaceholders).length === 0) {
+      loadResolvedPlaceholders(p.modelPattern);
+    }
     const s = (v: number | null) => v != null ? String(v) : '';
     profileForm = {
       modelPattern:              p.modelPattern,
@@ -662,34 +812,43 @@
       thinkingTopK:              s(p.thinkingTopK),
       thinkingMinP:              s(p.thinkingMinP),
       thinkingBudget:            s(p.thinkingBudget),
+      kind:                      p.kind ?? '',
       notes:                     p.notes ?? '',
     };
+    profileLockedFromActive = false;
     profileModalOpen = true;
   }
 
   function profileFormBody() {
     const num = (v: string | number) => typeof v === 'number' ? (isNaN(v) ? null : v) : (v.trim() === '' ? null : Number(v));
     const int = (v: string | number) => typeof v === 'number' ? (isNaN(v) ? null : Math.round(v)) : (v.trim() === '' ? null : parseInt(v));
+    // Strip out fields that don't belong to this kind so save can't accidentally
+    // persist stale Standard/Thinking values if the user switched kinds in-place.
+    const k = modalEffectiveKind;
+    const includeStandard = kindHasSamplingFields(k);
+    const includeThinking = kindHasThinkingFields(k);
     return {
       modelPattern:              profileForm.modelPattern.trim(),
       displayName:               profileForm.displayName.trim() || null,
-      temperature:               num(profileForm.temperature),
-      topP:                      num(profileForm.topP),
-      maxTokens:                 int(profileForm.maxTokens),
-      frequencyPenalty:          num(profileForm.frequencyPenalty),
-      presencePenalty:           num(profileForm.presencePenalty),
-      repetitionPenalty:         num(profileForm.repetitionPenalty),
-      topK:                      int(profileForm.topK),
-      minP:                      num(profileForm.minP),
-      thinkingTemperature:       num(profileForm.thinkingTemperature),
-      thinkingTopP:              num(profileForm.thinkingTopP),
-      thinkingMaxTokens:         int(profileForm.thinkingMaxTokens),
-      thinkingFrequencyPenalty:  num(profileForm.thinkingFrequencyPenalty),
-      thinkingPresencePenalty:   num(profileForm.thinkingPresencePenalty),
-      thinkingRepetitionPenalty: num(profileForm.thinkingRepetitionPenalty),
-      thinkingTopK:              int(profileForm.thinkingTopK),
-      thinkingMinP:              num(profileForm.thinkingMinP),
-      thinkingBudget:            int(profileForm.thinkingBudget),
+      temperature:               includeStandard ? num(profileForm.temperature) : null,
+      topP:                      includeStandard ? num(profileForm.topP) : null,
+      maxTokens:                 includeStandard ? int(profileForm.maxTokens) : null,
+      frequencyPenalty:          includeStandard ? num(profileForm.frequencyPenalty) : null,
+      presencePenalty:           includeStandard ? num(profileForm.presencePenalty) : null,
+      repetitionPenalty:         includeStandard ? num(profileForm.repetitionPenalty) : null,
+      topK:                      includeStandard ? int(profileForm.topK) : null,
+      minP:                      includeStandard ? num(profileForm.minP) : null,
+      thinkingTemperature:       includeThinking ? num(profileForm.thinkingTemperature) : null,
+      thinkingTopP:              includeThinking ? num(profileForm.thinkingTopP) : null,
+      thinkingMaxTokens:         includeThinking ? int(profileForm.thinkingMaxTokens) : null,
+      thinkingFrequencyPenalty:  includeThinking ? num(profileForm.thinkingFrequencyPenalty) : null,
+      thinkingPresencePenalty:   includeThinking ? num(profileForm.thinkingPresencePenalty) : null,
+      thinkingRepetitionPenalty: includeThinking ? num(profileForm.thinkingRepetitionPenalty) : null,
+      thinkingTopK:              includeThinking ? int(profileForm.thinkingTopK) : null,
+      thinkingMinP:              includeThinking ? num(profileForm.thinkingMinP) : null,
+      thinkingBudget:            includeThinking ? int(profileForm.thinkingBudget) : null,
+      // Empty string ('Auto') → null so backend auto-infers from pattern.
+      kind:                      profileForm.kind === '' ? null : profileForm.kind,
       notes:                     profileForm.notes.trim() || null,
     };
   }
@@ -774,35 +933,91 @@
     thinkingSaving = false;
   }
 
-  function requestModelChange(model: string | null) {
-    pendingModel = model;
+  // Active Models row save flow: PATCH only the changed field, but include
+  // current values for the other two so the backend's full-replace semantics
+  // don't accidentally clear them.
+  function requestActiveModelChange(kind: ModelKind, model: string | null) {
+    pendingModelChange = { kind, model };
     modelConfirmOpen = true;
   }
 
-  async function confirmModelChange() {
+  async function confirmActiveModelChange() {
     modelConfirmOpen = false;
-    modelSaving = true;
+    if (!pendingModelChange || !tenantSettings) return;
+    const { kind, model } = pendingModelChange;
+    savingKind = kind;
     try {
-      // 1. Update tenant model preference
+      const body = {
+        llmModel:       kind === 'chat'   ? model : tenantSettings.llmModel,
+        llmVlmModel:    kind === 'vlm'    ? model : tenantSettings.llmVlmModel,
+        llmRerankModel: kind === 'rerank' ? model : tenantSettings.llmRerankModel,
+      };
       const res = await apiFetch(`/api/v1/tenants/${tenantId}/settings`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ llmModel: pendingModel }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(`${res.status}`);
 
-      // 2. Invalidate semantic cache + rag-service resolver cache
-      await apiFetch(`/api/v1/admin/cache/clear/${tenantId}`, { method: 'POST' });
-      await apiFetch(`/api/v1/tenants/${tenantId}/settings/invalidate-cache`, { method: 'DELETE' });
+      // Chat-model changes invalidate semantic cache + rag-service resolver
+      // cache. VLM/rerank changes only need their own service caches busted —
+      // ingestion reads the model fresh per-request so no cache there.
+      if (kind === 'chat') {
+        await apiFetch(`/api/v1/admin/cache/clear/${tenantId}`, { method: 'POST' });
+        await apiFetch(`/api/v1/tenants/${tenantId}/settings/invalidate-cache`, { method: 'DELETE' });
+      }
 
-      selectedModel = pendingModel;
       tenantSettings = await res.json();
-      toast.success('Model updated and cache cleared.');
+      // Refresh active-models so source badges + dropdowns reflect new state.
+      const ar = await apiFetch('/api/v1/admin/active-models');
+      if (ar.ok) {
+        activeModels = await ar.json();
+        pendingChatModel   = activeModels?.chat.model   ?? null;
+        pendingVlmModel    = activeModels?.vlm.model    ?? null;
+        pendingRerankModel = activeModels?.rerank.model ?? null;
+      }
+      toast.success(`${KIND_META[kind].label} model updated.`);
     } catch (e) {
-      toast.error(`Failed to update model: ${e}`);
+      toast.error(`Failed: ${e}`);
     }
-    modelSaving = false;
-    pendingModel = null;
+    savingKind = null;
+    pendingModelChange = null;
+  }
+
+  // Pre-fill the Tune modal with the **fully resolved** values from the
+  // backend (tenant DB → platform DB → built-in → env), shown as placeholders
+  // on each input. Keeping inputs blank means "inherit from this resolution
+  // chain", so placeholder = effective default the user is overriding.
+  let resolvedPlaceholders = $state<Record<string, string>>({});
+  let resolvedLoading = $state(false);
+
+  async function loadResolvedPlaceholders(modelId: string) {
+    resolvedPlaceholders = {};
+    if (!modelId) return;
+    resolvedLoading = true;
+    try {
+      const res = await apiFetch(
+        `/api/v1/tenants/${tenantId}/model-profiles/resolve?model=${encodeURIComponent(modelId)}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const m: Record<string, string> = {};
+        for (const [k, v] of Object.entries(data)) {
+          if (v != null && k !== 'model' && k !== 'tenant_id') {
+            m[k] = String(v);
+          }
+        }
+        resolvedPlaceholders = m;
+      }
+    } catch { /* placeholders are best-effort; modal still opens */ }
+    resolvedLoading = false;
+  }
+
+  function placeholderFor(field: string): string {
+    // Convert camelCase form keys to snake_case keys returned by /resolve.
+    const snake = field.replace(/[A-Z]/g, c => '_' + c.toLowerCase());
+    const v = resolvedPlaceholders[snake];
+    return v ?? '';
   }
 
   async function loadCache() {
@@ -1425,70 +1640,172 @@
       {:else}
         <div class="space-y-6">
 
-          <!-- Platform override notice -->
-          {#if isPlatformControlled}
-            <div class="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/40 rounded-lg px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
-              <span class="font-semibold">Platform controlled:</span> The platform administrator has set a global model override.
-              Your tenant is currently using <span class="font-mono font-medium">{tenantSettings?.effectiveModel}</span>.
-              Contact your platform administrator to change this.
+          <!-- Active Models — single source of truth.
+               Each row shows the **resolved** model (platform > tenant > env)
+               with a source badge, an editable dropdown (when tunable + not
+               platform-locked), a Save button, and a Tune button for sampling
+               overrides. The chat row also hosts the personal Thinking Mode
+               toggle since it only makes sense alongside the chat model. -->
+          {#if activeModels && isAdmin}
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+              <div class="mb-4">
+                <h3 class="text-base font-semibold text-gray-900 dark:text-white">Active Models</h3>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  Models currently in use across the stack. Change the dropdown then click <span class="font-medium">Save</span>
+                  to update your tenant's preference. Click <span class="font-medium">Tune sampling…</span> to override
+                  per-model sampling parameters (temperature, max tokens, etc.) for the selected model.
+                </p>
+              </div>
+
+              <div class="divide-y divide-gray-100 dark:divide-gray-700">
+                {#each [
+                  { am: activeModels.chat,   pending: pendingChatModel,   setter: (v: string|null) => pendingChatModel   = v },
+                  { am: activeModels.vlm,    pending: pendingVlmModel,    setter: (v: string|null) => pendingVlmModel    = v },
+                  { am: activeModels.embed,  pending: null,                setter: (_: string|null) => {} },
+                  { am: activeModels.rerank, pending: pendingRerankModel, setter: (v: string|null) => pendingRerankModel = v },
+                ] as { am, pending, setter }}
+                  {@const meta = KIND_META[am.kind]}
+                  {@const srcMeta = SOURCE_META[am.source]}
+                  {@const platformLocked = am.source === 'platform'}
+                  {@const opts = modelOptionsFor(am.kind, am.model)}
+                  {@const dirty = am.tunable && pending !== am.model}
+                  {@const hasOverride = !!(am.model && tenantProfiles.find(p => p.modelPattern.toLowerCase() === am.model!.toLowerCase()))}
+
+                  <div class="py-4">
+                    <!-- Header row: icon + label + source badge -->
+                    <div class="flex items-center gap-3">
+                      <span class="text-xl leading-none w-6 text-center" aria-hidden="true">{meta.icon}</span>
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <p class="text-sm font-semibold text-gray-900 dark:text-white">{meta.label}</p>
+                          <span class="text-[10px] uppercase tracking-wide text-gray-400 dark:text-gray-500">{am.kind}</span>
+                          {#if !am.disabled}
+                            <span class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded border {srcMeta.cls}"
+                                  title={srcMeta.tooltip}>{srcMeta.label}</span>
+                          {/if}
+                          {#if !am.tunable}
+                            <span class="text-[10px] text-gray-400" title="Embedding model is locked to the deployment env — changing it would invalidate every existing vector.">🔒 env-locked</span>
+                          {/if}
+                          {#if hasOverride && am.tunable}
+                            <span class="text-[10px] text-blue-600 dark:text-blue-400" title="A sampling override exists for this exact model id">⚙ custom sampling</span>
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Body row: dropdown + Save + Tune -->
+                    <div class="mt-2 ml-9 flex items-end gap-2 flex-wrap">
+                      <div class="flex-1 min-w-[260px]">
+                        {#if am.disabled}
+                          <span class="inline-flex items-center px-2 py-1 text-xs font-medium rounded border bg-gray-100 text-gray-500 border-gray-200 dark:bg-gray-700/40 dark:text-gray-400 dark:border-gray-700">
+                            disabled in this deployment
+                          </span>
+                        {:else if !am.tunable}
+                          <p class="font-mono text-sm text-gray-900 dark:text-white truncate" title={am.model ?? ''}>
+                            {am.model ?? '—'}
+                          </p>
+                          <p class="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5">
+                            Set via <span class="font-mono">LLM_EMBED_MODEL</span> env var.
+                          </p>
+                        {:else}
+                          <select
+                            value={pending}
+                            onchange={(e) => setter((e.currentTarget as HTMLSelectElement).value || null)}
+                            disabled={platformLocked || savingKind === am.kind}
+                            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed font-mono"
+                          >
+                            {#each opts as opt}
+                              <option value={opt.name}>{opt.name}</option>
+                            {/each}
+                            {#if opts.length === 0}
+                              <option value="" disabled>No matching models reported by LMForge</option>
+                            {/if}
+                          </select>
+                          {#if platformLocked}
+                            <p class="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
+                              Platform admin has locked this model — your tenant preference is ignored until they clear the override.
+                            </p>
+                          {:else if am.envFallback && am.source === 'env'}
+                            <p class="text-[11px] text-gray-400 dark:text-gray-500 mt-1">
+                              Currently inheriting deployment default <span class="font-mono">{am.envFallback}</span>.
+                            </p>
+                          {/if}
+                        {/if}
+                      </div>
+
+                      {#if am.tunable && !am.disabled}
+                        <button
+                          onclick={() => requestActiveModelChange(am.kind, pending)}
+                          disabled={platformLocked || !dirty || savingKind === am.kind}
+                          class="px-3 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {savingKind === am.kind ? 'Saving…' : 'Save'}
+                        </button>
+                        {#if TUNABLE_KINDS.includes(am.kind) && am.model}
+                          <button
+                            onclick={() => openTuneModalFor(am.model!, am.kind)}
+                            class="px-3 py-2 text-xs font-medium rounded-lg border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+                            title="Override sampling parameters (temperature, max tokens, etc.) for this exact model id"
+                          >{hasOverride ? 'Edit sampling…' : 'Tune sampling…'}</button>
+                        {/if}
+                      {/if}
+                    </div>
+
+                    <!-- Chat row only: Thinking Mode toggle (personal preference) -->
+                    {#if am.kind === 'chat' && !am.disabled}
+                      <div class="mt-3 ml-9 flex items-start gap-3 px-3 py-2 rounded-lg bg-gray-50 dark:bg-gray-700/30 border border-gray-200 dark:border-gray-700">
+                        <button
+                          role="switch"
+                          aria-checked={thinkingMode}
+                          disabled={!activeChatModelSupportsThinking || thinkingSaving}
+                          onclick={() => saveThinkingMode(!thinkingMode)}
+                          class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent
+                            transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2
+                            disabled:opacity-40 disabled:cursor-not-allowed mt-0.5
+                            {thinkingMode && activeChatModelSupportsThinking ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}"
+                        >
+                          <span class="pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow ring-0
+                            transition duration-200 ease-in-out
+                            {thinkingMode && activeChatModelSupportsThinking ? 'translate-x-4' : 'translate-x-0'}"></span>
+                        </button>
+                        <div class="flex-1">
+                          <div class="flex items-center gap-2 flex-wrap">
+                            <p class="text-sm font-medium text-gray-900 dark:text-white">Thinking Mode</p>
+                            <span class="text-[10px] uppercase tracking-wide text-gray-400 dark:text-gray-500" title="Per-user preference (not shared across your tenant)">personal</span>
+                          </div>
+                          <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                            {#if !activeChatModelSupportsThinking}
+                              <span class="text-amber-600 dark:text-amber-400">{am.model} doesn't support thinking mode.</span>
+                            {:else}
+                              When enabled, the chat model reasons step-by-step before answering. Better for complex questions; slower for simple lookups.
+                            {/if}
+                          </p>
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
             </div>
           {/if}
 
-          <!-- Model selector -->
-          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-            <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">LLM Model</h3>
-            <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Select the language model used for answering queries in your tenant.
-              Changing the model will invalidate the semantic cache — cached responses will be regenerated.
-            </p>
-
-            <div class="flex items-end gap-3">
-              <div class="flex-1">
-                <label for="model-select" class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">
-                  Model
-                </label>
-                <select
-                  id="model-select"
-                  disabled={isPlatformControlled || modelSaving}
-                  bind:value={selectedModel}
-                  class="w-full rounded-lg border border-gray-300 dark:border-gray-600
-                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
-                    px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500
-                    disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {#each availableModels as model}
-                    <option value={model.name}>
-                      {model.name}{model.name === platformDefaultModel ? ' (Platform Default)' : ''}
-                    </option>
-                  {/each}
-                </select>
-              </div>
-              <button
-                onclick={() => requestModelChange(selectedModel)}
-                disabled={isPlatformControlled || modelSaving || selectedModel === (tenantSettings?.llmModel ?? tenantSettings?.effectiveModel ?? platformDefaultModel)}
-                class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white
-                  hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {modelSaving ? 'Saving...' : 'Save'}
-              </button>
-            </div>
-
-            {#if tenantSettings?.effectiveModel}
-              <p class="text-xs text-gray-400 mt-3">
-                Currently active: <span class="font-mono">{tenantSettings.effectiveModel}</span>
-              </p>
-            {/if}
-          </div>
-
-          <!-- Tenant Defaults — inline editable * wildcard (tenant_admin only) -->
+          <!-- Tenant Defaults — universal `*` wildcard (tenant_admin only).
+               These are the fallback sampling values when no model-specific
+               or kind-specific override matches. The universal nature is
+               intentional — most users want one set of defaults that applies
+               to whichever model they happen to be running. For per-kind
+               defaults (e.g. VLM-only), add a kind=vlm wildcard via the
+               "Model-specific Overrides" panel below using pattern like
+               `qwen2.5-vl*` with kind=VLM. -->
           {#if isAdmin}
             <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
               <div class="flex items-center justify-between mb-1">
                 <div>
-                  <h3 class="text-base font-semibold text-gray-900 dark:text-white">Tenant Defaults</h3>
+                  <h3 class="text-base font-semibold text-gray-900 dark:text-white">Tenant Defaults <span class="text-xs font-normal text-gray-400">(universal fallback)</span></h3>
                   <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                    Sampling parameters applied to all models for this tenant.
-                    Changes affect only this tenant and are stored in DB.
+                    Sampling parameters used when no model-specific override matches.
+                    Applies to <span class="font-medium">chat and VLM</span> models — embedding and reranker models ignore these.
+                    For VLM-only or chat-only defaults, create an entry below with a wildcard pattern (e.g. <span class="font-mono">qwen2.5-vl*</span>) and pick the matching <span class="font-medium">Kind</span>.
                   </p>
                 </div>
                 {#if wildcardProfile}
@@ -1652,6 +1969,7 @@
                     <thead class="border-b border-gray-200 dark:border-gray-700">
                       <tr>
                         <th class="text-left py-2 font-medium text-gray-600 dark:text-gray-400 pr-4">Pattern</th>
+                        <th class="text-left py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Kind</th>
                         <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Temp</th>
                         <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Think Temp</th>
                         <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Think TopP</th>
@@ -1662,8 +1980,16 @@
                     </thead>
                     <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
                       {#each specificProfiles as p}
+                        {@const rowKind = p.kind ?? inferKind(p.modelPattern)}
+                        {@const rowMeta = KIND_META[rowKind]}
                         <tr>
                           <td class="py-2 font-mono text-gray-900 dark:text-white pr-4">{p.modelPattern}</td>
+                          <td class="py-2 pr-3">
+                            <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded border {rowMeta.badge}"
+                                  title={p.kind ? `Explicit kind: ${rowKind}` : `Auto-inferred from pattern: ${rowKind}`}>
+                              {rowMeta.label}{!p.kind ? ' (auto)' : ''}
+                            </span>
+                          </td>
                           <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.temperature ?? '—'}</td>
                           <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.thinkingTemperature ?? '—'}</td>
                           <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.thinkingTopP ?? '—'}</td>
@@ -1873,53 +2199,19 @@
       </div>
     {/if}
 
-    <!-- Preferences Tab -->
+    <!-- Preferences Tab — Thinking Mode moved to the chat row of Active Models
+         since it only ever applied to the chat model. This tab is kept as a
+         placeholder for future per-user preferences that aren't tied to a
+         specific model (e.g. UI theme, notification frequency). -->
     {#if activeTab === 'preferences'}
-      {#if preferencesLoading}
-        <div class="text-center py-12 text-gray-400">Loading...</div>
-      {:else}
-        <div class="space-y-6">
-          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-            <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Personal Preferences</h3>
-            <p class="text-sm text-gray-500 dark:text-gray-400 mb-6">
-              These settings apply only to your account — they do not affect other users in your tenant.
-            </p>
-
-            <!-- Thinking Mode -->
-            <div class="flex items-start justify-between gap-4">
-              <div class="flex-1">
-                <p class="text-sm font-medium text-gray-900 dark:text-white mb-1">Thinking Mode</p>
-                <p class="text-sm text-gray-500 dark:text-gray-400">
-                  When enabled, the model reasons step-by-step before answering (shown in a collapsible panel).
-                  Best for complex multi-step analysis. For straightforward factual retrieval, keeping this
-                  <span class="font-medium">off</span> reduces latency.
-                </p>
-                {#if !activeModelSupportsThinking}
-                  <p class="text-xs text-amber-600 dark:text-amber-400 mt-2">
-                    The active model does not support thinking mode.
-                  </p>
-                {/if}
-              </div>
-              <button
-                role="switch"
-                aria-checked={thinkingMode}
-                disabled={!activeModelSupportsThinking || thinkingSaving}
-                onclick={() => saveThinkingMode(!thinkingMode)}
-                class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent
-                  transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2
-                  disabled:opacity-40 disabled:cursor-not-allowed mt-0.5
-                  {thinkingMode && activeModelSupportsThinking ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}"
-              >
-                <span
-                  class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0
-                    transition duration-200 ease-in-out
-                    {thinkingMode && activeModelSupportsThinking ? 'translate-x-5' : 'translate-x-0'}"
-                ></span>
-              </button>
-            </div>
-          </div>
-        </div>
-      {/if}
+      <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 text-sm text-gray-500 dark:text-gray-400">
+        <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Personal Preferences</h3>
+        <p>
+          Thinking Mode now lives next to the chat model in the
+          <button class="text-blue-600 dark:text-blue-400 hover:underline" onclick={() => switchTab('model')}>Model</button> tab.
+          No other personal preferences are configurable yet.
+        </p>
+      </div>
     {/if}
 
     <!-- Cache Tab -->
@@ -2012,12 +2304,16 @@
 
 <ConfirmDialog
   open={modelConfirmOpen}
-  title="Change LLM model?"
-  message={`This will update the active model to "${pendingModel}" and clear the semantic cache for your tenant. Cached responses will be regenerated on the next query. Proceed?`}
-  confirmLabel="Change & Clear Cache"
+  title={pendingModelChange ? `Change ${KIND_META[pendingModelChange.kind].label} model?` : 'Change model?'}
+  message={pendingModelChange
+    ? (pendingModelChange.kind === 'chat'
+        ? `This will update the chat model to "${pendingModelChange.model}" and clear the semantic cache for your tenant. Cached responses will be regenerated on the next query. Proceed?`
+        : `This will update the ${KIND_META[pendingModelChange.kind].label.toLowerCase()} model to "${pendingModelChange.model}". The next ${pendingModelChange.kind === 'vlm' ? 'document upload' : 'query'} will use the new model. Proceed?`)
+    : ''}
+  confirmLabel={pendingModelChange?.kind === 'chat' ? 'Change & Clear Cache' : 'Change'}
   dangerous={false}
-  onconfirm={confirmModelChange}
-  oncancel={() => { modelConfirmOpen = false; pendingModel = null; }}
+  onconfirm={confirmActiveModelChange}
+  oncancel={() => { modelConfirmOpen = false; pendingModelChange = null; }}
 />
 
 <ConfirmDialog
@@ -2045,9 +2341,16 @@
   <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onclick={() => { profileModalOpen = false; }}>
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
     <div class="bg-white dark:bg-gray-900 rounded-xl shadow-2xl w-full max-w-2xl mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto" onclick={(e) => e.stopPropagation()}>
-      <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
-        {profileModalMode === 'create' ? 'Add Sampling Override' : 'Edit Sampling Override'}
-      </h2>
+      <div class="flex items-center justify-between">
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+          {profileModalMode === 'create' ? 'Add Sampling Override' : 'Edit Sampling Override'}
+        </h2>
+        {#if profileLockedFromActive}
+          <span class="text-[10px] font-medium uppercase tracking-wide px-2 py-0.5 rounded border bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-700/40">
+            From Active Models
+          </span>
+        {/if}
+      </div>
 
       <div class="grid grid-cols-2 gap-3">
         <div class="col-span-2">
@@ -2056,104 +2359,93 @@
             <span class="ml-1 text-gray-400">(e.g. <span class="font-mono">qwen3*</span> or <span class="font-mono">qwen3:8b</span>)</span>
           </label>
           <input bind:value={profileForm.modelPattern} placeholder="qwen3*"
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500" />
+            readonly={profileLockedFromActive}
+            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500
+              {profileLockedFromActive ? 'opacity-70 cursor-not-allowed' : ''}" />
         </div>
-        <div class="col-span-2">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+            Kind
+            <span class="ml-1 text-gray-400">({profileForm.kind === '' ? `auto: ${modalEffectiveKind}` : 'explicit'})</span>
+          </label>
+          <select bind:value={profileForm.kind}
+            disabled={profileLockedFromActive}
+            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 disabled:opacity-70 disabled:cursor-not-allowed">
+            <option value="">Auto (infer from pattern)</option>
+            <option value="chat">Chat — reasoning / RAG</option>
+            <option value="vlm">VLM — vision OCR</option>
+            <option value="embed">Embed — vector retrieval</option>
+            <option value="rerank">Rerank</option>
+          </select>
+        </div>
+        <div>
           <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Display Name</label>
           <input bind:value={profileForm.displayName} placeholder="Optional label"
             class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500" />
         </div>
 
-        <p class="col-span-2 text-xs text-gray-500 dark:text-gray-400 font-medium pt-1">Standard mode</p>
+        {#if !kindHasSamplingFields(modalEffectiveKind)}
+          <div class="col-span-2 mt-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 text-xs text-gray-500 dark:text-gray-400">
+            <span class="font-medium">{KIND_META[modalEffectiveKind].label}</span> models don't use sampling parameters —
+            this profile is bookkeeping only (Display Name + Notes).
+          </div>
+        {/if}
 
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Temperature <span class="text-gray-400">(blank = inherit)</span></label>
-          <input type="number" step="0.01" min="0" max="2" bind:value={profileForm.temperature} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Top P</label>
-          <input type="number" step="0.01" min="0" max="1" bind:value={profileForm.topP} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Max Tokens</label>
-          <input type="number" step="1" min="1" bind:value={profileForm.maxTokens} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Frequency Penalty</label>
-          <input type="number" step="0.01" min="-2" max="2" bind:value={profileForm.frequencyPenalty} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Presence Penalty</label>
-          <input type="number" step="0.01" min="-2" max="2" bind:value={profileForm.presencePenalty} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Repetition Penalty</label>
-          <input type="number" step="0.01" min="1" max="2" bind:value={profileForm.repetitionPenalty} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Top K</label>
-          <input type="number" step="1" min="0" bind:value={profileForm.topK} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Min P</label>
-          <input type="number" step="0.01" min="0" max="1" bind:value={profileForm.minP} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+        {#if kindHasSamplingFields(modalEffectiveKind)}
+        <div class="col-span-2 flex items-center justify-between pt-1">
+          <p class="text-xs text-gray-500 dark:text-gray-400 font-medium">Standard mode</p>
+          <p class="text-[10px] text-gray-400 dark:text-gray-500">
+            {#if resolvedLoading}Loading current values…{:else}Placeholder = current effective value (blank field = inherit){/if}
+          </p>
         </div>
 
+        {#each [
+          { key: 'temperature',       label: 'Temperature',        step: '0.01', min: '0',  max: '2'  },
+          { key: 'topP',              label: 'Top P',              step: '0.01', min: '0',  max: '1'  },
+          { key: 'maxTokens',         label: 'Max Tokens',         step: '1',    min: '1',  max: ''   },
+          { key: 'frequencyPenalty',  label: 'Frequency Penalty',  step: '0.01', min: '-2', max: '2'  },
+          { key: 'presencePenalty',   label: 'Presence Penalty',   step: '0.01', min: '-2', max: '2'  },
+          { key: 'repetitionPenalty', label: 'Repetition Penalty', step: '0.01', min: '1',  max: '2'  },
+          { key: 'topK',              label: 'Top K',              step: '1',    min: '0',  max: ''   },
+          { key: 'minP',              label: 'Min P',              step: '0.01', min: '0',  max: '1'  },
+        ] as f}
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">{f.label}</label>
+            <input type="number" step={f.step} min={f.min} max={f.max || undefined}
+              bind:value={profileForm[f.key as keyof typeof profileForm]}
+              placeholder={placeholderFor(f.key)}
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm placeholder:text-gray-400 placeholder:font-mono placeholder:italic" />
+          </div>
+        {/each}
+        {/if}
+
+        {#if kindHasThinkingFields(modalEffectiveKind)}
         <p class="col-span-2 text-xs text-gray-500 dark:text-gray-400 font-medium pt-1">Thinking mode</p>
 
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Temperature</label>
-          <input type="number" step="0.01" min="0" max="2" bind:value={profileForm.thinkingTemperature} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Top P</label>
-          <input type="number" step="0.01" min="0" max="1" bind:value={profileForm.thinkingTopP} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Max Tokens</label>
-          <input type="number" step="1" min="1" bind:value={profileForm.thinkingMaxTokens} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Budget</label>
-          <input type="number" step="1" min="1" bind:value={profileForm.thinkingBudget} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Frequency Penalty</label>
-          <input type="number" step="0.01" min="-2" max="2" bind:value={profileForm.thinkingFrequencyPenalty} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Presence Penalty</label>
-          <input type="number" step="0.01" min="-2" max="2" bind:value={profileForm.thinkingPresencePenalty} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Repetition Penalty</label>
-          <input type="number" step="0.01" min="1" max="2" bind:value={profileForm.thinkingRepetitionPenalty} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Top K</label>
-          <input type="number" step="1" min="0" bind:value={profileForm.thinkingTopK} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Min P</label>
-          <input type="number" step="0.01" min="0" max="1" bind:value={profileForm.thinkingMinP} placeholder=""
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
-        </div>
+        {#each [
+          { key: 'thinkingTemperature',       label: 'Temperature',        step: '0.01', min: '0',  max: '2'  },
+          { key: 'thinkingTopP',              label: 'Top P',              step: '0.01', min: '0',  max: '1'  },
+          { key: 'thinkingMaxTokens',         label: 'Max Tokens',         step: '1',    min: '1',  max: ''   },
+          { key: 'thinkingBudget',            label: 'Thinking Budget',    step: '1',    min: '1',  max: ''   },
+          { key: 'thinkingFrequencyPenalty',  label: 'Frequency Penalty',  step: '0.01', min: '-2', max: '2'  },
+          { key: 'thinkingPresencePenalty',   label: 'Presence Penalty',   step: '0.01', min: '-2', max: '2'  },
+          { key: 'thinkingRepetitionPenalty', label: 'Repetition Penalty', step: '0.01', min: '1',  max: '2'  },
+          { key: 'thinkingTopK',              label: 'Top K',              step: '1',    min: '0',  max: ''   },
+          { key: 'thinkingMinP',              label: 'Min P',              step: '0.01', min: '0',  max: '1'  },
+        ] as f}
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">{f.label}</label>
+            <input type="number" step={f.step} min={f.min} max={f.max || undefined}
+              bind:value={profileForm[f.key as keyof typeof profileForm]}
+              placeholder={placeholderFor(f.key)}
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm placeholder:text-gray-400 placeholder:font-mono placeholder:italic" />
+          </div>
+        {/each}
+        {:else if modalEffectiveKind === 'vlm'}
+          <div class="col-span-2 -mt-1 px-3 py-2 rounded-lg border border-purple-200 dark:border-purple-700/40 bg-purple-50 dark:bg-purple-900/10 text-xs text-purple-800 dark:text-purple-300">
+            VLMs don't support thinking mode — Thinking parameters are intentionally hidden.
+          </div>
+        {/if}
 
         <div class="col-span-2">
           <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Notes</label>

@@ -151,6 +151,15 @@ route_requires_role(method, path, "models:r") {
     path == "/api/v1/models"
 }
 
+# Active Models — read (any authenticated user; surfaces env-configured model
+# ids so the UI can render the "Tune…" buttons next to each kind).
+# Must be evaluated BEFORE the catch-all /api/v1/admin* rule below to avoid
+# requiring platform_admin for tenant_admin-driven Tune flows.
+route_requires_role(method, path, "models:r") {
+    method == "GET"
+    path == "/api/v1/admin/active-models"
+}
+
 # Admin — full admin panel access (platform_admin)
 route_requires_role(method, path, "admin:rw") {
     glob.match("/api/v1/admin*", [], path)

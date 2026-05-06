@@ -91,6 +91,7 @@ class ModelProfileService(
                     thinkingMinP              = platformWildcard.thinkingMinP,
                     thinkingBudget            = platformWildcard.thinkingBudget,
                     streamThinking            = platformWildcard.streamThinking,
+                    kind                      = platformWildcard.kind,
                     notes                     = "Seeded from platform defaults.",
                 )
             } else {

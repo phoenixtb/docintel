@@ -247,12 +247,16 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - STREAM_CONSUMER_ENABLED=true
+      # Read-only PG access for ModelProfileResolver (VLM sampling params)
+      - POSTGRES_URL=postgresql://docintel_documents:${DOCINTEL_DOCUMENTS_DB_PASSWORD}@postgres:5432/docintel
     depends_on:
       qdrant:
         condition: service_healthy
       minio:
         condition: service_started
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     volumes:
       # NOTE: docling-cache used to be a named volume mounted at /app/docling-cache,
@@ -319,6 +323,14 @@ services:
       - RAG_SERVICE_URL=http://rag-service:8000
       - ANALYTICS_SERVICE_URL=http://analytics-service:8001
       - INTERNAL_GATEWAY_SECRET=${INTERNAL_GATEWAY_SECRET:-}
+      # Active model ids — surfaced by GET /internal/active-models for the UI's
+      # "Active Models" panel. Source of truth is the deployment env (these
+      # mirror the values passed to rag-service / ingestion-service above).
+      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b}
+      - LLM_VLM_MODEL=${LLM_VLM_MODEL:-qwen2.5-vl:3b:4bit}
+      - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-qwen3-embed:0.6b:8bit}
+      - LLM_RERANK_MODEL=${LLM_RERANK_MODEL:-jina-reranker-v2:multilingual}
+      - USE_RERANKING=${USE_RERANKING:-false}
     depends_on:
       postgres:
         condition: service_healthy

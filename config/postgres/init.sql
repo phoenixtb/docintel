@@ -50,8 +50,14 @@ CREATE TABLE admin.platform_settings (
     updated_at TIMESTAMPTZ  DEFAULT NOW()
 );
 
--- null = "Tenant Choice" (no global LLM override)
-INSERT INTO admin.platform_settings (key, value) VALUES ('llm_model', 'null');
+-- null = no platform override (tenant pref or env fallback wins).
+-- Three keys: chat (legacy llm_model), vision (llm_vlm_model), reranker (llm_rerank_model).
+-- Embedding model is intentionally env-only — changing it requires re-embedding the
+-- entire vector store, so we don't expose it to runtime tenant/platform overrides.
+INSERT INTO admin.platform_settings (key, value) VALUES
+    ('llm_model',        'null'),
+    ('llm_vlm_model',    'null'),
+    ('llm_rerank_model', 'null');
 
 CREATE TABLE admin.users (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -103,6 +109,10 @@ CREATE TABLE admin.model_profiles (
     thinking_min_p              DOUBLE PRECISION,
     thinking_budget             INTEGER,
     stream_thinking             BOOLEAN,
+    -- Informational: chat | vlm | embed | rerank. NULL = auto-infer from model_pattern.
+    -- Used by the UI to badge profiles and conditionally show form fields. Resolver
+    -- does NOT filter by kind — pattern matching is unchanged.
+    kind                  VARCHAR(16),
     notes                 TEXT,
     created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -235,6 +245,15 @@ CREATE POLICY tenant_isolation_tenants ON admin.tenants
 
 CREATE POLICY tenant_isolation_tenants_admin ON admin.tenants
     AS PERMISSIVE FOR ALL TO docintel_admin
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR id = current_setting('app.current_tenant', true)
+    );
+
+-- ingestion-service (docintel_documents) needs to read its own tenant row
+-- to resolve per-tenant llm_vlm_model overrides during PDF ingestion.
+CREATE POLICY tenant_isolation_tenants_doc ON admin.tenants
+    AS PERMISSIVE FOR SELECT TO docintel_documents
     USING (
         current_setting('app.user_role', true) = 'platform_admin'
         OR id = current_setting('app.current_tenant', true)
@@ -382,7 +401,7 @@ GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_admin;
 GRANT USAGE ON SCHEMA documents, admin, public TO docintel_documents;
 GRANT ALL   ON ALL TABLES    IN SCHEMA documents TO docintel_documents;
 GRANT ALL   ON ALL SEQUENCES IN SCHEMA documents TO docintel_documents;
-GRANT SELECT ON admin.tenants TO docintel_documents;
+GRANT SELECT ON admin.tenants, admin.model_profiles, admin.platform_settings TO docintel_documents;
 ALTER DEFAULT PRIVILEGES IN SCHEMA documents GRANT ALL ON TABLES    TO docintel_documents;
 ALTER DEFAULT PRIVILEGES IN SCHEMA documents GRANT ALL ON SEQUENCES TO docintel_documents;
 GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_documents;

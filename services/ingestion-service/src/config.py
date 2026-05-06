@@ -39,6 +39,16 @@ class Settings(BaseSettings):
         alias="INTERNAL_GATEWAY_SECRET",
     )
 
+    # --- PostgreSQL (read-only access to admin.model_profiles for VLM sampling) ---
+    # docintel_documents role has SELECT on admin.model_profiles via init.sql grant.
+    postgres_url: str = Field(
+        default=(
+            "postgresql://docintel_documents:docintel_documents_secret"
+            "@postgres:5432/docintel"
+        ),
+        alias="POSTGRES_URL",
+    )
+
     # --- Docling ---
     docling_artifacts_path: str = Field(
         default="/app/docling-cache",

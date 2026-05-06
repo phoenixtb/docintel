@@ -36,6 +36,7 @@ class ModelProfileRepository(
             thinkingMinP              = rs.getObject("thinking_min_p")            as Double?,
             thinkingBudget            = rs.getObject("thinking_budget")           as Int?,
             streamThinking            = rs.getObject("stream_thinking")           as Boolean?,
+            kind                      = rs.getString("kind"),
             notes                     = rs.getString("notes"),
             createdAt                 = rs.getTimestamp("created_at").toInstant(),
             updatedAt                 = rs.getTimestamp("updated_at").toInstant(),
@@ -72,17 +73,36 @@ class ModelProfileRepository(
                 presence_penalty, repetition_penalty, top_k, min_p,
                 thinking_temperature, thinking_top_p, thinking_max_tokens,
                 thinking_frequency_penalty, thinking_presence_penalty, thinking_repetition_penalty,
-                thinking_top_k, thinking_min_p, thinking_budget, stream_thinking, notes
-            ) VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                thinking_top_k, thinking_min_p, thinking_budget, stream_thinking, kind, notes
+            ) VALUES (?::uuid, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             id, scope, tenantId, req.modelPattern, req.displayName,
             req.temperature, req.topP, req.maxTokens, req.frequencyPenalty,
             req.presencePenalty, req.repetitionPenalty, req.topK, req.minP,
             req.thinkingTemperature, req.thinkingTopP, req.thinkingMaxTokens,
             req.thinkingFrequencyPenalty, req.thinkingPresencePenalty, req.thinkingRepetitionPenalty,
-            req.thinkingTopK, req.thinkingMinP, req.thinkingBudget, req.streamThinking, req.notes,
+            req.thinkingTopK, req.thinkingMinP, req.thinkingBudget, req.streamThinking,
+            normalizeKind(req.kind), req.notes,
         )
         return findById(id)!!
+    }
+
+    /**
+     * Validate `kind` so a typo can't poison the column. NULL stays NULL (auto-infer).
+     * Throws IllegalArgumentException for unrecognised values — surfaces as 400 to caller.
+     */
+    private fun normalizeKind(kind: String?): String? {
+        if (kind == null) return null
+        val k = kind.trim().lowercase()
+        if (k.isEmpty()) return null
+        require(k in ALLOWED_KINDS) {
+            "Invalid kind '$kind'. Allowed: ${ALLOWED_KINDS.joinToString()}"
+        }
+        return k
+    }
+
+    companion object {
+        private val ALLOWED_KINDS = setOf("chat", "vlm", "embed", "rerank")
     }
 
     fun update(id: String, req: UpsertModelProfileRequest): ModelProfile? {
@@ -109,6 +129,7 @@ class ModelProfileRepository(
                 thinking_min_p             = ?,
                 thinking_budget            = ?,
                 stream_thinking            = ?,
+                kind                       = ?,
                 notes                      = ?,
                 updated_at                 = NOW()
             WHERE id = ?::uuid
@@ -118,7 +139,8 @@ class ModelProfileRepository(
             req.presencePenalty, req.repetitionPenalty, req.topK, req.minP,
             req.thinkingTemperature, req.thinkingTopP, req.thinkingMaxTokens,
             req.thinkingFrequencyPenalty, req.thinkingPresencePenalty, req.thinkingRepetitionPenalty,
-            req.thinkingTopK, req.thinkingMinP, req.thinkingBudget, req.streamThinking, req.notes,
+            req.thinkingTopK, req.thinkingMinP, req.thinkingBudget, req.streamThinking,
+            normalizeKind(req.kind), req.notes,
             id,
         )
         return if (rows > 0) findById(id) else null
@@ -174,6 +196,7 @@ class ModelProfileRepository(
                         thinkingMinP              = p.thinkingMinP,
                         thinkingBudget            = p.thinkingBudget,
                         streamThinking            = p.streamThinking,
+                        kind                      = p.kind,
                         notes                     = "Seeded from platform profile.",
                     )
                 )

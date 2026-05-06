@@ -826,15 +826,46 @@ def _run_pdf_sharded(
 
     if use_page_routing:
         import asyncio
+        from docintel_common.model_profile_resolver import ModelProfileResolver
+        from .active_model_resolver import resolve_active_vlm_model
         from .page_router import ExtractionPath, initial_path, should_escalate_to_vlm
         from .pdf_probe import probe_pages
         from .extractors.digital import extract_digital
         from .extractors.layout import extract_layout
         from .extractors.ocr_tesseract import extract_tesseract
-        from .extractors.vlm import extract_vlm
+        from .extractors.vlm import VlmSamplingParams, extract_vlm
         vlm_semaphore = asyncio.Semaphore(cfg.vlm_max_concurrency)
+
+        # Resolve the **active VLM model id** for this tenant: platform override
+        # → tenant pref → env fallback. Done per-document (not cached) so a
+        # platform/tenant admin who just changed the VLM model in the UI sees
+        # the new model used on the very next upload.
+        active_vlm_model = resolve_active_vlm_model(
+            cfg.postgres_url, tenant_id, cfg.llm_vlm_model
+        )
+        # Resolve VLM sampling params for that model. Resolver caches per
+        # (model, tenant) for TTL, so subsequent docs skip the DB hit.
+        # Fail-open: PG unreachable → resolver falls through to qwen2.5-vl builtin.
+        _profile_resolver = ModelProfileResolver(postgres_url=cfg.postgres_url)
+        _resolved = _profile_resolver.resolve_sync(active_vlm_model, tenant_id)
+        vlm_sampling = VlmSamplingParams(
+            temperature=_resolved.temperature,
+            top_p=_resolved.top_p,
+            max_tokens=_resolved.max_tokens,
+            frequency_penalty=_resolved.frequency_penalty,
+            presence_penalty=_resolved.presence_penalty,
+            repetition_penalty=_resolved.repetition_penalty,
+            top_k=_resolved.top_k,
+            min_p=_resolved.min_p,
+        )
         logger.info(
-            "PDF sharded ingestion: using per-page router (document_id=%s)", document_id
+            "PDF sharded ingestion: per-page router (document_id=%s) "
+            "active_vlm=%s (env_default=%s) sampling: temp=%s top_p=%s "
+            "freq_pen=%s rep_pen=%s max_tok=%s",
+            document_id, active_vlm_model, cfg.llm_vlm_model,
+            vlm_sampling.temperature, vlm_sampling.top_p,
+            vlm_sampling.frequency_penalty, vlm_sampling.repetition_penalty,
+            vlm_sampling.max_tokens,
         )
 
     while start_page < total_pages:
@@ -897,9 +928,10 @@ def _run_pdf_sharded(
                             text = loop.run_until_complete(
                                 extract_vlm(
                                     path, pp.page_index,
-                                    cfg.llm_vlm_url, cfg.llm_vlm_model,
+                                    cfg.llm_vlm_url, active_vlm_model,
                                     vlm_semaphore,
                                     dpi=cfg.vlm_render_dpi,
+                                    sampling=vlm_sampling,
                                 )
                             )
                         finally:

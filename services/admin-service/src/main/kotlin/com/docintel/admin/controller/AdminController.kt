@@ -1,6 +1,7 @@
 package com.docintel.admin.controller
 
 import com.docintel.admin.dto.*
+import com.docintel.admin.service.ActiveModelsService
 import com.docintel.admin.service.CacheService
 import com.docintel.admin.service.HealthService
 import com.docintel.admin.service.ModelProfileService
@@ -24,6 +25,7 @@ class AdminController(
     private val platformSettingsService: PlatformSettingsService,
     private val userPreferencesService: UserPreferencesService,
     private val modelProfileService: ModelProfileService,
+    private val activeModelsService: ActiveModelsService,
 ) {
     /**
      * System health check with component status.
@@ -283,4 +285,16 @@ class AdminController(
     @PostMapping("/tenants/{tenantId}/model-profiles/seed")
     fun seedTenantProfiles(@PathVariable tenantId: String): ResponseEntity<List<ModelProfile>> =
         ResponseEntity.ok(modelProfileService.seedTenantProfiles(tenantId))
+
+    // -----------------------------------------------------------------------
+    // Active Models — env-configured chat / vlm / embed / rerank models
+    // surfaced for the UI's "Active Models" panel (Tune… buttons).
+    // Read-only; source of truth is the deployment env, not the DB.
+    // -----------------------------------------------------------------------
+
+    @GetMapping("/active-models")
+    fun getActiveModels(
+        @RequestHeader("X-Tenant-Id") tenantId: String,
+    ): ResponseEntity<ActiveModels> =
+        ResponseEntity.ok(activeModelsService.get(tenantId))
 }

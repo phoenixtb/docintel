@@ -352,10 +352,31 @@ class HealthResponse(BaseModel):
 # Checked via substring match against the lowercased model name.
 _THINKING_MODEL_FAMILIES = {"qwen3", "qwq", "deepseek-r1", "marco-o1", "skywork-o1", ":r1"}
 
+# Substring rules for capability inference when LMForge does not return a
+# `capabilities` block. Keep these in lockstep with the UI's `inferKind`.
+_VISION_KEYWORDS  = ("-vl", ":vl", "vision", "llava", "moondream", "internvl")
+_RERANK_KEYWORDS  = ("rerank", "reranker")
+_EMBED_KEYWORDS   = ("embed", "nomic", "mxbai", "bge", "gte", "e5-")
+
 
 def _model_supports_thinking(model_name: str) -> bool:
     name_lower = model_name.lower()
     return any(family in name_lower for family in _THINKING_MODEL_FAMILIES)
+
+
+def _model_supports_vision(model_name: str) -> bool:
+    n = model_name.lower()
+    return any(kw in n for kw in _VISION_KEYWORDS) or n.startswith("vl")
+
+
+def _model_is_reranker(model_name: str) -> bool:
+    n = model_name.lower()
+    return any(kw in n for kw in _RERANK_KEYWORDS)
+
+
+def _model_is_embed(model_name: str) -> bool:
+    n = model_name.lower()
+    return any(kw in n for kw in _EMBED_KEYWORDS)
 
 
 class ModelInfo(BaseModel):
@@ -363,6 +384,9 @@ class ModelInfo(BaseModel):
     size: Optional[int] = None
     modified_at: Optional[str] = None
     supports_thinking: bool = False
+    supports_vision: bool = False
+    is_reranker: bool = False
+    is_embed: bool = False
 
 
 class ModelListResponse(BaseModel):
@@ -428,12 +452,12 @@ async def list_models(
     x_tenant_id: Optional[str] = Header(None),
 ):
     """
-    List all chat models available from the configured LLM engine.
-    Uses the standard GET /v1/models endpoint (OpenAI-compatible).
-    Enriches each model with supports_thinking and returns the tenant's thinking_mode preference.
-    """
-    _EMBED_KEYWORDS = {"embed", "nomic", "mxbai", "bge", "gte", "e5-"}
+    List all models available from the configured LLM engine, with capability
+    flags so the UI can filter per-kind dropdowns (chat / vlm / rerank).
 
+    Embed models are returned for completeness but the UI typically hides them
+    because the embed model is env-locked.
+    """
     models: list[ModelInfo] = []
     try:
         client: httpx.AsyncClient = http_request.app.state.http
@@ -442,17 +466,23 @@ async def list_models(
             raw_models = r.json().get("data", [])
             for m in raw_models:
                 name: str = m.get("id", "") or m.get("name", "")
-                name_lower = name.lower()
-                if not name or any(kw in name_lower for kw in _EMBED_KEYWORDS):
+                if not name:
                     continue
-                # LMForge exposes capabilities.thinking — use it when available
+                # LMForge optionally returns a `capabilities` block — use it
+                # when present, fall back to substring inference otherwise.
                 capabilities: dict = m.get("capabilities", {})
                 supports_thinking = capabilities.get("thinking", _model_supports_thinking(name))
+                supports_vision   = capabilities.get("vision",   _model_supports_vision(name))
+                is_reranker       = capabilities.get("rerank",   _model_is_reranker(name))
+                is_embed          = capabilities.get("embed",    _model_is_embed(name))
                 models.append(ModelInfo(
                     name=name,
                     size=m.get("size"),
                     modified_at=m.get("modified_at") or m.get("created"),
                     supports_thinking=supports_thinking,
+                    supports_vision=supports_vision,
+                    is_reranker=is_reranker,
+                    is_embed=is_embed,
                 ))
     except Exception as exc:
         logger.warning("Failed to fetch model list from %s: %s", settings.llm_chat_url, exc)
