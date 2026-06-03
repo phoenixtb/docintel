@@ -10,9 +10,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# `set -a` exports every sourced var (incl. DOCKER_DEFAULT_PLATFORM) so
+# `docker compose` sees them — plain KEY=val assignments aren't exported otherwise.
+set -a
 source "$PROJECT_DIR/config/defaults.env"
 # .env overrides defaults (LLM_ENGINE, LLM_MODEL, LLM_CHAT_URL, etc.)
 [ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+set +a
 cd "$PROJECT_DIR"
 
 DO_BUILD=false
@@ -33,6 +37,10 @@ read_profile
 # Export torch vars so docker compose can resolve ${PROFILE_TAG} in image: fields
 torch_vars_for_profile "$PROFILE"
 
+# Resolve the Docker target platform (same single source of truth as build.sh):
+# native by default; honours a persisted/env cross-build override.
+resolve_platform
+
 # Build the full compose file chain:
 #   docker-compose.yml → docker-compose.override.yml → docker-compose.gpu.yml (GPU profiles)
 # Using explicit -f instead of relying on auto-load so GPU overlay can be appended,
@@ -40,6 +48,7 @@ torch_vars_for_profile "$PROFILE"
 compose_file_chain "$PROJECT_DIR"
 
 echo "  [hardware] profile=${PROFILE} source=${PROFILE_SOURCE}"
+echo "  [platform] ${DOCKER_PLATFORM_LABEL} (${DOCKER_PLATFORM_SOURCE})"
 
 log()  { echo "  $*"; }
 ok()   { echo "  ✓ $*"; }
@@ -53,6 +62,12 @@ echo ""
 # =============================================================================
 # Prerequisite checks
 # =============================================================================
+
+# Select the Docker engine (OrbStack / Docker Desktop / Colima / …) before any
+# docker command runs, so the whole stack talks to the intended daemon.
+# shellcheck source=lib/docker_context.sh
+source "${SCRIPT_DIR}/lib/docker_context.sh"
+ensure_docker_context
 
 if ! command -v tofu &> /dev/null; then
     fail "tofu (OpenTofu) is not installed. macOS: brew install opentofu | Linux: https://opentofu.org/docs/intro/install/"

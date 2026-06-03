@@ -210,12 +210,76 @@ _write_override() {
     [ "$result" = "cu129" ]
 }
 
-@test "torch_vars_for_profile sets TORCH_VERSION to 2.11.0" {
+@test "torch_vars_for_profile cpu sets TORCH_VERSION to 2.11.0+cpu" {
     result=$(bash -c "
         PROJECT_DIR='${TMPDIR_TEST}'
         source '${PROFILE_CONFIG}'
         torch_vars_for_profile cpu
         echo \"\$TORCH_VERSION\"
     ")
-    [ "$result" = "2.11.0" ]
+    [ "$result" = "2.11.0+cpu" ]
+}
+
+@test "torch_vars_for_profile cu128 sets TORCH_VERSION to 2.11.0+cu128" {
+    result=$(bash -c "
+        PROJECT_DIR='${TMPDIR_TEST}'
+        source '${PROFILE_CONFIG}'
+        torch_vars_for_profile cu128
+        echo \"\$TORCH_VERSION\"
+    ")
+    [ "$result" = "2.11.0+cu128" ]
+}
+
+# ==============================================================================
+# resolve_platform tests (single source of truth for Docker target platform)
+# ==============================================================================
+
+@test "resolve_platform default: no env, no file → native (empty DOCKER_DEFAULT_PLATFORM)" {
+    result=$(bash -c "
+        PROJECT_DIR='${TMPDIR_TEST}'
+        unset DOCKER_DEFAULT_PLATFORM
+        source '${PROFILE_CONFIG}'
+        resolve_platform
+        echo \"[\$DOCKER_DEFAULT_PLATFORM]:\$DOCKER_PLATFORM_SOURCE\"
+    ")
+    [ "$result" = "[]:native" ]
+}
+
+@test "resolve_platform env override is used and persisted to .docintel-profile" {
+    result=$(bash -c "
+        PROJECT_DIR='${TMPDIR_TEST}'
+        DOCKER_DEFAULT_PLATFORM=linux/amd64
+        source '${PROFILE_CONFIG}'
+        resolve_platform
+        echo \"\$DOCKER_DEFAULT_PLATFORM:\$DOCKER_PLATFORM_SOURCE\"
+    ")
+    [ "$result" = "linux/amd64:env" ]
+    grep -q "PLATFORM=linux/amd64" "${TMPDIR_TEST}/.docintel-profile"
+}
+
+@test "resolve_platform reads persisted PLATFORM from .docintel-profile" {
+    bash -c "
+        PROJECT_DIR='${TMPDIR_TEST}'
+        source '${PROFILE_CONFIG}'
+        write_platform_override linux/amd64
+    "
+    result=$(bash -c "
+        PROJECT_DIR='${TMPDIR_TEST}'
+        unset DOCKER_DEFAULT_PLATFORM
+        source '${PROFILE_CONFIG}'
+        resolve_platform
+        echo \"\$DOCKER_DEFAULT_PLATFORM:\$DOCKER_PLATFORM_SOURCE\"
+    ")
+    [ "$result" = "linux/amd64:file" ]
+}
+
+@test "write_platform_override preserves an existing PROFILE line" {
+    bash -c "
+        PROJECT_DIR='${TMPDIR_TEST}'
+        source '${PROFILE_CONFIG}'
+        write_profile_override cpu
+        write_platform_override linux/amd64
+    "
+    grep -q "PROFILE=cpu" "${TMPDIR_TEST}/.docintel-profile"
+    grep -q "PLATFORM=linux/amd64" "${TMPDIR_TEST}/.docintel-profile"
 }

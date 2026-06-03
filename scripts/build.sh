@@ -18,8 +18,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
+# Load build-time env so `docker compose build` sees the torch wheel selection
+# (TORCH_INDEX / TORCH_VERSION / PROFILE_TAG) set by torch_vars_for_profile.
+# Builds run on the host's native arch by default; the Dockerfiles pin
+# torch==<ver>+cpu, which has both x86_64 and aarch64 wheels, so no cross-arch
+# forcing is needed. `set -a` exports every plain KEY=val to docker compose.
+set -a
+# shellcheck source=../config/defaults.env
+source "$PROJECT_DIR/config/defaults.env"
+# .env overrides defaults
+[ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+set +a
+
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
+
+# ==============================================================================
+# Docker engine — select context before any docker call (incl. GPU detection)
+# ==============================================================================
+# shellcheck source=lib/docker_context.sh
+source "${SCRIPT_DIR}/lib/docker_context.sh"
+ensure_docker_context
 
 # ==============================================================================
 # Hardware profile — detect or read override
@@ -75,6 +94,11 @@ fi
 # Export build vars consumed by docker-compose.yml
 torch_vars_for_profile "$PROFILE"
 
+# Resolve the Docker target platform (single source of truth): native by
+# default, or a persisted/env override for cross-builds. Exports DOCKER_DEFAULT_PLATFORM.
+resolve_platform
+echo "  [platform] ${DOCKER_PLATFORM_LABEL} (${DOCKER_PLATFORM_SOURCE})"
+
 # Full compose file chain (base + override + GPU overlay)
 compose_file_chain "$PROJECT_DIR"
 
@@ -85,6 +109,7 @@ SERVICES=(
   "document-service"
   "ingestion-service"
   "rag-service"
+  "data-loader"
   "admin-service"
   "analytics-service"
   "docintel-actions"
@@ -96,6 +121,7 @@ DESCRIPTIONS=(
   "Document management (Kotlin)"
   "Docling parse + embed + index (Python)"
   "RAG query/retrieval (Python/Haystack)"
+  "Dataset seeding / sample data loader (Python)"
   "Admin operations (Kotlin)"
   "Analytics + ClickHouse ingestion (Python)"
   "Zitadel Actions v2 custom claims webhook"

@@ -94,7 +94,7 @@ services:
       dockerfile: services/rag-service/Dockerfile
       args:
         TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
-        TORCH_VERSION: ${TORCH_VERSION:-2.11.0}
+        TORCH_VERSION: ${TORCH_VERSION:-2.11.0+cpu}
     image: docintel-rag-service:${PROFILE_TAG:-cpu}
     pull_policy: never
     environment:
@@ -174,7 +174,7 @@ services:
       dockerfile: services/data-loader/Dockerfile
       args:
         TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
-        TORCH_VERSION: ${TORCH_VERSION:-2.11.0}
+        TORCH_VERSION: ${TORCH_VERSION:-2.11.0+cpu}
     image: docintel-data-loader:${PROFILE_TAG:-cpu}
     pull_policy: never
     environment:
@@ -214,7 +214,7 @@ services:
       dockerfile: services/ingestion-service/Dockerfile
       args:
         TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
-        TORCH_VERSION: ${TORCH_VERSION:-2.11.0}
+        TORCH_VERSION: ${TORCH_VERSION:-2.11.0+cpu}
     image: docintel-ingestion-service:${PROFILE_TAG:-cpu}
     pull_policy: never
     environment:
@@ -606,9 +606,14 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          # Langfuse v3 web needs >1G during fresh init (DB + ClickHouse
+          # migrations + headless org/project/user provisioning), where it OOM'd
+          # the Node heap. 2G clears startup; it settles well below this after.
+          memory: 2G
     environment:
       <<: *langfuse-env
+      # Let the Node heap use the larger container budget (default cap OOM'd).
+      NODE_OPTIONS: "--max-old-space-size=1536"
       NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET}"
       # Auto-provisioned user for local development
       # See: https://langfuse.com/self-hosting/administration/headless-initialization

@@ -65,6 +65,13 @@ setup_common_prereqs() {
         ok "docker compose"
     fi
 
+    # Select the Docker engine (OrbStack / Docker Desktop / Colima / …) up front.
+    if [ -f "$PROJECT_DIR/scripts/lib/docker_context.sh" ]; then
+        # shellcheck source=docker_context.sh
+        source "$PROJECT_DIR/scripts/lib/docker_context.sh"
+        ensure_docker_context
+    fi
+
     if [ "$prereq_ok" = false ]; then
         echo ""
         echo "Install the missing tools above, then re-run setup."
@@ -148,6 +155,31 @@ setup_common_env() {
             echo "INTERNAL_GATEWAY_SECRET=$secret" >> "$env_file"
         fi
         ok "Generated INTERNAL_GATEWAY_SECRET (32-byte hex) → .env"
+    fi
+
+    # ZITADEL_MASTERKEY (must be EXACTLY 32 chars) -------------------------------
+    # Auto-generated like INTERNAL_GATEWAY_SECRET so a fresh .env boots Zitadel
+    # without a manual edit. Regenerated only when absent, empty, or still the
+    # placeholder. Safe to generate on fresh data; only fixed AFTER first init.
+    echo ""
+    echo "================================================"
+    echo "Zitadel Masterkey"
+    echo "================================================"
+
+    local _mk
+    _mk=$(grep -E "^ZITADEL_MASTERKEY=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2-)
+    if [ -n "$_mk" ] && [ "$_mk" != "MasterkeyNeedsToHave32Characters" ] && [ "${#_mk}" -eq 32 ]; then
+        ok "ZITADEL_MASTERKEY already set — skipping."
+    else
+        local _newmk
+        _newmk=$(openssl rand -hex 16)   # 32 hex chars
+        if grep -q "^ZITADEL_MASTERKEY=" "$env_file" 2>/dev/null; then
+            sed -i.bak "s/^ZITADEL_MASTERKEY=.*/ZITADEL_MASTERKEY=$_newmk/" "$env_file" \
+                && rm -f "$env_file.bak"
+        else
+            echo "ZITADEL_MASTERKEY=$_newmk" >> "$env_file"
+        fi
+        ok "Generated ZITADEL_MASTERKEY (32 chars) → .env"
     fi
 
     # generated.env stub ---------------------------------------------------------

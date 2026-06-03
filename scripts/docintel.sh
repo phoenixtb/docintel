@@ -42,6 +42,8 @@ fi
 # ==============================================================================
 # shellcheck source=lib/profile_config.sh
 source "${SCRIPT_DIR}/lib/profile_config.sh"
+# shellcheck source=lib/docker_context.sh
+source "${SCRIPT_DIR}/lib/docker_context.sh"
 
 # Quick profile read for banner — skip GPU Docker test to keep startup snappy
 export DOCINTEL_SKIP_GPU_TEST=1
@@ -49,6 +51,7 @@ read_profile ${_GLOBAL_PROFILE_FLAG:+--flag-profile="${_GLOBAL_PROFILE_FLAG#--pr
 unset DOCINTEL_SKIP_GPU_TEST
 
 _BANNER_PROFILE="${PROFILE:-cpu}"
+_BANNER_DCTX="$(docker_context_label)"
 
 # Colors
 RED='\033[0;31m'
@@ -178,6 +181,7 @@ ACTIONS=(
     "seed"
     "backup"
     "hw-profile"
+    "docker-engine"
     "cleanup"
     "cleanup-data"
     "cleanup-all"
@@ -196,6 +200,7 @@ LABELS=(
     "Seed Data          Load sample data into running services"
     "Backup             Back up volumes to archive"
     "Hardware Profile   View/switch GPU build profile [$_BANNER_PROFILE]"
+    "Docker Engine      View/switch Docker context [$_BANNER_DCTX]"
     "Cleanup            Stop and remove containers"
     "Cleanup (data)     Wipe all data volumes (keeps images + models)"
     "Cleanup (full)     Remove containers, volumes, and models"
@@ -245,6 +250,7 @@ echo ""
 echo -e "  ${BOLD}DocIntel CLI${NC}"
 echo -e "  ${DIM}Manage your DocIntel environment${NC}"
 echo -e "  ${DIM}Hardware profile: ${CYAN}${_BANNER_PROFILE}${NC}${DIM} (source: ${PROFILE_SOURCE})${NC}"
+echo -e "  ${DIM}Docker engine: ${CYAN}${_BANNER_DCTX}${NC}${DIM} (pref: $(read_docker_pref))${NC}"
 echo ""
 
 start_row=5
@@ -423,6 +429,44 @@ case "$action" in
                 echo -e "  ${DIM}Next build will use this profile.${NC}"
                 ;;
         esac
+        echo ""
+        ;;
+    docker-engine)
+        # ── Docker context viewer/switcher ────────────────────────────────────
+        _current_pref="$(read_docker_pref)"
+        _active_ctx="$(_dctx_active)"
+
+        echo -e "  ${BOLD}Select Docker Engine${NC}"
+        echo -e "  ${DIM}Active context: ${_active_ctx:-none} • preference: ${_current_pref}${NC}"
+        echo ""
+
+        # Build option list: "auto" + every detected context (with reachability).
+        DCTX_OPTS=("auto")
+        DCTX_LBLS=("Auto-detect       Prefer OrbStack, fall back automatically")
+        while IFS= read -r _ctx; do
+            [ -z "$_ctx" ] && continue
+            if _dctx_responds "$_ctx"; then
+                _status="running"
+            else
+                _status="stopped"
+            fi
+            DCTX_OPTS+=("$_ctx")
+            DCTX_LBLS+=("$(printf '%-18s%s' "$_ctx" "[$_status]")")
+        done < <(detect_docker_contexts)
+
+        # Pre-select current preference (or "auto").
+        _pre=0
+        for _i in "${!DCTX_OPTS[@]}"; do
+            [ "${DCTX_OPTS[$_i]}" = "$_current_pref" ] && _pre=$_i
+        done
+
+        pick_from_list "Docker Engine" DCTX_OPTS DCTX_LBLS "$_pre"
+        _chosen_ctx="$PICK_RESULT"
+
+        echo ""
+        upsert_env "DOCKER_CONTEXT_PREF" "$_chosen_ctx"
+        echo -e "  ${GREEN}✓${NC} Preference: ${BOLD}${_chosen_ctx}${NC}"
+        ensure_docker_context
         echo ""
         ;;
     cleanup)

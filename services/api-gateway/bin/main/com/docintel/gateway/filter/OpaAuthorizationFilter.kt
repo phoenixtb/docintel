@@ -95,27 +95,35 @@ class OpaAuthorizationFilter(
             ),
         )
 
-        return opaWebClient.post()
+        // Resolve the authorization decision FIRST. The fail-closed error handler
+        // is scoped to the OPA call only — it must not swallow errors from the
+        // downstream chain.filter() below, otherwise an unreachable upstream
+        // (DNS/connect failure) gets mislabeled as an OPA failure and returned as
+        // a misleading 403. Downstream errors instead propagate to the gateway's
+        // default handling (503 Service Unavailable / 502 Bad Gateway).
+        val decision: Mono<Boolean> = opaWebClient.post()
             .uri("/v1/data/docintel/authz/allow")
             .bodyValue(mapOf("input" to input))
             .retrieve()
             .bodyToMono(OpaResponse::class.java)
             .transformDeferred(CircuitBreakerOperator.of(opaCircuitBreaker))
-            .flatMap { resp ->
-                val allowed = resp.result == true
-                decisionCache.put(cacheKey, allowed)
-                log.trace("OPA decision: allowed={} key={}", allowed, cacheKey)
-                if (allowed) {
-                    chain.filter(exchange)
-                } else {
-                    log.debug("OPA denied: path={} roles={}", path, roles)
-                    forbidden(exchange)
-                }
-            }
+            .map { resp -> resp.result == true }
+            // Cache only real OPA responses, never transient failures.
+            .doOnNext { allowed -> decisionCache.put(cacheKey, allowed) }
             .onErrorResume { ex ->
                 log.warn("OPA call failed (fail-closed): {}", ex.message)
+                Mono.just(false)
+            }
+
+        return decision.flatMap { allowed ->
+            if (allowed) {
+                log.trace("OPA decision: allowed=true key={}", cacheKey)
+                chain.filter(exchange)
+            } else {
+                log.debug("OPA denied: path={} roles={}", path, roles)
                 forbidden(exchange)
             }
+        }
     }
 
     private fun forbidden(exchange: ServerWebExchange): Mono<Void> {

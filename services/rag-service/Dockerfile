@@ -10,7 +10,7 @@ WORKDIR /app
 # Default is CPU-only — keeps images ~3.4 GB lighter on hosts without GPU.
 # scripts/build.sh sets this automatically based on detected hardware.
 ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
-ARG TORCH_VERSION=2.11.0
+ARG TORCH_VERSION=2.11.0+cpu
 
 # Pull uv binary — 10-100x faster than pip
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -21,20 +21,23 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Layer 1: local common lib (not on PyPI) ──────────────────────────────────
-COPY lib/docintel-common/ /app/lib/docintel-common/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system /app/lib/docintel-common/
-
-# ── Layer 1b: pre-install torch from the hardware-specific wheel index ────────
-# Must happen BEFORE project deps so uv finds torch already satisfied in the
-# environment and does not replace it with the CUDA-bundled PyPI default.
-# --extra-index-url pypi allows all other packages to resolve from PyPI normally.
+# ── Layer 1: pre-install torch from the hardware-specific wheel index ─────────
+# MUST run before docintel-common and project deps: those depend on torch, and
+# if installed first they pull the CUDA-bundled PyPI torch (~5 GB of nvidia-*
+# wheels) that the later pin can't remove. Pinning torch here first means
+# everything downstream finds it already satisfied. --extra-index-url pypi lets
+# all other packages resolve from PyPI normally.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system \
+        --index-strategy unsafe-best-match \
         --index-url "${TORCH_INDEX}" \
         --extra-index-url https://pypi.org/simple \
         "torch==${TORCH_VERSION}"
+
+# ── Layer 1b: local common lib (not on PyPI) ─────────────────────────────────
+COPY lib/docintel-common/ /app/lib/docintel-common/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /app/lib/docintel-common/
 
 # ── Layer 2: service deps (only reruns when pyproject.toml changes) ───────────
 # Cache mount = persistent host-side package cache across builds (like ~/.gradle).

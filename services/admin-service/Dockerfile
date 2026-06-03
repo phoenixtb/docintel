@@ -12,14 +12,16 @@ COPY gradlew ./
 RUN chmod +x gradlew
 
 # Resolve deps with a persistent Gradle cache (like ~/.gradle on the host).
-# The cache mount is shared across all builds; deps are only downloaded once,
-# even when build.gradle.kts changes — same behaviour as a local Gradle install.
-RUN --mount=type=cache,target=/root/.gradle \
-    ./gradlew dependencies --no-daemon || true
+# sharing=locked serializes access to the shared cache so parallel service
+# builds don't fight over Gradle's journal lock (they share one cache, deps
+# download once). vfs.watch=false avoids Gradle's file-watcher, which is flaky
+# on BuildKit cache mounts and under cross-arch (amd64-on-arm64) emulation.
+RUN --mount=type=cache,target=/root/.gradle,sharing=locked \
+    ./gradlew dependencies --no-daemon -Dorg.gradle.vfs.watch=false || true
 
 COPY src ./src
-RUN --mount=type=cache,target=/root/.gradle \
-    ./gradlew bootJar --no-daemon
+RUN --mount=type=cache,target=/root/.gradle,sharing=locked \
+    ./gradlew bootJar --no-daemon -Dorg.gradle.vfs.watch=false
 
 FROM eclipse-temurin:21-jre-alpine
 
