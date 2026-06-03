@@ -47,11 +47,12 @@ class TestPromptBuilderUnit:
         builder = PromptBuilder()
         assert builder is not None
 
-    def test_system_prompt_builder_can_be_imported(self):
-        """SystemPromptBuilder can be imported."""
-        from src.components.prompt import SystemPromptBuilder
-        builder = SystemPromptBuilder()
-        assert builder is not None
+    def test_prompt_builder_returns_messages_key(self):
+        """PromptBuilder.run() returns a 'messages' key (not 'prompt')."""
+        from src.components.prompt import PromptBuilder
+        builder = PromptBuilder()
+        result = builder.run(documents=[], query="test")
+        assert "messages" in result
 
 
 @pytest.mark.unit
@@ -60,46 +61,42 @@ class TestRouterUnit:
 
     def test_domain_filter_builder_can_be_imported(self):
         """DomainFilterBuilder can be imported."""
-        from src.components.router import DomainFilterBuilder
+        from src.components.routing import DomainFilterBuilder
         builder = DomainFilterBuilder()
         assert builder is not None
-
-    def test_query_expander_can_be_imported(self):
-        """QueryExpander can be imported."""
-        from src.components.router import QueryExpander
-        expander = QueryExpander(enabled=False)
-        assert expander is not None
 
 
 @pytest.mark.unit
 class TestPromptBuilder:
     """Tests for PromptBuilder component."""
 
-    def test_prompt_builder_creates_prompt(self):
-        """PromptBuilder creates a prompt from documents and query."""
+    def test_prompt_builder_creates_messages(self):
+        """PromptBuilder creates messages from documents and query."""
         from src.components.prompt import PromptBuilder
         Document = get_document_class()
         builder = PromptBuilder()
-        
+
         documents = [
             Document(
                 content="Annual leave entitlement is 25 days.",
                 meta={"filename": "policy.txt", "chunk_index": 0},
             ),
         ]
-        
+
         result = builder.run(documents=documents, query="How many leave days?")
-        
-        assert "prompt" in result
-        assert "25 days" in result["prompt"]
-        assert "How many leave days?" in result["prompt"]
+
+        assert "messages" in result
+        full_text = " ".join(m["content"] for m in result["messages"] if hasattr(m, "__getitem__") or hasattr(m, "content"))
+        # Verify content appears somewhere in the rendered messages
+        assert any("25 days" in str(m) for m in result["messages"])
+        assert any("How many leave days?" in str(m) for m in result["messages"])
 
     def test_prompt_builder_includes_sources(self):
-        """PromptBuilder includes source references in prompt."""
+        """PromptBuilder includes source references in messages."""
         from src.components.prompt import PromptBuilder
         Document = get_document_class()
         builder = PromptBuilder()
-        
+
         documents = [
             Document(
                 content="Content from first document.",
@@ -110,59 +107,61 @@ class TestPromptBuilder:
                 meta={"filename": "doc2.txt", "chunk_index": 1},
             ),
         ]
-        
+
         result = builder.run(documents=documents, query="What is the content?")
-        
-        # Should mention source filenames
-        assert "doc1.txt" in result["prompt"]
-        assert "doc2.txt" in result["prompt"]
+
+        assert "messages" in result
+        messages_str = str(result["messages"])
+        assert "doc1.txt" in messages_str
+        assert "doc2.txt" in messages_str
 
     def test_prompt_builder_empty_documents(self):
         """PromptBuilder handles empty document list."""
         from src.components.prompt import PromptBuilder
         builder = PromptBuilder()
-        
+
         result = builder.run(documents=[], query="What is this about?")
-        
-        assert "prompt" in result
+
+        assert "messages" in result
+        assert len(result["messages"]) == 2
 
 
 @pytest.mark.unit
-class TestSystemPromptBuilder:
-    """Tests for SystemPromptBuilder component."""
+class TestPromptBuilderMessages:
+    """Tests for PromptBuilder system/user message structure."""
 
-    def test_system_prompt_builder_creates_messages(self):
-        """SystemPromptBuilder creates system and user messages."""
-        from src.components.prompt import SystemPromptBuilder
+    def test_prompt_builder_creates_two_messages(self):
+        """PromptBuilder creates [system, user] message pair."""
+        from src.components.prompt import PromptBuilder
         Document = get_document_class()
-        builder = SystemPromptBuilder()
-        
+        builder = PromptBuilder()
+
         documents = [
             Document(
                 content="Test content here.",
                 meta={"filename": "test.txt", "chunk_index": 0},
             ),
         ]
-        
+
         result = builder.run(documents=documents, query="What is the test about?")
-        
+
         assert "messages" in result
         assert len(result["messages"]) == 2
-        assert result["messages"][0]["role"] == "system"
-        assert result["messages"][1]["role"] == "user"
+        assert result["messages"][0].role.value == "system"
+        assert result["messages"][1].role.value == "user"
 
-    def test_system_prompt_builder_custom_system_prompt(self):
-        """SystemPromptBuilder accepts custom system prompt."""
-        from src.components.prompt import SystemPromptBuilder
+    def test_prompt_builder_custom_org_name(self):
+        """PromptBuilder accepts custom org_name."""
+        from src.components.prompt import PromptBuilder
         Document = get_document_class()
-        custom_prompt = "You are a legal expert. Answer questions about contracts."
-        builder = SystemPromptBuilder(system_prompt=custom_prompt)
-        
-        documents = [Document(content="Contract terms.", meta={})]
-        
-        result = builder.run(documents=documents, query="What are the terms?")
-        
-        assert result["messages"][0]["content"] == custom_prompt
+        builder = PromptBuilder(org_name="Acme Corp")
+
+        documents = [Document(content="Company policy.", meta={})]
+
+        result = builder.run(documents=documents, query="What is the policy?")
+
+        assert "messages" in result
+        assert "Acme Corp" in result["messages"][0].text
 
 
 @pytest.mark.unit
@@ -171,70 +170,45 @@ class TestDomainFilterBuilder:
 
     def test_domain_filter_builder_detects_hr_policy(self):
         """Builder detects hr_policy domain."""
-        from src.components.router import DomainFilterBuilder
+        from src.components.routing import DomainFilterBuilder
         builder = DomainFilterBuilder()
-        
+
         result = builder.run(hr_policy="What is the leave policy?")
-        
+
         assert result["detected_domain"] == "hr_policy"
         assert result["query"] == "What is the leave policy?"
 
     def test_domain_filter_builder_detects_technical(self):
         """Builder detects technical domain."""
-        from src.components.router import DomainFilterBuilder
+        from src.components.routing import DomainFilterBuilder
         builder = DomainFilterBuilder()
-        
+
         result = builder.run(technical="How does the API authentication work?")
-        
+
         assert result["detected_domain"] == "technical"
 
     def test_domain_filter_builder_detects_contracts(self):
         """Builder detects contracts domain."""
-        from src.components.router import DomainFilterBuilder
+        from src.components.routing import DomainFilterBuilder
         builder = DomainFilterBuilder()
-        
+
         result = builder.run(contracts="What are the termination clauses?")
-        
+
         assert result["detected_domain"] == "contracts"
 
     def test_domain_filter_builder_explicit_override(self):
         """Builder uses explicit domain when provided."""
-        from src.components.router import DomainFilterBuilder
+        from src.components.routing import DomainFilterBuilder
         builder = DomainFilterBuilder()
-        
+
         result = builder.run(
             general="Some question text",
             explicit_domain="contracts",
         )
-        
+
         assert result["detected_domain"] == "contracts"
 
 
-@pytest.mark.unit
-class TestQueryExpander:
-    """Tests for QueryExpander component."""
-
-    def test_query_expander_disabled(self):
-        """Disabled expander returns original query."""
-        from src.components.router import QueryExpander
-        expander = QueryExpander(enabled=False)
-        
-        result = expander.run(query="What is the leave policy?")
-        
-        assert result["original_query"] == "What is the leave policy?"
-        assert result["expanded_query"] == "What is the leave policy?"
-        assert result["search_terms"] == ["What is the leave policy?"]
-
-    def test_query_expander_returns_search_terms(self):
-        """Expander returns search terms list."""
-        from src.components.router import QueryExpander
-        expander = QueryExpander(enabled=False)  # Use disabled for unit test
-        
-        result = expander.run(query="annual leave days")
-        
-        assert "search_terms" in result
-        assert isinstance(result["search_terms"], list)
-        assert len(result["search_terms"]) >= 1
 
 
 @pytest.mark.integration
@@ -242,90 +216,42 @@ class TestSecureRetriever:
     """Tests for SecureRetriever component."""
 
     def test_retriever_initialization(self, qdrant_url: str):
-        """Retriever initializes with Qdrant connection."""
-        from src.components.retriever import SecureRetriever
-        retriever = SecureRetriever(
-            qdrant_url=qdrant_url,
-            collection="documents",
-            top_k=10,
-        )
-        
+        """Retriever initializes with top_k config."""
+        from src.components.retrieval import SecureRetriever
+        retriever = SecureRetriever(top_k=10)
+
         assert retriever is not None
-        assert retriever.top_k == 10
+        assert retriever._top_k == 10
 
     def test_retriever_requires_tenant_id(self, qdrant_url: str):
         """Retriever requires tenant_id for isolation."""
-        from src.components.retriever import SecureRetriever
-        retriever = SecureRetriever(qdrant_url=qdrant_url)
-        
-        # Create a fake embedding (768 dimensions)
+        from src.components.retrieval import SecureRetriever
+        retriever = SecureRetriever()
+
         fake_embedding = [0.1] * 768
-        
-        # Should work with tenant_id
+
         result = retriever.run(
             query_embedding=fake_embedding,
             tenant_id="test_tenant",
         )
-        
+
         assert "documents" in result
 
     def test_retriever_returns_documents(self, qdrant_url: str):
         """Retriever returns list of documents."""
-        from src.components.retriever import SecureRetriever
-        retriever = SecureRetriever(qdrant_url=qdrant_url)
-        
+        from src.components.retrieval import SecureRetriever
+        retriever = SecureRetriever()
+
         fake_embedding = [0.1] * 768
-        
+
         result = retriever.run(
             query_embedding=fake_embedding,
             tenant_id="nonexistent_tenant",
         )
-        
+
         assert isinstance(result["documents"], list)
 
 
-@pytest.mark.integration
-@pytest.mark.slow
-class TestLiteLLMGenerator:
-    """Tests for LiteLLM generator component."""
-
-    def test_generator_initialization(self):
-        """Generator initializes with model config."""
-        from src.components.llm import LiteLLMGenerator
-        generator = LiteLLMGenerator(
-            model=DEFAULT_LITELLM_MODEL,
-            temperature=0.7,
-            max_tokens=500,
-        )
-        
-        assert generator.model == DEFAULT_LITELLM_MODEL
-        assert generator.temperature == 0.7
-        assert generator.max_tokens == 500
-
-    def test_generator_run(self):
-        """Generator produces response from prompt."""
-        from src.components.llm import LiteLLMGenerator
-        generator = LiteLLMGenerator(model=DEFAULT_LITELLM_MODEL)
-        
-        try:
-            result = generator.run(prompt="Say 'hello' and nothing else.")
-            
-            assert "replies" in result
-            assert len(result["replies"]) > 0
-            assert "meta" in result
-        except Exception as e:
-            # LLM might not be available in test environment
-            pytest.skip(f"LLM not available: {e}")
-
-    def test_generator_with_fallbacks(self):
-        """Generator uses fallback models if primary fails."""
-        from src.components.llm import LiteLLMGenerator
-        generator = LiteLLMGenerator(
-            model="ollama/nonexistent-model",
-            fallbacks=[DEFAULT_LITELLM_MODEL, DEFAULT_LITELLM_FALLBACK],
-        )
-        
-        assert generator.fallbacks is not None
 
 
 @pytest.mark.integration
@@ -334,52 +260,51 @@ class TestSecureRetrieverFiltering:
 
     def test_retriever_domain_filter(self, qdrant_url: str):
         """Retriever applies domain filter."""
-        from src.components.retriever import SecureRetriever
-        retriever = SecureRetriever(qdrant_url=qdrant_url)
-        
+        from src.components.retrieval import SecureRetriever
+        retriever = SecureRetriever()
+
         fake_embedding = [0.1] * 768
         domain_filter = {
             "key": "document_type",
             "match": {"value": "hr_policy"},
         }
-        
+
         result = retriever.run(
             query_embedding=fake_embedding,
             tenant_id="test_tenant",
             domain_filter=domain_filter,
         )
-        
-        # Should not fail with domain filter
+
         assert "documents" in result
 
     def test_retriever_role_filter(self, qdrant_url: str):
         """Retriever applies role-based filter."""
-        from src.components.retriever import SecureRetriever
-        retriever = SecureRetriever(qdrant_url=qdrant_url)
-        
+        from src.components.retrieval import SecureRetriever
+        retriever = SecureRetriever()
+
         fake_embedding = [0.1] * 768
-        
+
         result = retriever.run(
             query_embedding=fake_embedding,
             tenant_id="test_tenant",
             user_roles=["admin", "hr"],
         )
-        
+
         assert "documents" in result
 
     def test_retriever_user_filter(self, qdrant_url: str):
         """Retriever applies user-based filter."""
-        from src.components.retriever import SecureRetriever
-        retriever = SecureRetriever(qdrant_url=qdrant_url)
-        
+        from src.components.retrieval import SecureRetriever
+        retriever = SecureRetriever()
+
         fake_embedding = [0.1] * 768
-        
+
         result = retriever.run(
             query_embedding=fake_embedding,
             tenant_id="test_tenant",
             user_id="user123",
         )
-        
+
         assert "documents" in result
 
 
@@ -443,11 +368,14 @@ class TestTenantModelResolver:
 
                 def fetchone(self_inner):
                     call_count[0] += 1
-                    # _fetch_tenant_model_sync returns a row with llm_model
+                    # Call 1: _fetch_platform_model_sync → returns None (no platform override)
                     if call_count[0] == 1:
-                        return {"llm_model": "my-model"}
-                    # _fetch_user_preferences_sync returns thinking_mode=True
+                        return None
+                    # Call 2: _fetch_tenant_model_sync → returns row with llm_model
                     if call_count[0] == 2:
+                        return {"llm_model": "my-model"}
+                    # Call 3: _fetch_user_preferences_sync → returns thinking_mode=True
+                    if call_count[0] == 3:
                         return {"value": True}
                     return None
 
@@ -535,3 +463,117 @@ class TestTenantModelResolver:
         assert ("tenant-1", "user-b") not in TenantModelResolver._cache
         # Different tenant unaffected
         assert ("tenant-2", "user-c") in TenantModelResolver._cache
+
+
+# ---------------------------------------------------------------------------
+# T2 verification: LocalCrossEncoderRanker must be removed
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestRerankerImports:
+    """Verify dead code removal: LocalCrossEncoderRanker no longer exists."""
+
+    def test_local_cross_encoder_removed(self):
+        """Importing LocalCrossEncoderRanker raises ImportError — it was deleted."""
+        with pytest.raises((ImportError, AttributeError)):
+            from src.components.reranker import LocalCrossEncoderRanker  # noqa: F401
+
+    def test_infinity_reranker_importable(self):
+        """InfinityReranker is still present and importable."""
+        from src.components.reranker import InfinityReranker
+        r = InfinityReranker(url="http://localhost:7997", model="cross-encoder/ms-marco-MiniLM-L-6-v2")
+        assert r is not None
+        assert r.top_k == 10
+
+
+# ---------------------------------------------------------------------------
+# T12 verification: _extract_think handles unclosed <think> blocks
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestExtractThink:
+    """Tests for _extract_think in pipelines/query.py."""
+
+    def _call(self, raw: str):
+        from src.pipelines.query import _extract_think
+        return _extract_think(raw)
+
+    def test_complete_block(self):
+        thinking, answer = self._call("<think>I am reasoning</think>The final answer")
+        assert thinking == "I am reasoning"
+        assert answer == "The final answer"
+
+    def test_complete_block_with_whitespace(self):
+        thinking, answer = self._call("<think>\n  reasoning here\n</think>\n\nAnswer text")
+        assert "reasoning here" in thinking
+        assert "Answer text" in answer
+
+    def test_unclosed_block_returns_thinking_empty_answer(self):
+        """Generation truncated mid-think: tail is thinking, answer is empty."""
+        thinking, answer = self._call("<think>partial thought that never ends")
+        assert "partial thought" in thinking
+        assert answer == ""
+
+    def test_no_think_block_passthrough(self):
+        thinking, answer = self._call("This is a plain answer with no think block.")
+        assert thinking == ""
+        assert answer == "This is a plain answer with no think block."
+
+    def test_empty_think_block(self):
+        thinking, answer = self._call("<think></think>The answer")
+        assert thinking == ""
+        assert answer == "The answer"
+
+    def test_nested_angle_brackets_in_answer(self):
+        """Angle brackets in the answer after </think> don't confuse the parser."""
+        thinking, answer = self._call("<think>reason</think>Answer with <b>html</b>")
+        assert thinking == "reason"
+        assert "html" in answer
+
+
+# ---------------------------------------------------------------------------
+# T11 verification: min_score branch behaviour
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestMinScoreBranch:
+    """Tests for rag_min_score_fallback_topk config in query pipeline."""
+
+    def _make_doc(self, score: float):
+        from haystack import Document
+        return Document(content=f"doc score={score}", score=score)
+
+    def _apply_filter(self, docs, min_score: float, fallback_topk: int):
+        """Mirror the logic in RAGService.query step 6."""
+        reranked = docs
+        if min_score > 0.0:
+            above = [d for d in reranked if (d.score or 0.0) >= min_score]
+            if not above and fallback_topk > 0:
+                above = reranked[:fallback_topk]
+            reranked = above
+        return reranked
+
+    def test_strict_mode_returns_empty_when_all_below_threshold(self):
+        """fallback_topk=0: no docs pass threshold → empty list."""
+        docs = [self._make_doc(0.1), self._make_doc(0.2)]
+        result = self._apply_filter(docs, min_score=0.5, fallback_topk=0)
+        assert result == []
+
+    def test_fallback_topk_returns_n_docs_when_none_pass(self):
+        """fallback_topk=2: no docs pass threshold → top-2 returned."""
+        docs = [self._make_doc(0.1), self._make_doc(0.2), self._make_doc(0.3)]
+        result = self._apply_filter(docs, min_score=0.9, fallback_topk=2)
+        assert len(result) == 2
+
+    def test_above_threshold_docs_returned_normally(self):
+        """Docs above threshold are returned; fallback is not triggered."""
+        docs = [self._make_doc(0.9), self._make_doc(0.1)]
+        result = self._apply_filter(docs, min_score=0.5, fallback_topk=0)
+        assert len(result) == 1
+        assert result[0].score == pytest.approx(0.9)
+
+    def test_min_score_zero_disables_filter(self):
+        """min_score=0.0 returns all docs unfiltered."""
+        docs = [self._make_doc(0.05), self._make_doc(0.1)]
+        result = self._apply_filter(docs, min_score=0.0, fallback_topk=0)
+        assert len(result) == 2

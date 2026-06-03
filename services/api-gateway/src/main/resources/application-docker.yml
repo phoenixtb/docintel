@@ -167,6 +167,34 @@ spring:
           filters:
             - RewritePath=/api/v1/models, /models
 
+        # Model-profile cache busting — routes to rag-service (must come BEFORE the
+        # admin-service and admin-tenants catch-alls to avoid wrong service routing).
+        - id: rag-service-model-profiles-cache-global
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/admin/model-profiles-cache
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/admin/model-profiles-cache, /internal/model-profiles-cache
+
+        - id: rag-service-model-profiles-cache-tenant
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/tenants/{tenantId}/model-profiles-cache
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tenantId>[^/]+)/model-profiles-cache, /internal/model-profiles-cache/${tenantId}
+
+        # Resolve effective sampling params for a (tenant, model) — routes to rag-service.
+        # Must come BEFORE admin-tenants catch-all.
+        - id: rag-service-model-profiles-resolve
+          uri: http://rag-service:8000
+          predicates:
+            - Path=/api/v1/tenants/{tenantId}/model-profiles/resolve
+            - Method=GET
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tenantId>[^/]+)/model-profiles/resolve, /internal/model-profiles/resolve/${tenantId}
+
         - id: admin-service
           uri: http://admin-service:8082
           predicates:
@@ -181,6 +209,14 @@ spring:
             - Method=GET,PATCH
           filters:
             - RewritePath=/api/v1/tenants/(?<tid>[^/]+)/settings, /internal/tenants/${tid}/settings
+
+        - id: admin-tenants-model-profiles
+          uri: http://admin-service:8082
+          predicates:
+            - Path=/api/v1/tenants/*/model-profiles
+            - Method=GET,POST
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tid>[^/]+)/model-profiles, /internal/tenants/${tid}/model-profiles
 
         - id: admin-tenants
           uri: http://admin-service:8082

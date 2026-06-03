@@ -37,11 +37,20 @@ class PendingDocumentSweeper(
         // Use updatedAt (not createdAt) so that a document which was recently touched
         // (e.g. just set to PROCESSING) is not immediately retried by the next sweep run.
         val before = Instant.now().minus(STALE_MINUTES, ChronoUnit.MINUTES)
-        val stale = documentRepository.findStaleByStatusIn(
-            statuses = listOf(ProcessingStatus.PENDING, ProcessingStatus.PROCESSING),
-            before = before,
-            pageable = PageRequest.of(0, BATCH_SIZE),
-        )
+
+        // Scheduled threads carry no HTTP context — without an admin role RLS hides
+        // every cross-tenant row and the find returns empty. Elevate just for discovery;
+        // the per-doc loop sets the real tenant before reprocessing.
+        val stale = try {
+            TenantContextHolder.setUserRole("platform_admin")
+            documentRepository.findStaleByStatusIn(
+                statuses = listOf(ProcessingStatus.PENDING, ProcessingStatus.PROCESSING),
+                before = before,
+                pageable = PageRequest.of(0, BATCH_SIZE),
+            )
+        } finally {
+            TenantContextHolder.clear()
+        }
 
         if (stale.isEmpty()) return
 

@@ -13,9 +13,9 @@ Switch engines by updating LLM_CHAT_URL / LLM_EMBED_URL:
 
 Model tiers:
   LLM          → LLM_MODEL            (chat generation, streaming)
-  Embeddings   → LLM_EMBED_MODEL      (dense vectors via engine embed endpoint)
+  Embeddings   → LLM_EMBED_MODEL      (dense vectors via engine embed endpoint — LMForge/Ollama/vLLM)
   Sparse (BM25)→ fastembed local       (no server, CPU, lightweight)
-  Reranker     → RERANKER_MODEL        (cross-encoder, in-process sentence-transformers, MPS/CUDA/CPU)
+  Reranker     → RERANKER_MODEL        (cross-encoder served by Infinity ONNX sidecar at RERANKER_URL)
   Domain router→ RAG_DOMAIN_ROUTER_MODEL (optional, disabled by default)
 """
 
@@ -29,12 +29,11 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        env_ignore_empty=True,   # LLM_TOP_P="" → None, not a parse error
     )
 
     # ── Qdrant ───────────────────────────────────────────────────────────────
     qdrant_url: str = "http://localhost:6333"
-    qdrant_collection: str = "documents"
-    qdrant_cache_collection: str = "response_cache"
     # Must match llm_embed_dim. Update both together when switching embed model.
     qdrant_embedding_dim: int = 1024
     # Set QDRANT_QUANTIZATION=false to disable INT8 scalar quantization (e.g. during benchmarking).
@@ -56,10 +55,34 @@ class Settings(BaseSettings):
     llm_embed_model: str = "qwen3-embed:0.6b:4bit"
     llm_embed_dim: int = 1024
 
-    # LLM generation settings
+    # LLM generation sampling parameters — global env-level fallbacks.
+    # Resolution order at query time:
+    #   tenant DB profile → platform DB profile → built-in code defaults → these values.
+    # Override in .env (generated from config/defaults.env) to change the baseline.
     llm_temperature: float = 0.1
+    llm_top_p: float | None = None        # LLM_TOP_P="" in defaults.env → use model default
     llm_max_tokens: int = 1024
-    llm_frequency_penalty: float = 0.3  # suppresses repetition loops in small models
+    llm_frequency_penalty: float = 0.3
+    llm_presence_penalty: float = 0.0
+    llm_repetition_penalty: float | None = 1.05  # NULL → LMForge oMLX derives from f+p penalty
+    llm_top_k: int | None = None
+    llm_min_p: float | None = None
+    llm_thinking_temperature: float = 0.6
+    llm_thinking_top_p: float = 0.95
+    llm_thinking_max_tokens: int = 6144
+    llm_thinking_frequency_penalty: float = 0.0  # Qwen3 spec: 0 in thinking mode
+    llm_thinking_presence_penalty: float = 0.3   # Qwen3 spec
+    llm_thinking_repetition_penalty: float = 1.2  # explicit; wins over oMLX derived value
+    llm_thinking_top_k: int = 20                 # Qwen3 spec
+    llm_thinking_min_p: float = 0.0              # Qwen3 spec
+    llm_thinking_budget: int = 4096              # LMForge two-call hard cap on reasoning tokens
+    llm_stream_thinking: bool = True             # send stream_reasoning_deltas to LMForge
+    # HTTP stream timeout (seconds). Haystack/OpenAI client default is 30s which
+    # is far too short for thinking mode where the first token may take >60s.
+    llm_stream_timeout_s: float = 120.0          # normal mode
+    llm_thinking_stream_timeout_s: float = 360.0 # thinking mode (6 min for complex reasoning)
+    llm_stream_max_retries: int = 1              # retries for normal mode
+    llm_thinking_stream_max_retries: int = 0     # no retry for thinking — already waited long
     # Fast model used only for async conversation summarization (not main queries).
     llm_expansion_model: str = "qwen3:1.7b"
 
@@ -69,24 +92,27 @@ class Settings(BaseSettings):
     conversation_summary_threshold: int = 8   # compress when total messages exceed this
     conversation_verbatim_recent: int = 4     # always keep last N messages verbatim
 
-    # Context windows.
-    #   system prompt + 5-10 retrieved chunks (~3k tokens) + history + question + answer.
-    # Override via LLM_CTX / LLM_THINKING_CTX in .env.
-    llm_ctx: int = 16384          # standard queries
-    llm_thinking_ctx: int = 16384  # thinking mode — same budget as normal; 32K caused OOM on 4b models when reranker + embedder are co-loaded
-
-    # ── Reranker — Infinity ONNX server (no in-process JIT, instant startup) ─
-    # Infinity runs as a sidecar container and exposes a Cohere-compatible /rerank.
-    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    reranker_url: str = "http://infinity:7997"
-    use_reranking: bool = True
+    # ── Reranker — LMForge /v1/rerank (oMLX on Mac; replaces Infinity sidecar) ─
+    reranker_model: str = "jina-reranker-v2:multilingual"
+    reranker_url: str = "http://host.docker.internal:11430/v1"
+    # Disabled until an MLX-format reranker is in the LMForge catalog.
+    # Enable by setting USE_RERANKING=true in .env once model is pulled.
+    use_reranking: bool = False
 
     # ── RAG parameters ────────────────────────────────────────────────────────
     rag_retriever_top_k: int = 50
     rag_reranker_top_k: int = 10
     rag_default_top_k: int = 5
     rag_min_relevance_score: float = 0.0
+    # When no doc passes rag_min_relevance_score, how many top docs to return anyway.
+    # 0 = strict (return empty → NO_RELEVANT_DOCUMENTS_RESPONSE).
+    # Set to 1 to always return at least one result regardless of score.
+    rag_min_score_fallback_topk: int = 0
     rag_cache_similarity_threshold: float = 0.92
+    # Typewriter replay for cache hits: chunk the cached response into small
+    # TokenEvents to preserve the streaming UX. Set delay_ms=0 for instant replay.
+    rag_cache_replay_chunk_chars: int = 24
+    rag_cache_replay_chunk_delay_ms: int = 15
 
     # ── Hybrid search (BM25 sparse via fastembed, always local) ──────────────
     rag_use_hybrid_search: bool = True

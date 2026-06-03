@@ -76,13 +76,19 @@ def get_document_store(tenant_id: str, settings: Settings | None = None) -> Qdra
         use_sparse_embeddings=True,
         sparse_idf=True,
         recreate_index=False,
-        prefer_grpc=True,
+        # gRPC must stay disabled: docling chunk metadata includes xxhash64 IDs
+        # (uint64) that exceed protobuf int64 range and crash the gRPC upsert
+        # with "Value out of range". HTTP/REST accepts arbitrary JSON ints.
+        prefer_grpc=False,
     )
 
     # Ensure ACL indexes after the store (and collection) is initialized.
     # Reuse the store's internal QdrantClient to avoid opening a second TCP connection.
+    # qdrant-haystack 10.x renamed the public `client` attr to a lazily-initialized
+    # `_client`; force initialization, then reach into the private attr.
     try:
-        internal_client: QdrantClient = store.client  # type: ignore[attr-defined]
+        store._initialize_client()  # type: ignore[attr-defined]
+        internal_client: QdrantClient = store._client  # type: ignore[attr-defined]
         _ensure_acl_indexes(internal_client, collection_name)
     except Exception as e:
         logger.warning("ACL index creation failed (non-fatal): %s", e)
@@ -99,7 +105,9 @@ def delete_document_from_store(
 ) -> int:
     """Delete all Qdrant points where meta.document_id == document_id."""
     store = get_document_store(tenant_id, settings)
-    deleted = store.delete_documents(
+    # qdrant-haystack 10.x: filter-based delete moved to delete_by_filter().
+    # delete_documents(...) now only accepts a list of point IDs.
+    deleted = store.delete_by_filter(
         filters={"field": "meta.document_id", "operator": "==", "value": document_id}
     )
     return deleted or 0

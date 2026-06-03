@@ -21,6 +21,8 @@ DoclingConverter accelerator selection (via docintel_common.detect_device):
 Sparse embedding model MUST match rag-service query side (Qdrant/bm25).
 """
 
+import gc
+import hashlib
 import logging
 import threading
 import uuid
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 _conversion_pipeline_cache: dict[str, Pipeline] = {}
 _ingestion_pipeline_cache: dict[str, Pipeline] = {}
+_pdf_ingestion_pipeline_cache: dict[str, Pipeline] = {}
 # Per-tenant threading.Locks: run_ingestion is called from ThreadPoolExecutor threads,
 # so asyncio.Lock is not usable here — threading.Lock is the correct primitive.
 _pipeline_locks: dict[str, threading.Lock] = {}
@@ -143,6 +146,12 @@ class TokenAwareSplitter:
         self._tokenizer = None
 
     def warm_up(self) -> None:
+        # Guard: Haystack calls warm_up() on every Pipeline.run(). Without this
+        # check, AutoTokenizer.from_pretrained makes 4+ HuggingFace HEAD/GET
+        # requests per document even when the model is locally cached, because
+        # the transformers library validates cache freshness on every call.
+        if self._tokenizer is not None:
+            return
         from transformers import AutoTokenizer
         # model_max_length=int(1e9): we use this tokenizer only for counting tokens,
         # not for model inference. Setting an effectively unlimited model_max_length
@@ -151,7 +160,7 @@ class TokenAwareSplitter:
         self._tokenizer = AutoTokenizer.from_pretrained(
             "bert-base-uncased", model_max_length=int(1e9)
         )
-        logger.debug("TokenAwareSplitter: tokenizer loaded (vocab=%d)", self._tokenizer.vocab_size)
+        logger.info("TokenAwareSplitter: tokenizer loaded (vocab=%d)", self._tokenizer.vocab_size)
 
     def _count(self, text: str) -> int:
         assert self._tokenizer is not None, "warm_up() was not called"
@@ -293,27 +302,67 @@ class TokenAwareSplitter:
 # Pipeline factories
 # ---------------------------------------------------------------------------
 
-def _get_docling_converter(cfg: Settings):
-    """Return a hardware-aware DoclingConverter instance."""
-    from docling.datamodel.base_models import InputFormat
+def _build_pdf_pipeline_options(cfg: Settings, profile=None) -> "PdfPipelineOptions":
+    """Build PdfPipelineOptions for a given PDF profile (or safe defaults)."""
     from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import DocumentConverter
-    from docling_haystack.converter import DoclingConverter, ExportType
 
     options = PdfPipelineOptions()
-    options.do_ocr = cfg.docling_do_ocr
-    options.do_table_structure = cfg.docling_do_table_structure
+    options.do_table_structure = True  # TableFormer only fires on layout-detected tables
+
+    if cfg.ingestion_use_page_routing:
+        # Per-page router handles OCR externally — Docling only does layout + TableFormer
+        options.do_ocr = False
+    elif profile is not None:
+        # Legacy Docling path: respect the profile's OCR recommendation
+        options.do_ocr = profile.do_ocr
+        if hasattr(options, "force_full_page_ocr") and profile.force_full_page_ocr:
+            options.force_full_page_ocr = True
+        if hasattr(options, "force_backend_text") and profile.force_backend_text:
+            options.force_backend_text = True
+    else:
+        options.do_ocr = cfg.docling_do_ocr
 
     device = detect_device()
     options.accelerator_options.device = device
     logger.info(
-        "Docling: using %s (ocr=%s, table_structure=%s)",
-        device.upper(), options.do_ocr, options.do_table_structure,
+        "Docling PDF options: strategy=%s ocr=%s table_structure=%s device=%s",
+        getattr(profile, "strategy", "default"),
+        options.do_ocr,
+        options.do_table_structure,
+        device.upper(),
     )
+    return options
+
+
+def _get_docling_converter(cfg: Settings, profile=None):
+    """Return a hardware-aware DoclingConverter Haystack component (used for text/single-shard path)."""
+    from docling.datamodel.base_models import InputFormat
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling_haystack.converter import DoclingConverter, ExportType
+
+    options = _build_pdf_pipeline_options(cfg, profile)
 
     return DoclingConverter(
-        converter=DocumentConverter(format_options={InputFormat.PDF: options}),
+        converter=DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+        ),
         export_type=ExportType.DOC_CHUNKS,
+    )
+
+
+def _build_raw_docling_converter(cfg: Settings, profile=None) -> "DocumentConverter":
+    """
+    Build a raw docling DocumentConverter (not wrapped in Haystack) for the sharded PDF path.
+
+    The sharded path calls converter.convert(path, page_range=...) directly per shard,
+    then chunks with HybridChunker outside the Haystack pipeline.
+    """
+    from docling.datamodel.base_models import InputFormat
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    options = _build_pdf_pipeline_options(cfg, profile)
+    return DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
     )
 
 
@@ -427,8 +476,190 @@ def _get_ingestion_pipeline(tenant_id: str, cfg: Settings) -> Pipeline:
     return _ingestion_pipeline_cache[tenant_id]
 
 
+def _build_pdf_ingestion_pipeline(tenant_id: str, cfg: Settings) -> Pipeline:
+    """
+    Ingestion pipeline for pre-chunked PDF shard documents.
+
+    Skips TokenAwareSplitter — chunks come from docling's HybridChunker which already
+    produces appropriately-sized segments. Applies: MetadataEnricher → BM25 sparse embed
+    → dense embed → Qdrant write.
+    """
+    from haystack.components.embedders.openai_document_embedder import OpenAIDocumentEmbedder
+    from haystack.utils import Secret
+    from haystack_integrations.components.embedders.fastembed import FastembedSparseDocumentEmbedder
+
+    document_store = get_document_store(tenant_id, cfg)
+
+    pipeline = Pipeline()
+    pipeline.add_component("enricher", MetadataEnricher())
+    pipeline.add_component(
+        "sparse_embedder",
+        FastembedSparseDocumentEmbedder(model="Qdrant/bm25"),
+    )
+    pipeline.add_component(
+        "embedder",
+        OpenAIDocumentEmbedder(
+            model=cfg.llm_embed_model,
+            api_base_url=cfg.llm_embed_url,
+            api_key=Secret.from_token(cfg.llm_api_key),
+        ),
+    )
+    pipeline.add_component(
+        "writer",
+        DocumentWriter(
+            document_store=document_store,
+            policy=DuplicatePolicy.OVERWRITE,
+        ),
+    )
+
+    pipeline.connect("enricher.documents", "sparse_embedder.documents")
+    pipeline.connect("sparse_embedder.documents", "embedder.documents")
+    pipeline.connect("embedder.documents", "writer.documents")
+
+    logger.info("Built PDF shard ingestion pipeline for tenant=%s", tenant_id)
+    return pipeline
+
+
+def _get_pdf_ingestion_pipeline(tenant_id: str, cfg: Settings) -> Pipeline:
+    """PDF shard pipeline — no splitter. Thread-safe, per-tenant cached."""
+    if tenant_id in _pdf_ingestion_pipeline_cache:
+        return _pdf_ingestion_pipeline_cache[tenant_id]
+
+    with _pipeline_locks_guard:
+        if tenant_id not in _pipeline_locks:
+            _pipeline_locks[tenant_id] = threading.Lock()
+    lock = _pipeline_locks[tenant_id]
+
+    with lock:
+        if tenant_id not in _pdf_ingestion_pipeline_cache:
+            _pdf_ingestion_pipeline_cache[tenant_id] = _build_pdf_ingestion_pipeline(tenant_id, cfg)
+    return _pdf_ingestion_pipeline_cache[tenant_id]
+
+
 def invalidate_pipeline_cache(tenant_id: str) -> None:
     _ingestion_pipeline_cache.pop(tenant_id, None)
+    _pdf_ingestion_pipeline_cache.pop(tenant_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers (in-process cache backed by document-service DB via HTTP)
+# ---------------------------------------------------------------------------
+
+_checkpoint_cache: dict[str, dict] = {}
+_checkpoint_lock = threading.Lock()
+
+
+def _load_checkpoint(document_id: str) -> dict | None:
+    with _checkpoint_lock:
+        return _checkpoint_cache.get(document_id)
+
+
+def _save_checkpoint(
+    document_id: str,
+    tenant_id: str,
+    last_completed_page: int,
+    chunk_count_so_far: int,
+    total_pages: int,
+) -> None:
+    with _checkpoint_lock:
+        _checkpoint_cache[document_id] = {
+            "last_completed_page":  last_completed_page,
+            "chunk_count_so_far":   chunk_count_so_far,
+            "total_pages":          total_pages,
+        }
+    logger.debug(
+        "Checkpoint: document_id=%s page=%d/%d chunks_so_far=%d",
+        document_id, last_completed_page, total_pages, chunk_count_so_far,
+    )
+
+
+def _delete_checkpoint(document_id: str) -> None:
+    with _checkpoint_lock:
+        _checkpoint_cache.pop(document_id, None)
+
+
+def _chunk_id_from_index(document_id: str, global_index: int) -> str:
+    """Deterministic chunk UUID = SHA-256(document_id:global_index)[:16 bytes]."""
+    raw = hashlib.sha256(f"{document_id}:{global_index}".encode()).digest()[:16]
+    return str(uuid.UUID(bytes=raw))
+
+
+def _publish_progress_sync(
+    document_id: str,
+    tenant_id: str,
+    filename: str,
+    current_page: int,
+    total_pages: int,
+    stage: str,
+    cfg: Settings,
+) -> None:
+    """
+    Publish a shard-level progress event to documents.progress (synchronous).
+
+    Runs inside the ProcessPoolExecutor subprocess, so uses the synchronous
+    redis-py client rather than the async one. Non-fatal if Redis is unavailable.
+    """
+    import json as _json
+    try:
+        import redis as _redis
+        r = _redis.Redis(
+            host=cfg.redis_host,
+            port=cfg.redis_port,
+            password=cfg.redis_password or None,
+            decode_responses=True,
+        )
+        payload = _json.dumps({
+            "documentId":  document_id,
+            "tenantId":    tenant_id,
+            "filename":    filename,
+            "currentPage": current_page,
+            "totalPages":  total_pages,
+            "stage":       stage,
+        })
+        r.xadd("documents.progress", {"payload": payload})
+        r.close()
+    except Exception as e:
+        logger.debug("Progress publish failed (non-fatal): %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _classify_domain(sample_text: str, filename: str) -> str:
+    try:
+        clf = get_domain_classifier()
+        clf_result = clf.classify(sample_text)
+        logger.info(
+            "Auto-classified '%s' as domain='%s' (confidence=%.2f)",
+            filename, clf_result.domain, clf_result.confidence,
+        )
+        return clf_result.domain
+    except Exception as e:
+        logger.warning("Domain classification failed (non-fatal): %s — using 'general'", e)
+        return "general"
+
+
+def _build_chunk_payload(doc: Document, chunk_index: int, document_id: str) -> dict:
+    """Build a PG-ready chunk dict from a Haystack Document."""
+    content = doc.content or ""
+    raw_id = doc.id or ""
+    if raw_id and len(raw_id) >= 32:
+        chunk_id = str(uuid.UUID(bytes=bytes.fromhex(raw_id[:32])))
+    else:
+        chunk_id = _chunk_id_from_index(document_id, chunk_index)
+    start_char = doc.meta.get("split_idx_start", 0)
+    end_char   = doc.meta.get("split_idx_end", start_char + len(content))
+    token_count = doc.meta.get("bert_token_count", max(1, len(content.split())))
+    return {
+        "chunk_id":    chunk_id,
+        "content":     content,
+        "chunk_index": chunk_index,
+        "start_char":  start_char,
+        "end_char":    end_char,
+        "token_count": token_count,
+        "metadata":    doc.meta,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -446,25 +677,50 @@ def run_ingestion(
     acl: DocumentACL | None = None,
 ) -> dict:
     """
-    Run the full two-stage ingestion pipeline.
+    Run the full ingestion pipeline with smart PDF routing and sharded processing.
 
-    Stage 1: Docling converts files → Documents with clean text/structure
-    Classification: Domain auto-detected from content (if domain_hint == "auto")
-    Stage 2: MetadataEnricher → BM25 sparse → Ollama dense → Qdrant write
+    For PDF files:
+      1. probe_pdf() → PdfProfile (digital / hybrid / scanned)
+      2. Page-range shard loop (DOCLING_SHARD_PAGES pages per iteration)
+         Each shard: convert → chunk (HybridChunker) → embed → Qdrant write → PG append
+      3. Crash-resume via in-process checkpoints
+
+    For text/* files:
+      Single pass through the existing Haystack conversion + ingestion pipeline.
+      Behavior identical to pre-redesign; no sharding overhead for small files.
 
     Returns:
         {
           "embedded_count": int,
-          "chunk_count": int,
-          "domain": str,
-          "collection": str,
-          "chunks": list[dict]   # for PostgreSQL persistence
+          "chunk_count":    int,
+          "domain":         str,
+          "collection":     str,
+          "chunks":         list[dict]   # only populated for single-shard path
         }
     """
     cfg = settings or get_settings()
+    path = file_paths[0]
+    is_pdf = path.suffix.lower() in {".pdf"}
+
+    if is_pdf:
+        return _run_pdf_sharded(path, document_id, tenant_id, filename, domain_hint, extra_meta, cfg, acl)
+    else:
+        return _run_text(file_paths, document_id, tenant_id, filename, domain_hint, extra_meta, cfg, acl)
+
+
+def _run_text(
+    file_paths: list[Path],
+    document_id: str,
+    tenant_id: str,
+    filename: str,
+    domain_hint: str,
+    extra_meta: dict | None,
+    cfg: Settings,
+    acl: DocumentACL | None,
+) -> dict:
+    """Single-pass ingestion for text/* and other non-PDF files (unchanged from pre-redesign)."""
     str_paths = [str(p) for p in file_paths]
 
-    # ── Stage 1: Conversion ───────────────────────────────────────────────
     conv_pipeline = _get_conversion_pipeline(cfg)
     conv_result = conv_pipeline.run({"router": {"sources": str_paths}})
     raw_docs: list[Document] = conv_result.get("joiner", {}).get("documents", [])
@@ -474,38 +730,22 @@ def run_ingestion(
         return {"embedded_count": 0, "chunk_count": 0, "domain": "general",
                 "collection": f"documents_{tenant_id}", "chunks": []}
 
-    # ── Domain classification ─────────────────────────────────────────────
     domain = domain_hint
     if domain == "auto":
         sample_text = " ".join((d.content or "") for d in raw_docs[:10])[:5000]
-        try:
-            clf = get_domain_classifier()
-            clf_result = clf.classify(sample_text)
-            domain = clf_result.domain
-            logger.info(
-                "Auto-classified '%s' as domain='%s' (confidence=%.2f)",
-                filename, domain, clf_result.confidence,
-            )
-        except Exception as e:
-            logger.warning("Domain classification failed (non-fatal): %s — using 'general'", e)
-            domain = "general"
+        domain = _classify_domain(sample_text, filename)
 
-    # ── Build full document-level metadata ────────────────────────────────
-    # acl.to_meta() is merged LAST: ACL fields cannot be overridden by extra_meta.
     effective_acl = acl or DocumentACL()
     meta_override = {
-        "tenant_id": tenant_id,
-        "document_id": document_id,
-        "filename": filename,
-        "domain": domain,
-        "document_type": domain,   # used by rag-service SecureRetriever for domain filtering
+        "tenant_id":     tenant_id,
+        "document_id":   document_id,
+        "filename":      filename,
+        "domain":        domain,
+        "document_type": domain,
         **(extra_meta or {}),
-        **effective_acl.to_meta(),  # write-once: always applied last
+        **effective_acl.to_meta(),
     }
 
-    # ── Stage 2: Enrich + Embed + Index ──────────────────────────────────
-    # include_outputs_from forces the embedder's output into the result dict even
-    # though it is consumed by the writer. Without this, embedded_docs is always [].
     ing_pipeline = _get_ingestion_pipeline(tenant_id, cfg)
     ing_result = ing_pipeline.run(
         {"enricher": {"documents": raw_docs, "meta_override": meta_override}},
@@ -515,42 +755,315 @@ def run_ingestion(
     written_docs: int = ing_result.get("writer", {}).get("documents_written", 0)
     embedded_docs: list[Document] = ing_result.get("embedder", {}).get("documents", [])
 
-    # ── Build PG chunk records ────────────────────────────────────────────
-    # Use the accurate positions/token counts stored by TokenAwareSplitter in
-    # Document.meta (split_idx_start, split_idx_end, bert_token_count).
-    # These refer to the pre-overlap raw chunk positions in the original document,
-    # making them usable for source highlighting. The running char_offset approach
-    # was incorrect because overlap-extended chunks don't have contiguous positions.
-    chunks = []
-    for i, doc in enumerate(embedded_docs):
-        content = doc.content or ""
-        # Haystack doc.id is a 64-char SHA-256 hex string; DB chunks.id is UUID.
-        # Take the first 32 hex chars (128 bits) and reformat as UUID for deterministic upserts.
-        raw_id = doc.id or ""
-        if raw_id and len(raw_id) >= 32:
-            chunk_id = str(uuid.UUID(bytes=bytes.fromhex(raw_id[:32])))
-        else:
-            chunk_id = str(uuid.uuid4())
-        start_char = doc.meta.get("split_idx_start", 0)
-        end_char = doc.meta.get("split_idx_end", start_char + len(content))
-        token_count = doc.meta.get("bert_token_count", max(1, len(content.split())))
-
-        chunks.append({
-            "chunk_id": chunk_id,
-            "content": content,
-            "chunk_index": i,
-            "start_char": start_char,
-            "end_char": end_char,
-            "token_count": token_count,
-            "metadata": doc.meta,   # already contains full meta_override via MetadataEnricher
-        })
+    chunks = [_build_chunk_payload(doc, i, document_id) for i, doc in enumerate(embedded_docs)]
 
     return {
         "embedded_count": written_docs,
-        "chunk_count": len(chunks),
-        "domain": domain,
-        "collection": f"documents_{tenant_id}",
-        "chunks": chunks,
+        "chunk_count":    len(chunks),
+        "domain":         domain,
+        "collection":     f"documents_{tenant_id}",
+        "chunks":         chunks,
+    }
+
+
+def _run_pdf_sharded(
+    path: Path,
+    document_id: str,
+    tenant_id: str,
+    filename: str,
+    domain_hint: str,
+    extra_meta: dict | None,
+    cfg: Settings,
+    acl: DocumentACL | None,
+) -> dict:
+    """
+    Memory-bounded, crash-resumable PDF ingestion via page_range sharding.
+
+    Each shard converts DOCLING_SHARD_PAGES pages, chunks with HybridChunker,
+    embeds in batches, writes to Qdrant, appends to PG, and saves a checkpoint.
+    Memory from the previous shard is explicitly released before the next.
+    """
+    from .pdf_probe import probe_pdf
+    from .document_client import ChunkPayload, DocumentServiceClient
+
+    profile = probe_pdf(path)
+    total_pages = profile.page_count
+    shard_size  = cfg.docling_shard_pages
+
+    if total_pages == 0:
+        raise ValueError(
+            f"PDF probe returned 0 pages for '{filename}' — file may be corrupted or unreadable by pypdfium2. "
+            "Re-upload the document."
+        )
+
+    logger.info(
+        "PDF sharded ingestion: document_id=%s file=%s pages=%d strategy=%s shard_size=%d",
+        document_id, filename, total_pages, profile.strategy, shard_size,
+    )
+
+    # Resume from checkpoint if available (crash recovery)
+    checkpoint     = _load_checkpoint(document_id)
+    start_page     = (checkpoint["last_completed_page"] + 1) if checkpoint else 0
+    chunk_offset   = checkpoint["chunk_count_so_far"] if checkpoint else 0
+    total_chunks   = chunk_offset
+    domain_decided = domain_hint != "auto" or bool(checkpoint)
+    domain         = domain_hint if domain_hint != "auto" else "general"
+
+    converter   = _build_raw_docling_converter(cfg, profile)
+    ing_pipeline = _get_pdf_ingestion_pipeline(tenant_id, cfg)
+    effective_acl = acl or DocumentACL()
+    doc_client  = DocumentServiceClient()
+
+    try:
+        from docling.chunking import HybridChunker
+        chunker = HybridChunker()
+    except ImportError:
+        logger.warning("HybridChunker not available — falling back to text path for PDF")
+        return _run_text([path], document_id, tenant_id, filename, domain_hint, extra_meta, cfg, acl)
+
+    first_shard = True
+    use_page_routing = cfg.ingestion_use_page_routing
+
+    if use_page_routing:
+        import asyncio
+        from docintel_common.model_profile_resolver import ModelProfileResolver
+        from .active_model_resolver import resolve_active_vlm_model
+        from .page_router import ExtractionPath, initial_path, should_escalate_to_vlm
+        from .pdf_probe import probe_pages
+        from .extractors.digital import extract_digital
+        from .extractors.layout import extract_layout
+        from .extractors.ocr_tesseract import extract_tesseract
+        from .extractors.vlm import VlmSamplingParams, extract_vlm
+        vlm_semaphore = asyncio.Semaphore(cfg.vlm_max_concurrency)
+
+        # Resolve the **active VLM model id** for this tenant: platform override
+        # → tenant pref → env fallback. Done per-document (not cached) so a
+        # platform/tenant admin who just changed the VLM model in the UI sees
+        # the new model used on the very next upload.
+        active_vlm_model = resolve_active_vlm_model(
+            cfg.postgres_url, tenant_id, cfg.llm_vlm_model
+        )
+        # Resolve VLM sampling params for that model. Resolver caches per
+        # (model, tenant) for TTL, so subsequent docs skip the DB hit.
+        # Fail-open: PG unreachable → resolver falls through to qwen2.5-vl builtin.
+        _profile_resolver = ModelProfileResolver(postgres_url=cfg.postgres_url)
+        _resolved = _profile_resolver.resolve_sync(active_vlm_model, tenant_id)
+        vlm_sampling = VlmSamplingParams(
+            temperature=_resolved.temperature,
+            top_p=_resolved.top_p,
+            max_tokens=_resolved.max_tokens,
+            frequency_penalty=_resolved.frequency_penalty,
+            presence_penalty=_resolved.presence_penalty,
+            repetition_penalty=_resolved.repetition_penalty,
+            top_k=_resolved.top_k,
+            min_p=_resolved.min_p,
+        )
+        logger.info(
+            "PDF sharded ingestion: per-page router (document_id=%s) "
+            "active_vlm=%s (env_default=%s) sampling: temp=%s top_p=%s "
+            "freq_pen=%s rep_pen=%s max_tok=%s",
+            document_id, active_vlm_model, cfg.llm_vlm_model,
+            vlm_sampling.temperature, vlm_sampling.top_p,
+            vlm_sampling.frequency_penalty, vlm_sampling.repetition_penalty,
+            vlm_sampling.max_tokens,
+        )
+
+    while start_page < total_pages:
+        end_page   = min(start_page + shard_size - 1, total_pages - 1)
+        # Docling page_range is 1-based inclusive [start, end]
+        page_range = (start_page + 1, end_page + 1)
+
+        logger.info(
+            "PDF shard: document_id=%s pages=%d-%d/%d",
+            document_id, start_page + 1, end_page + 1, total_pages,
+        )
+
+        _publish_progress_sync(
+            document_id, tenant_id, filename,
+            current_page=start_page + 1,
+            total_pages=total_pages,
+            stage=f"Converting pages {start_page + 1}-{end_page + 1}/{total_pages}",
+            cfg=cfg,
+        )
+
+        if use_page_routing:
+            # ── Per-page router path ──────────────────────────────────────────
+            page_profiles = probe_pages(path, page_range=(start_page, end_page))
+            shard_docs: list[Document] = []
+
+            for pp in page_profiles:
+                path_choice = initial_path(pp)
+                extraction_path_label = path_choice.value
+
+                if path_choice == ExtractionPath.DIGITAL:
+                    text = extract_digital(path, pp.page_index)
+                    if not text:
+                        # fallback to layout
+                        text = extract_layout(path, pp.page_index, cfg.docling_artifacts_path)
+                        extraction_path_label = "layout_fallback"
+
+                elif path_choice == ExtractionPath.LAYOUT:
+                    text = extract_layout(path, pp.page_index, cfg.docling_artifacts_path)
+
+                elif path_choice == ExtractionPath.TESSERACT:
+                    text, conf, wv_ratio, noise = extract_tesseract(
+                        path, pp.page_index, cfg.vlm_render_dpi
+                    )
+                    escalate, reason = should_escalate_to_vlm(
+                        conf,
+                        word_validity_ratio=wv_ratio,
+                        noise_markers=noise,
+                        has_table=pp.has_table_hint,
+                        has_math=pp.has_math_hint,
+                    )
+                    logger.info(
+                        "Page %d: tesseract conf=%.0f word_ratio=%.2f noise=%d → %s (%s)",
+                        pp.page_index + 1, conf, wv_ratio, noise,
+                        "VLM" if escalate else "tesseract", reason,
+                    )
+                    if escalate:
+                        extraction_path_label = "vlm"
+                        loop = asyncio.new_event_loop()
+                        try:
+                            text = loop.run_until_complete(
+                                extract_vlm(
+                                    path, pp.page_index,
+                                    cfg.llm_vlm_url, active_vlm_model,
+                                    vlm_semaphore,
+                                    dpi=cfg.vlm_render_dpi,
+                                    sampling=vlm_sampling,
+                                )
+                            )
+                        finally:
+                            loop.close()
+                    else:
+                        extraction_path_label = "tesseract"
+
+                else:
+                    text = extract_layout(path, pp.page_index, cfg.docling_artifacts_path)
+
+                if not text.strip():
+                    continue
+
+                shard_docs.append(Document(
+                    content=text,
+                    meta={
+                        "split_id":         chunk_offset + len(shard_docs),
+                        "split_idx_start":  0,
+                        "split_idx_end":    len(text),
+                        "bert_token_count": max(1, len(text.split())),
+                        "page":             pp.page_index + 1,
+                        "extraction_path":  extraction_path_label,
+                    },
+                ))
+
+            # Domain classify from first shard's text concatenation
+            if not domain_decided and shard_docs:
+                sample_text = " ".join(d.content or "" for d in shard_docs[:5])[:5000]
+                domain = _classify_domain(sample_text, filename)
+                domain_decided = True
+
+        else:
+            # ── Existing Docling shard path (flag=False) ──────────────────────
+            try:
+                result = converter.convert(path, page_range=page_range)
+            except Exception as e:
+                logger.error(
+                    "Docling conversion failed for shard pages=%d-%d of %s: %s",
+                    start_page, end_page, document_id, e,
+                )
+                raise
+
+            if not domain_decided:
+                sample_text = result.document.export_to_markdown()[:5000]
+                domain = _classify_domain(sample_text, filename)
+                domain_decided = True
+
+            shard_docs = []
+            for raw_chunk in chunker.chunk(dl_doc=result.document):
+                try:
+                    text = chunker.serialize(raw_chunk)
+                except Exception:
+                    text = str(raw_chunk.text or "")
+                if not text.strip():
+                    continue
+                shard_docs.append(Document(
+                    content=text,
+                    meta={
+                        "split_id":         chunk_offset + len(shard_docs),
+                        "split_idx_start":  0,
+                        "split_idx_end":    len(text),
+                        "bert_token_count": max(1, len(text.split())),
+                    },
+                ))
+
+            del result
+            gc.collect()
+
+        meta_override = {
+            "tenant_id":     tenant_id,
+            "document_id":   document_id,
+            "filename":      filename,
+            "domain":        domain,
+            "document_type": domain,
+            **(extra_meta or {}),
+            **effective_acl.to_meta(),
+        }
+
+        if shard_docs:
+            # Embed + write to Qdrant via the shard ingestion pipeline
+            ing_result = ing_pipeline.run(
+                {"enricher": {"documents": shard_docs, "meta_override": meta_override}},
+                include_outputs_from={"embedder"},
+            )
+            embedded_docs: list[Document] = ing_result.get("embedder", {}).get("documents", [])
+
+            # Build PG chunk payloads with globally-unique deterministic IDs
+            chunk_payloads = []
+            for i, doc in enumerate(embedded_docs):
+                global_idx = chunk_offset + i
+                content    = doc.content or ""
+                chunk_payloads.append(ChunkPayload(
+                    chunk_id    = _chunk_id_from_index(document_id, global_idx),
+                    chunk_index = global_idx,
+                    content     = content,
+                    start_char  = 0,
+                    end_char    = len(content),
+                    token_count = doc.meta.get("bert_token_count", max(1, len(content.split()))),
+                    metadata    = doc.meta,
+                ))
+
+            # Append to PG (clear_existing only on the first shard of a fresh run)
+            doc_client.append_chunks(
+                document_id,
+                tenant_id,
+                chunk_payloads,
+                clear_existing=(first_shard and not checkpoint),
+            )
+
+            chunk_offset += len(chunk_payloads)
+            total_chunks  = chunk_offset
+
+            del embedded_docs, shard_docs, chunk_payloads
+            gc.collect()
+
+        _save_checkpoint(document_id, tenant_id, end_page, chunk_offset, total_pages)
+        first_shard = False
+        start_page  = end_page + 1
+
+    _delete_checkpoint(document_id)
+
+    logger.info(
+        "PDF sharded ingestion complete: document_id=%s total_chunks=%d domain=%s",
+        document_id, total_chunks, domain,
+    )
+
+    return {
+        "embedded_count": total_chunks,
+        "chunk_count":    total_chunks,
+        "domain":         domain,
+        "collection":     f"documents_{tenant_id}",
+        "chunks":         [],  # chunks already persisted shard-by-shard
     }
 
 

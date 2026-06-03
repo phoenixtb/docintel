@@ -62,6 +62,40 @@ interface DocumentRepository : JpaRepository<Document, UUID>, JpaSpecificationEx
     @Query("SELECT DISTINCT d.tenantId FROM Document d WHERE d.status <> 'DELETING'")
     fun findDistinctActiveTenantIds(): List<String>
 
+    /** Stats: count by status for a tenant (excluding DELETING). */
+    @Query("SELECT d.status, COUNT(d) FROM Document d WHERE d.tenantId = :tenantId AND d.status <> com.docintel.document.entity.ProcessingStatus.DELETING GROUP BY d.status")
+    fun countByStatusForTenant(tenantId: String): List<Array<Any>>
+
+    @Query(
+        value = "SELECT COALESCE(metadata->>'domain', 'unknown') AS domain, COUNT(*) FROM documents WHERE tenant_id = :tenantId AND status <> 'DELETING' GROUP BY domain",
+        nativeQuery = true
+    )
+    fun countByDomainForTenant(tenantId: String): List<Array<Any>>
+
+    @Query(
+        value = "SELECT CASE WHEN metadata->>'source' = 'sample_dataset' THEN 'sample' ELSE 'manual' END AS src, COUNT(*) FROM documents WHERE tenant_id = :tenantId AND status <> 'DELETING' GROUP BY src",
+        nativeQuery = true
+    )
+    fun countBySourceForTenant(tenantId: String): List<Array<Any>>
+
+    @Query(
+        value = "SELECT COALESCE(SUM(file_size), 0) FROM documents WHERE tenant_id = :tenantId AND status <> 'DELETING'",
+        nativeQuery = true
+    )
+    fun sumFileSizeForTenant(tenantId: String): Long
+
+    @Query(
+        value = "SELECT COALESCE(SUM(chunk_count), 0) FROM documents WHERE tenant_id = :tenantId AND status <> 'DELETING'",
+        nativeQuery = true
+    )
+    fun sumChunkCountForTenant(tenantId: String): Long
+
+    @Query(
+        value = "SELECT MAX(created_at) FROM documents WHERE tenant_id = :tenantId AND status <> 'DELETING'",
+        nativeQuery = true
+    )
+    fun findLatestCreatedAtForTenant(tenantId: String): java.sql.Timestamp?
+
     /** Find COMPLETED documents by IDs; used by reconciliation sweeper for reverse-orphan check. */
     @Query("SELECT d FROM Document d WHERE d.id IN :ids AND d.status = :status")
     fun findByIdsAndStatus(ids: List<UUID>, status: ProcessingStatus): List<Document>

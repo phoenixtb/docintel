@@ -16,6 +16,7 @@ build/
 # Kotlin/Gradle
 .gradle/
 build/
+bin/
 !gradle/wrapper/gradle-wrapper.jar
 *.class
 
@@ -26,6 +27,10 @@ build/
 *.swp
 *.swo
 .DS_Store
+
+# DocIntel hardware profile (auto-generated, machine-local)
+.docintel-profile
+.docintel-profile-shown
 
 # Docker
 *.log
@@ -69,3 +74,7 @@ htmlcov/
 tests/integration/reports/
 tests/integration/.venv/
 services/ingestion-service/.venv/
+
+# Local-only docs (scratch space, not committed)
+docs/future_features/
+docs/intermediate_thoughts/

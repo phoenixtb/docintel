@@ -10,12 +10,13 @@ import com.docintel.document.entity.ProcessingStatus
 import com.docintel.document.entity.DeletionTask
 import com.docintel.document.repository.ChunkRepository
 import com.docintel.document.repository.DataSourceRepository
+import com.docintel.document.messaging.DocumentReadyEvent
+import com.docintel.document.messaging.DocumentStreamPublisher
 import com.docintel.document.repository.DeletionTaskRepository
 import com.docintel.document.repository.DocumentRepository
 import io.mockk.*
 import io.mockk.impl.annotations.MockK
 import io.mockk.junit5.MockKExtension
-import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -54,7 +55,10 @@ class DocumentServiceTest {
     private lateinit var storageService: StorageService
 
     @MockK
-    private lateinit var ingestionServiceClient: IngestionServiceClient
+    private lateinit var vectorStoreClient: VectorStoreClient
+
+    @MockK(relaxed = true)
+    private lateinit var streamPublisher: DocumentStreamPublisher
 
     @MockK(relaxed = true)
     private lateinit var eventPublisher: ApplicationEventPublisher
@@ -72,7 +76,8 @@ class DocumentServiceTest {
             chunkRepository,
             deletionTaskRepository,
             storageService,
-            ingestionServiceClient,
+            vectorStoreClient,
+            streamPublisher,
             eventPublisher,
         )
     }
@@ -310,18 +315,17 @@ class DocumentServiceTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `processDocument should delete MinIO files when ingestion trigger fails`() = runBlocking {
+    fun `processDocument should mark document FAILED when stream publish fails`() {
         val document = createTestDocument(status = ProcessingStatus.PENDING)
         every { documentRepository.findByIdAndTenantId(testDocumentId, testTenantId) } returns document
         every { documentRepository.save(any()) } answers { firstArg() }
-        coEvery {
-            ingestionServiceClient.triggerIngestion(any(), any(), any(), any(), any(), any(), any())
-        } throws RuntimeException("ingestion-service is down")
-        every { storageService.deleteDocumentFiles(any(), any<String>()) } just Runs
+        every {
+            streamPublisher.publishDocumentReady(any())
+        } throws RuntimeException("Redis is down")
 
-        documentService.processDocument(testDocumentId, testTenantId, "auto")
+        val result = documentService.processDocument(testDocumentId, testTenantId, "auto")
 
-        verify(exactly = 1) { storageService.deleteDocumentFiles(testTenantId, document.filePath) }
+        assertEquals(ProcessingStatus.FAILED, result.status)
     }
 
     // -------------------------------------------------------------------------

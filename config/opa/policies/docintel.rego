@@ -151,6 +151,15 @@ route_requires_role(method, path, "models:r") {
     path == "/api/v1/models"
 }
 
+# Active Models — read (any authenticated user; surfaces env-configured model
+# ids so the UI can render the "Tune…" buttons next to each kind).
+# Must be evaluated BEFORE the catch-all /api/v1/admin* rule below to avoid
+# requiring platform_admin for tenant_admin-driven Tune flows.
+route_requires_role(method, path, "models:r") {
+    method == "GET"
+    path == "/api/v1/admin/active-models"
+}
+
 # Admin — full admin panel access (platform_admin)
 route_requires_role(method, path, "admin:rw") {
     glob.match("/api/v1/admin*", [], path)
@@ -192,6 +201,34 @@ route_requires_role(method, path, "admin.tenants.settings:rw") {
 route_requires_role(method, path, "admin.tenants.settings:rw") {
     method == "PUT"
     glob.match("/api/v1/tenants/*/users/*/role", [], path)
+}
+
+# Tenant model profiles — tenant_admin can manage their own tenant's sampling overrides
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "GET"
+    glob.match("/api/v1/tenants/*/model-profiles*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "POST"
+    glob.match("/api/v1/tenants/*/model-profiles*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "PUT"
+    glob.match("/api/v1/tenants/*/model-profiles/*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "DELETE"
+    glob.match("/api/v1/tenants/*/model-profiles/*", [], path)
+}
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "DELETE"
+    glob.match("/api/v1/tenants/*/model-profiles-cache*", [], path)
+}
+
+# Resolve effective params — rag-service (tenant_admin for own tenant, platform_admin for any)
+route_requires_role(method, path, "admin.tenants.settings:rw") {
+    method == "GET"
+    glob.match("/api/v1/tenants/*/model-profiles/resolve*", [], path)
 }
 
 # Tenant management (platform_admin only — list/create/delete tenants)

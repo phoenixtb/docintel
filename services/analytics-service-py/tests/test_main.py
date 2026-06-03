@@ -59,6 +59,23 @@ class TestQueryEventIngestion:
         mock_clickhouse.insert.assert_called_once()
         call_kwargs = mock_clickhouse.insert.call_args
         assert "query_events" in call_kwargs[0][0]
+        # Verify thinking_truncated is included in the insert column list
+        columns = call_kwargs[1].get("column_names") or call_kwargs[0][2]
+        assert "thinking_truncated" in columns
+
+    def test_ingest_query_event_with_thinking_truncated_true(self, client, mock_clickhouse):
+        payload = {
+            "query_id": "q-trunc", "tenant_id": "alpha", "user_id": "u1",
+            "latency_ms": 180000, "model_used": "qwen3.5:4b",
+            "cache_hit": False, "source_count": 5,
+            "thinking_truncated": True,
+        }
+        resp = client.post("/events/query", json=payload)
+        assert resp.status_code == 204
+        call_kwargs = mock_clickhouse.insert.call_args
+        row = call_kwargs[0][1][0]
+        # thinking_truncated value must be True in the inserted row
+        assert row[-1] is True  # last inserted column
 
     def test_ingest_query_event_ch_failure_returns_500(self, client, mock_clickhouse):
         mock_clickhouse.insert.side_effect = RuntimeError("CH down")

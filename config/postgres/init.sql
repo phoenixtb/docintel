@@ -50,8 +50,14 @@ CREATE TABLE admin.platform_settings (
     updated_at TIMESTAMPTZ  DEFAULT NOW()
 );
 
--- null = "Tenant Choice" (no global LLM override)
-INSERT INTO admin.platform_settings (key, value) VALUES ('llm_model', 'null');
+-- null = no platform override (tenant pref or env fallback wins).
+-- Three keys: chat (legacy llm_model), vision (llm_vlm_model), reranker (llm_rerank_model).
+-- Embedding model is intentionally env-only — changing it requires re-embedding the
+-- entire vector store, so we don't expose it to runtime tenant/platform overrides.
+INSERT INTO admin.platform_settings (key, value) VALUES
+    ('llm_model',        'null'),
+    ('llm_vlm_model',    'null'),
+    ('llm_rerank_model', 'null');
 
 CREATE TABLE admin.users (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -73,6 +79,50 @@ CREATE TABLE admin.user_preferences (
 );
 
 CREATE INDEX idx_user_pref_tenant ON admin.user_preferences(tenant_id);
+
+-- Model profiles: per-model sampling parameter overrides.
+-- scope='platform' rows apply to all tenants; scope='tenant' rows override for one tenant.
+-- NULL param value = inherit from the next level in the resolution chain.
+CREATE TABLE admin.model_profiles (
+    id                    UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    scope                 VARCHAR(20)  NOT NULL CHECK (scope IN ('platform', 'tenant')),
+    tenant_id             VARCHAR(64)  REFERENCES admin.tenants(id) ON DELETE CASCADE,
+    model_pattern         VARCHAR(255) NOT NULL,
+    display_name          VARCHAR(255),
+    -- Standard (non-thinking) params — NULL = inherit from next level in chain
+    temperature           DOUBLE PRECISION,
+    top_p                 DOUBLE PRECISION,
+    max_tokens            INTEGER,
+    frequency_penalty     DOUBLE PRECISION,
+    presence_penalty      DOUBLE PRECISION,
+    repetition_penalty    DOUBLE PRECISION,
+    top_k                 INTEGER,
+    min_p                 DOUBLE PRECISION,
+    -- Thinking-mode params — NULL = inherit
+    thinking_temperature        DOUBLE PRECISION,
+    thinking_top_p              DOUBLE PRECISION,
+    thinking_max_tokens         INTEGER,
+    thinking_frequency_penalty  DOUBLE PRECISION,
+    thinking_presence_penalty   DOUBLE PRECISION,
+    thinking_repetition_penalty DOUBLE PRECISION,
+    thinking_top_k              INTEGER,
+    thinking_min_p              DOUBLE PRECISION,
+    thinking_budget             INTEGER,
+    stream_thinking             BOOLEAN,
+    -- Informational: chat | vlm | embed | rerank. NULL = auto-infer from model_pattern.
+    -- Used by the UI to badge profiles and conditionally show form fields. Resolver
+    -- does NOT filter by kind — pattern matching is unchanged.
+    kind                  VARCHAR(16),
+    notes                 TEXT,
+    created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT model_profiles_tenant_required
+        CHECK (scope = 'platform' OR tenant_id IS NOT NULL)
+);
+
+CREATE INDEX idx_model_profiles_scope   ON admin.model_profiles(scope);
+CREATE INDEX idx_model_profiles_tenant  ON admin.model_profiles(tenant_id);
+CREATE INDEX idx_model_profiles_pattern ON admin.model_profiles(model_pattern);
 
 CREATE TRIGGER tenants_updated_at
     BEFORE UPDATE ON admin.tenants
@@ -195,6 +245,15 @@ CREATE POLICY tenant_isolation_tenants ON admin.tenants
 
 CREATE POLICY tenant_isolation_tenants_admin ON admin.tenants
     AS PERMISSIVE FOR ALL TO docintel_admin
+    USING (
+        current_setting('app.user_role', true) = 'platform_admin'
+        OR id = current_setting('app.current_tenant', true)
+    );
+
+-- ingestion-service (docintel_documents) needs to read its own tenant row
+-- to resolve per-tenant llm_vlm_model overrides during PDF ingestion.
+CREATE POLICY tenant_isolation_tenants_doc ON admin.tenants
+    AS PERMISSIVE FOR SELECT TO docintel_documents
     USING (
         current_setting('app.user_role', true) = 'platform_admin'
         OR id = current_setting('app.current_tenant', true)
@@ -342,7 +401,7 @@ GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_admin;
 GRANT USAGE ON SCHEMA documents, admin, public TO docintel_documents;
 GRANT ALL   ON ALL TABLES    IN SCHEMA documents TO docintel_documents;
 GRANT ALL   ON ALL SEQUENCES IN SCHEMA documents TO docintel_documents;
-GRANT SELECT ON admin.tenants TO docintel_documents;
+GRANT SELECT ON admin.tenants, admin.model_profiles, admin.platform_settings TO docintel_documents;
 ALTER DEFAULT PRIVILEGES IN SCHEMA documents GRANT ALL ON TABLES    TO docintel_documents;
 ALTER DEFAULT PRIVILEGES IN SCHEMA documents GRANT ALL ON SEQUENCES TO docintel_documents;
 GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_documents;
@@ -351,7 +410,7 @@ GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_documents;
 GRANT USAGE ON SCHEMA conversations, admin, public TO docintel_rag;
 GRANT ALL   ON ALL TABLES    IN SCHEMA conversations TO docintel_rag;
 GRANT ALL   ON ALL SEQUENCES IN SCHEMA conversations TO docintel_rag;
-GRANT SELECT ON admin.tenants, admin.platform_settings, admin.user_preferences TO docintel_rag;
+GRANT SELECT ON admin.tenants, admin.platform_settings, admin.user_preferences, admin.model_profiles TO docintel_rag;
 ALTER DEFAULT PRIVILEGES IN SCHEMA conversations GRANT ALL ON TABLES    TO docintel_rag;
 ALTER DEFAULT PRIVILEGES IN SCHEMA conversations GRANT ALL ON SEQUENCES TO docintel_rag;
 GRANT EXECUTE ON FUNCTION public.update_updated_at() TO docintel_rag;
@@ -387,3 +446,46 @@ INSERT INTO admin.tenants (id, name) VALUES ('default', 'DocIntel Platform');
 INSERT INTO admin.tenants (id, name) VALUES ('alpha',   'Alpha Corp');
 INSERT INTO admin.tenants (id, name) VALUES ('beta',    'Beta Corp');
 INSERT INTO admin.tenants (id, name) VALUES ('e2e',     'E2E Test Tenant');
+
+-- =============================================================================
+-- Seed model profiles
+-- Platform wildcard defines the system-wide baseline.
+-- Each tenant gets their own * wildcard so edits are always tenant-scoped
+-- and never bleed across tenants. Values mirror config/defaults.env.
+-- NULL top_p = let the model use its own default (do not constrain nucleus sampling).
+-- =============================================================================
+
+-- Platform baseline (reference only — tenant rows take precedence in the resolver)
+-- thinking_budget: LMForge two-call hard cap on reasoning tokens (separate from thinking_max_tokens).
+-- thinking_max_tokens: combined (reasoning + answer) budget passed as max_tokens to the OpenAI API.
+-- Qwen3 spec for thinking mode: top_p=0.95, top_k=20, min_p=0, frequency_penalty=0, presence_penalty=0.3.
+INSERT INTO admin.model_profiles (scope, tenant_id, model_pattern, display_name,
+    temperature, top_p, max_tokens, frequency_penalty,
+    thinking_temperature, thinking_top_p, thinking_max_tokens,
+    thinking_top_k, thinking_min_p,
+    thinking_frequency_penalty, thinking_presence_penalty, thinking_repetition_penalty,
+    thinking_budget, stream_thinking, notes)
+VALUES ('platform', NULL, '*', 'Platform Defaults',
+    0.1, NULL, 1024, 0.3,
+    0.6, 0.95, 6144,
+    20, 0.0,
+    0.0, 0.3, 1.2,
+    4096, true,
+    'System baseline — tenants override via their own * profile.');
+
+-- Per-tenant wildcard profiles (tenant admins edit these; no cross-tenant effect)
+INSERT INTO admin.model_profiles (scope, tenant_id, model_pattern, display_name,
+    temperature, top_p, max_tokens, frequency_penalty,
+    thinking_temperature, thinking_top_p, thinking_max_tokens,
+    thinking_top_k, thinking_min_p,
+    thinking_frequency_penalty, thinking_presence_penalty, thinking_repetition_penalty,
+    thinking_budget, stream_thinking, notes)
+VALUES
+    ('tenant', 'default', '*', 'Tenant Defaults',
+        0.1, NULL, 1024, 0.3, 0.6, 0.95, 6144, 20, 0.0, 0.0, 0.3, 1.2, 4096, true, 'Auto-seeded on init.'),
+    ('tenant', 'alpha',   '*', 'Tenant Defaults',
+        0.1, NULL, 1024, 0.3, 0.6, 0.95, 6144, 20, 0.0, 0.0, 0.3, 1.2, 4096, true, 'Auto-seeded on init.'),
+    ('tenant', 'beta',    '*', 'Tenant Defaults',
+        0.1, NULL, 1024, 0.3, 0.6, 0.95, 6144, 20, 0.0, 0.0, 0.3, 1.2, 4096, true, 'Auto-seeded on init.'),
+    ('tenant', 'e2e',     '*', 'Tenant Defaults',
+        0.1, NULL, 1024, 0.3, 0.6, 0.95, 6144, 20, 0.0, 0.0, 0.3, 1.2, 4096, true, 'Auto-seeded on init.');

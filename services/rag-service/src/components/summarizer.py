@@ -81,11 +81,9 @@ class AnchoredSummarizer:
                     "stream": False,
                     "temperature": 0.1,
                     "max_tokens": 512,
-                    # Extra fields honoured by Ollama/LMForge, ignored by others
-                    "extra_body": {
-                        "num_ctx": 4096,
-                        "think": False,
-                    },
+                    # think:false prevents reasoning chains in the summarizer model.
+                    # num_ctx is intentionally omitted (Ollama-specific; LMForge/oMLX ignore it).
+                    "extra_body": {"think": False},
                 },
                 timeout=30.0,
             )

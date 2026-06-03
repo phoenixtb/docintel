@@ -69,6 +69,32 @@ spring:
           filters:
             - RewritePath=/api/v1/analytics/(?<segment>.*), /analytics/${segment}
 
+        # Model-profile cache busting — routes to rag-service (must come BEFORE the
+        # admin-service and admin-tenants catch-alls to avoid wrong service routing).
+        - id: rag-service-model-profiles-cache-global
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/admin/model-profiles-cache
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/admin/model-profiles-cache, /internal/model-profiles-cache
+
+        - id: rag-service-model-profiles-cache-tenant
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/tenants/{tenantId}/model-profiles-cache
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tenantId>[^/]+)/model-profiles-cache, /internal/model-profiles-cache/${tenantId}
+
+        - id: rag-service-model-profiles-resolve
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/tenants/{tenantId}/model-profiles/resolve
+            - Method=GET
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tenantId>[^/]+)/model-profiles/resolve, /internal/model-profiles/resolve/${tenantId}
+
         - id: admin-service
           uri: ${ADMIN_SERVICE_URL:http://localhost:8082}
           predicates:

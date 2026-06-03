@@ -16,6 +16,7 @@ class TenantManagementService(
     private val documentServiceClient: DocumentServiceClient,
     private val ragServiceClient: RagServiceClient,
     private val analyticsServiceClient: AnalyticsServiceClient,
+    private val modelProfileService: ModelProfileService,
     @Value("\${docintel.default-llm-model:qwen3.5:4b}") private val defaultLlmModel: String,
 ) {
     private val log = LoggerFactory.getLogger(TenantManagementService::class.java)
@@ -33,6 +34,8 @@ class TenantManagementService(
         // Provision per-tenant Qdrant collection and MinIO bucket
         provisioningService.createQdrantCollection(req.id)
         provisioningService.createMinioBucket(req.id)
+        // Seed model profiles from platform defaults so the tenant starts with values populated
+        modelProfileService.seedTenantProfiles(req.id)
         log.info("Created tenant ${req.id}")
         return TenantSummary(
             tenantId = req.id, name = req.name, documentCount = 0, queryCount = 0,

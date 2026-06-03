@@ -232,6 +232,7 @@
    * Returns 'done' when the stream completed normally,
    * 'error' with a reason when the server signals an error,
    * or throws a network/HTTP error when the connection drops.
+   * Throws a PermanentSseError (non-retriable) on HTTP 404 or other 4xx.
    */
   async function consumeSSE(jobId: string): Promise<{ status: 'done'; processed: number; totalChunks: number } | { status: 'error'; reason: string }> {
     sseAbort = new AbortController();
@@ -239,6 +240,11 @@
       signal: sseAbort.signal,
     });
 
+    if (sseRes.status === 404) {
+      // Job was evicted from memory (completed + TTL elapsed) or service restarted.
+      // This is permanent — do not retry.
+      throw Object.assign(new Error('job_not_found'), { permanent: true });
+    }
     if (!sseRes.ok || !sseRes.body) throw new Error(`SSE connect failed: HTTP ${sseRes.status}`);
 
     const reader = sseRes.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -292,6 +298,7 @@
    * Connect to an existing job's SSE stream with automatic reconnect on network drop.
    * The backend replays all events from pos=0 on each new subscriber, so reconnecting
    * transparently recovers the full progress state regardless of how long we were away.
+   * Throws immediately on permanent errors (404, abort) without retrying.
    * Throws when max retries are exhausted or the server sends an error event.
    * Returns silently when the job completed successfully.
    */
@@ -303,7 +310,9 @@
         if (result.status === 'error') throw new Error(result.reason);
         return { processed: result.processed, totalChunks: result.totalChunks };
       } catch (netErr: unknown) {
+        // Permanent errors: user abort or job-not-found (404) — never retry.
         if (netErr instanceof DOMException && netErr.name === 'AbortError') throw netErr;
+        if ((netErr as { permanent?: boolean })?.permanent) throw netErr;
         attempt++;
         if (attempt > maxRetries) throw netErr;
         const delayMs = Math.min(1000 * 2 ** (attempt - 1), 30_000);
@@ -503,6 +512,7 @@
     stage: string;           // Queued | Processing | Indexed | Failed
     chunkCount: number;
     errorMessage?: string;
+    progress?: { currentPage: number; totalPages: number; currentStage: string };
   }
 
   // SSE uses fetch (not EventSource) so apiFetch can add Authorization: Bearer.
@@ -520,6 +530,7 @@
   function applyPipelineUpdate(data: {
     documentId: string; filename?: string; status: string; stage: string;
     chunkCount?: number; errorMessage?: string;
+    progress?: { currentPage: number; totalPages: number; currentStage: string };
   }) {
     pipelineRows = {
       ...pipelineRows,
@@ -530,6 +541,15 @@
         stage:        data.stage,
         chunkCount:   data.chunkCount ?? pipelineRows[data.documentId]?.chunkCount ?? 0,
         errorMessage: data.errorMessage,
+        // Preserve progress only within the same processing cycle.
+        // If the previous status was terminal (FAILED/COMPLETED), a new PROCESSING
+        // event signals a fresh cycle — discard stale progress to avoid "Pg 1225/208".
+        progress: ((): typeof data.progress => {
+          if (data.progress) return data.progress;
+          const prev = pipelineRows[data.documentId];
+          const isNewCycle = prev?.status === 'FAILED' || prev?.status === 'COMPLETED';
+          return data.status === 'PROCESSING' && !isNewCycle ? prev?.progress : undefined;
+        })(),
       },
     };
 
@@ -688,8 +708,14 @@
       await refreshAll();
     } catch (e: unknown) {
       if (e instanceof DOMException && e.name === 'AbortError') return;
-      error = e instanceof Error ? e.message : 'Failed to reconnect to running job';
       sessionStorage.removeItem(INGEST_JOB_KEY);
+      // 404 = job evicted from memory after completion — treat as success and refresh.
+      if ((e as { permanent?: boolean })?.permanent && (e as Error)?.message === 'job_not_found') {
+        loadingProgress = { phase: 'done', message: 'Job completed (status unavailable after navigation)' };
+        await refreshAll();
+      } else {
+        error = e instanceof Error ? e.message : 'Failed to reconnect to running job';
+      }
     } finally {
       isLoadingDatasets = false;
       sseAbort = null;
@@ -741,20 +767,44 @@
       {@const rows = Object.values(pipelineRows)}
       {@const inFlight = rows.filter(r => r.status === 'PENDING' || r.status === 'PROCESSING')}
       {@const settled = rows.filter(r => r.status === 'COMPLETED' || r.status === 'FAILED')}
-      <div class="border border-blue-200 dark:border-blue-800 rounded-xl overflow-hidden">
-        <div class="bg-blue-50 dark:bg-blue-900/20 px-4 py-3 flex items-center justify-between">
+      {@const indexed = settled.filter(r => r.status === 'COMPLETED').length}
+      {@const failed = settled.filter(r => r.status === 'FAILED').length}
+      {@const allFailed = inFlight.length === 0 && indexed === 0 && failed > 0}
+      {@const partialFailed = inFlight.length === 0 && indexed > 0 && failed > 0}
+      {@const allOk = inFlight.length === 0 && failed === 0 && indexed > 0}
+      <div class="border {allFailed ? 'border-red-200 dark:border-red-800' : partialFailed ? 'border-amber-200 dark:border-amber-800' : 'border-blue-200 dark:border-blue-800'} rounded-xl overflow-hidden">
+        <div class="px-4 py-3 flex items-center justify-between {allFailed ? 'bg-red-50 dark:bg-red-900/20' : partialFailed ? 'bg-amber-50 dark:bg-amber-900/20' : 'bg-blue-50 dark:bg-blue-900/20'}">
           <div class="flex items-center gap-2">
             {#if inFlight.length > 0}
+              {@const withProgress = inFlight.filter(r => r.progress)}
               <div class="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
               <span class="text-sm font-medium text-blue-700 dark:text-blue-300">
-                Ingestion pipeline — {inFlight.length} processing, {settled.filter(r => r.status === 'COMPLETED').length} indexed
+                {#if withProgress.length === 1 && withProgress[0].progress}
+                  {withProgress[0].progress.currentStage} — Pg {withProgress[0].progress.currentPage}/{withProgress[0].progress.totalPages}{indexed > 0 ? `, ${indexed} indexed` : ''}{failed > 0 ? `, ${failed} failed` : ''}
+                {:else}
+                  Ingestion pipeline — {inFlight.length} processing, {indexed} indexed{failed > 0 ? `, ${failed} failed` : ''}
+                {/if}
               </span>
-            {:else}
+            {:else if allFailed}
+              <svg class="w-4 h-4 text-red-500" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+              </svg>
+              <span class="text-sm font-medium text-red-700 dark:text-red-300">
+                Pipeline failed — {failed} failed
+              </span>
+            {:else if partialFailed}
+              <svg class="w-4 h-4 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l6.518 11.59c.75 1.335-.213 2.98-1.742 2.98H3.48c-1.53 0-2.493-1.645-1.743-2.98L8.257 3.1zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+              </svg>
+              <span class="text-sm font-medium text-amber-700 dark:text-amber-300">
+                Pipeline finished with errors — {indexed} indexed, {failed} failed
+              </span>
+            {:else if allOk}
               <svg class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
               </svg>
               <span class="text-sm font-medium text-green-700 dark:text-green-300">
-                Pipeline complete — {settled.filter(r => r.status === 'COMPLETED').length} indexed{settled.filter(r => r.status === 'FAILED').length > 0 ? `, ${settled.filter(r => r.status === 'FAILED').length} failed` : ''}
+                Pipeline complete — {indexed} indexed
               </span>
             {/if}
           </div>
@@ -785,15 +835,21 @@
                 {row.filename}
               </span>
 
-              <!-- stage badge -->
-              <span class="flex-shrink-0 px-2 py-0.5 rounded text-xs font-medium {
-                row.status === 'COMPLETED'  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
-                row.status === 'FAILED'     ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
-                row.status === 'PROCESSING' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
-                                              'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
-              }">
-                {row.stage}
-              </span>
+              <!-- stage badge + progress -->
+              <div class="flex items-center gap-1.5 flex-shrink-0">
+                <span class="px-2 py-0.5 rounded text-xs font-medium {
+                  row.status === 'COMPLETED'  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
+                  row.status === 'FAILED'     ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
+                  row.status === 'PROCESSING' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
+                                                'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+                }">
+                  {#if row.progress && row.status === 'PROCESSING'}
+                    Pg {row.progress.currentPage}/{row.progress.totalPages}
+                  {:else}
+                    {row.stage}
+                  {/if}
+                </span>
+              </div>
 
               {#if row.status === 'COMPLETED' && row.chunkCount > 0}
                 <span class="text-xs text-gray-400 flex-shrink-0">{row.chunkCount} chunks</span>

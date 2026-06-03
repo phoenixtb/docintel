@@ -6,7 +6,8 @@ via Depends() rather than reaching into global state directly.
 """
 
 import logging
-from typing import Annotated
+from dataclasses import dataclass, field
+from typing import Annotated, Optional
 
 from fastapi import Depends, Header, HTTPException, Request
 
@@ -16,6 +17,8 @@ from docintel_common.security import UserContext
 from ..config import Settings
 from ..pipelines.query import RAGService
 from ..tracing import LangfuseTracer
+from ..utils.asyncio import _run_db
+from .schemas import QueryRequest
 
 logger = logging.getLogger(__name__)
 
@@ -114,3 +117,41 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 RAGServiceDep = Annotated[RAGService, Depends(get_rag_service)]
 TracerDep = Annotated[LangfuseTracer, Depends(get_tracer)]
 UserContextDep = Annotated[UserContext, Depends(extract_user_context)]
+
+
+# ---------------------------------------------------------------------------
+# Conversation history dependency
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LoadedHistory:
+    messages: list[dict] = field(default_factory=list)
+    context_state: dict = field(default_factory=dict)
+
+
+async def get_conversation_history(
+    request: QueryRequest,
+    rag_service: RAGServiceDep,
+    user_ctx: UserContextDep,
+) -> LoadedHistory:
+    """
+    Load conversation history and context_state for the current request.
+
+    Returns an empty LoadedHistory when no conversation_id is provided.
+    DB errors are propagated as 500 HTTPException so the caller can handle them.
+    """
+    if not request.conversation_id:
+        return LoadedHistory()
+    try:
+        messages, context_state = await _run_db(
+            lambda: rag_service._load_conversation_history(
+                request.conversation_id, user_ctx.tenant_id
+            )
+        )
+        return LoadedHistory(messages=messages, context_state=context_state)
+    except Exception as e:
+        logger.error("Failed to load conversation history: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to load conversation history")
+
+
+ConversationHistoryDep = Annotated[LoadedHistory, Depends(get_conversation_history)]

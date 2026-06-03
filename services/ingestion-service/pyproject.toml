@@ -21,6 +21,19 @@ dependencies = [
     # docling-haystack 0.1.1 constrains to Python <3.13 (matching our requires-python above).
     "docling-haystack>=0.1.1",
 
+    # PDF probe + per-page router: numpy for bitmap coverage estimation.
+    # pypdfium2 is already bundled as a docling transitive dependency.
+    "numpy>=1.24.0",
+
+    # Path C: Tesseract OCR (lightweight CPU OCR for bitmap-heavy pages).
+    # Requires tesseract-ocr + tesseract-ocr-eng apt packages in Dockerfile.
+    "pytesseract>=0.3.10",
+    "pillow>=10.0.0",
+
+    # Word-validity quality gate for Tesseract output → VLM escalation decision.
+    # Bundled English dictionary (~1.5MB), no system deps.
+    "pyspellchecker>=0.8.0",
+
     # RAG Framework — Haystack ingestion pipeline
     "haystack-ai>=2.9.0",
     "qdrant-haystack>=6.0.0",

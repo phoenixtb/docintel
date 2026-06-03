@@ -40,6 +40,23 @@
   let editTenant = $state({ name: '', quotaDocuments: 0, quotaQueriesPerDay: 0 });
   let savingTenant = $state(false);
   let deletingTenant = $state(false);
+  let seedingTenantId: string | null = $state(null);
+
+  async function seedTenantProfiles(tenantId: string) {
+    seedingTenantId = tenantId;
+    try {
+      const res = await apiFetch(`/api/v1/tenants/${tenantId}/model-profiles/seed`, { method: 'POST' });
+      if (res.ok) {
+        const seeded: any[] = await res.json();
+        if (seeded.length === 0) toast.info(`${tenantId}: profiles already exist, nothing seeded`);
+        else toast.success(`${tenantId}: seeded ${seeded.length} profile(s) from platform defaults`);
+        await apiFetch(`/api/v1/tenants/${tenantId}/model-profiles-cache`, { method: 'DELETE' });
+      } else {
+        toast.error(`Seed failed: ${res.status}`);
+      }
+    } catch (e) { toast.error(`Error: ${e}`); }
+    seedingTenantId = null;
+  }
 
   // Users
   interface TenantUser { id: string; email: string; username: string; name: string; role: string; tenantId: string }
@@ -59,6 +76,42 @@
   let modelSaving = $state(false);
   let platformModelConfirmOpen = $state(false);
   let pendingPlatformModel: string | null | undefined = $state(undefined);
+
+  // Model profiles
+  interface ModelProfile {
+    id: string; scope: string; tenantId: string | null; modelPattern: string;
+    displayName: string | null;
+    temperature: number | null; topP: number | null; maxTokens: number | null;
+    frequencyPenalty: number | null; presencePenalty: number | null; repetitionPenalty: number | null;
+    topK: number | null; minP: number | null;
+    thinkingTemperature: number | null; thinkingTopP: number | null; thinkingMaxTokens: number | null;
+    thinkingFrequencyPenalty: number | null; thinkingPresencePenalty: number | null; thinkingRepetitionPenalty: number | null;
+    thinkingTopK: number | null; thinkingMinP: number | null;
+    thinkingBudget: number | null; streamThinking: boolean | null;
+    notes: string | null;
+  }
+  const EMPTY_PROFILE_FORM = () => ({
+    modelPattern: '', displayName: '',
+    temperature: '', topP: '', maxTokens: '',
+    frequencyPenalty: '', presencePenalty: '', repetitionPenalty: '', topK: '', minP: '',
+    thinkingTemperature: '', thinkingTopP: '', thinkingMaxTokens: '',
+    thinkingFrequencyPenalty: '', thinkingPresencePenalty: '', thinkingRepetitionPenalty: '', thinkingTopK: '', thinkingMinP: '',
+    thinkingBudget: '', streamThinking: null as boolean | null,
+    notes: '',
+  });
+  const BUILTIN_PROFILES = [
+    { pattern: 'qwen3*', temp: 0.1, thinkTemp: 0.6, thinkTopP: 0.95, thinkMaxTokens: 6144, thinkBudget: 4096, streamThink: true },
+    { pattern: 'qwq*', temp: 0.6, thinkTemp: 0.7, thinkTopP: 0.95, thinkMaxTokens: 6144, thinkBudget: 4096, streamThink: true },
+    { pattern: 'deepseek-r1*', temp: 0.6, thinkTemp: 0.7, thinkTopP: 0.95, thinkMaxTokens: 6144, thinkBudget: null, streamThink: true },
+    { pattern: 'marco-o1*', temp: 0.7, thinkTemp: 0.7, thinkTopP: 0.95, thinkMaxTokens: 6144, thinkBudget: 4096, streamThink: true },
+  ];
+  let platformProfiles: ModelProfile[] = $state([]);
+  let profileModalOpen = $state(false);
+  let profileModalMode: 'create' | 'edit' = $state('create');
+  let editingProfileId: string | null = $state(null);
+  let profileForm = $state(EMPTY_PROFILE_FORM());
+  let profileSaving = $state(false);
+  let profileDeleteConfirmId: string | null = $state(null);
 
   const jsonHeaders = () => ({ 'Content-Type': 'application/json' });
 
@@ -255,9 +308,10 @@
   async function loadPlatformModel() {
     modelLoading = true;
     try {
-      const [modelsRes, settingsRes] = await Promise.all([
+      const [modelsRes, settingsRes, profilesRes] = await Promise.all([
         apiFetch('/api/v1/models'),
         apiFetch('/api/v1/admin/platform/settings'),
+        apiFetch('/api/v1/admin/model-profiles'),
       ]);
       if (modelsRes.ok) {
         const mdata = await modelsRes.json();
@@ -268,8 +322,104 @@
         platformSettings = await settingsRes.json();
         selectedPlatformModel = platformSettings?.llmModel ?? null;
       }
+      if (profilesRes.ok) platformProfiles = await profilesRes.json();
     } catch (e) { toast.error(`Failed to load model settings: ${e}`); }
     modelLoading = false;
+  }
+
+  function openCreateProfileModal() {
+    profileModalMode = 'create';
+    editingProfileId = null;
+    profileForm = EMPTY_PROFILE_FORM();
+    profileModalOpen = true;
+  }
+
+  function openEditProfileModal(p: ModelProfile) {
+    profileModalMode = 'edit';
+    editingProfileId = p.id;
+    const s = (v: number | null) => v != null ? String(v) : '';
+    profileForm = {
+      modelPattern: p.modelPattern,
+      displayName: p.displayName ?? '',
+      temperature: s(p.temperature),
+      topP: s(p.topP),
+      maxTokens: s(p.maxTokens),
+      frequencyPenalty: s(p.frequencyPenalty),
+      presencePenalty: s(p.presencePenalty),
+      repetitionPenalty: s(p.repetitionPenalty),
+      topK: s(p.topK),
+      minP: s(p.minP),
+      thinkingTemperature: s(p.thinkingTemperature),
+      thinkingTopP: s(p.thinkingTopP),
+      thinkingMaxTokens: s(p.thinkingMaxTokens),
+      thinkingFrequencyPenalty: s(p.thinkingFrequencyPenalty),
+      thinkingPresencePenalty: s(p.thinkingPresencePenalty),
+      thinkingRepetitionPenalty: s(p.thinkingRepetitionPenalty),
+      thinkingTopK: s(p.thinkingTopK),
+      thinkingMinP: s(p.thinkingMinP),
+      thinkingBudget: s(p.thinkingBudget),
+      streamThinking: p.streamThinking,
+      notes: p.notes ?? '',
+    };
+    profileModalOpen = true;
+  }
+
+  function profileFormBody() {
+    const num = (v: string | number) => typeof v === 'number' ? (isNaN(v) ? null : v) : (v.trim() === '' ? null : Number(v));
+    const int = (v: string | number) => typeof v === 'number' ? (isNaN(v) ? null : Math.round(v)) : (v.trim() === '' ? null : parseInt(v));
+    return {
+      modelPattern: profileForm.modelPattern.trim(),
+      displayName: profileForm.displayName.trim() || null,
+      temperature: num(profileForm.temperature),
+      topP: num(profileForm.topP),
+      maxTokens: int(profileForm.maxTokens),
+      frequencyPenalty: num(profileForm.frequencyPenalty),
+      presencePenalty: num(profileForm.presencePenalty),
+      repetitionPenalty: num(profileForm.repetitionPenalty),
+      topK: int(profileForm.topK),
+      minP: num(profileForm.minP),
+      thinkingTemperature: num(profileForm.thinkingTemperature),
+      thinkingTopP: num(profileForm.thinkingTopP),
+      thinkingMaxTokens: int(profileForm.thinkingMaxTokens),
+      thinkingFrequencyPenalty: num(profileForm.thinkingFrequencyPenalty),
+      thinkingPresencePenalty: num(profileForm.thinkingPresencePenalty),
+      thinkingRepetitionPenalty: num(profileForm.thinkingRepetitionPenalty),
+      thinkingTopK: int(profileForm.thinkingTopK),
+      thinkingMinP: num(profileForm.thinkingMinP),
+      thinkingBudget: int(profileForm.thinkingBudget),
+      streamThinking: profileForm.streamThinking,
+      notes: profileForm.notes.trim() || null,
+    };
+  }
+
+  async function saveProfile() {
+    if (!profileForm.modelPattern.trim()) { toast.error('Model pattern is required'); return; }
+    profileSaving = true;
+    try {
+      const url = profileModalMode === 'create'
+        ? '/api/v1/admin/model-profiles'
+        : `/api/v1/admin/model-profiles/${editingProfileId}`;
+      const method = profileModalMode === 'create' ? 'POST' : 'PUT';
+      const res = await apiFetch(url, { method, headers: jsonHeaders(), body: JSON.stringify(profileFormBody()) });
+      if (!res.ok) throw new Error(`${res.status}`);
+      await apiFetch('/api/v1/admin/model-profiles-cache', { method: 'DELETE' });
+      toast.success(profileModalMode === 'create' ? 'Profile created' : 'Profile updated');
+      profileModalOpen = false;
+      const prRes = await apiFetch('/api/v1/admin/model-profiles');
+      if (prRes.ok) platformProfiles = await prRes.json();
+    } catch (e) { toast.error(`Failed: ${e}`); }
+    profileSaving = false;
+  }
+
+  async function deleteProfile(id: string) {
+    profileDeleteConfirmId = null;
+    try {
+      const res = await apiFetch(`/api/v1/admin/model-profiles/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`${res.status}`);
+      await apiFetch('/api/v1/admin/model-profiles-cache', { method: 'DELETE' });
+      toast.success('Profile deleted');
+      platformProfiles = platformProfiles.filter(p => p.id !== id);
+    } catch (e) { toast.error(`Failed: ${e}`); }
   }
 
   function requestPlatformModelChange(model: string | null) {
@@ -723,6 +873,16 @@
                           Edit
                         </button>
                         <button
+                          onclick={() => seedTenantProfiles(tenant.tenantId)}
+                          disabled={seedingTenantId === tenant.tenantId}
+                          title="Copy platform model profiles to this tenant (skips existing)"
+                          class="px-2.5 py-1 text-xs rounded-lg border border-emerald-300 dark:border-emerald-700
+                            text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20
+                            disabled:opacity-50 transition-colors"
+                        >
+                          {seedingTenantId === tenant.tenantId ? 'Seeding...' : 'Seed Profiles'}
+                        </button>
+                        <button
                           onclick={() => confirmDeleteTenant(tenant.tenantId)}
                           disabled={deletingTenant}
                           class="px-2.5 py-1 text-xs rounded-lg text-red-600 dark:text-red-400
@@ -896,6 +1056,109 @@
               </table>
             {/if}
           </div>
+
+          <!-- Platform Model Profiles -->
+          <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            <div class="flex items-center justify-between mb-1">
+              <h3 class="text-base font-semibold text-gray-900 dark:text-white">Platform Model Profiles</h3>
+              <button
+                onclick={openCreateProfileModal}
+                class="px-3 py-1.5 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+              >+ Add Profile</button>
+            </div>
+            <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
+              Override sampling params (temperature, top_p, max_tokens…) per model pattern.
+              Patterns: exact name or prefix wildcard (<span class="font-mono">qwen3*</span>, <span class="font-mono">deepseek-r1:7b</span>).
+              Blank = inherit from built-in defaults or env config.
+            </p>
+            {#if platformProfiles.length === 0}
+              <p class="text-sm text-gray-400">No platform profiles defined — built-in defaults apply.</p>
+            {:else}
+              <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                  <thead class="border-b border-gray-200 dark:border-gray-700">
+                    <tr>
+                      <th class="text-left py-2 font-medium text-gray-600 dark:text-gray-400 pr-4">Pattern</th>
+                      <th class="text-left py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Display</th>
+                      <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Temp</th>
+                      <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Think Temp</th>
+                      <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Think TopP</th>
+                      <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Think MaxTok</th>
+                      <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Think Budget</th>
+                      <th class="text-center py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Stream ∵</th>
+                      <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Think RepPen</th>
+                      <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">Think FreqPen</th>
+                      <th class="text-right py-2 font-medium text-gray-600 dark:text-gray-400 pr-3">MaxTok</th>
+                      <th class="py-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
+                    {#each platformProfiles as p}
+                      <tr>
+                        <td class="py-2 font-mono text-gray-900 dark:text-white pr-4">{p.modelPattern}</td>
+                        <td class="py-2 text-gray-500 dark:text-gray-400 pr-3">{p.displayName ?? '—'}</td>
+                        <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.temperature ?? '—'}</td>
+                        <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.thinkingTemperature ?? '—'}</td>
+                        <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.thinkingTopP ?? '—'}</td>
+                        <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.thinkingMaxTokens ?? '—'}</td>
+                        <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.thinkingBudget ?? '—'}</td>
+                        <td class="py-2 text-center pr-3">{p.streamThinking === true ? '✓' : p.streamThinking === false ? '✗' : '—'}</td>
+                        <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.thinkingRepetitionPenalty ?? '—'}</td>
+                        <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.thinkingFrequencyPenalty ?? '—'}</td>
+                        <td class="py-2 text-right text-gray-700 dark:text-gray-300 pr-3">{p.maxTokens ?? '—'}</td>
+                        <td class="py-2 text-right whitespace-nowrap">
+                          <button onclick={() => openEditProfileModal(p)} class="text-blue-600 hover:text-blue-800 dark:text-blue-400 mr-2">Edit</button>
+                          {#if profileDeleteConfirmId === p.id}
+                            <button onclick={() => deleteProfile(p.id)} class="text-red-600 hover:text-red-800 font-medium mr-1">Confirm</button>
+                            <button onclick={() => profileDeleteConfirmId = null} class="text-gray-400 hover:text-gray-600">Cancel</button>
+                          {:else}
+                            <button onclick={() => profileDeleteConfirmId = p.id} class="text-red-400 hover:text-red-600">Delete</button>
+                          {/if}
+                        </td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {/if}
+          </div>
+
+          <!-- Built-in Defaults reference card -->
+          <div class="bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 p-6">
+            <h3 class="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-3">Built-in Defaults (read-only, below DB profiles)</h3>
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead class="border-b border-gray-200 dark:border-gray-700">
+                  <tr>
+                    <th class="text-left py-1.5 font-medium text-gray-500 pr-4">Pattern</th>
+                    <th class="text-right py-1.5 font-medium text-gray-500 pr-3">Temp</th>
+                    <th class="text-right py-1.5 font-medium text-gray-500 pr-3">Think Temp</th>
+                    <th class="text-right py-1.5 font-medium text-gray-500 pr-3">Think TopP</th>
+                    <th class="text-right py-1.5 font-medium text-gray-500 pr-3">Think MaxTok</th>
+                    <th class="text-right py-1.5 font-medium text-gray-500 pr-3">Budget</th>
+                    <th class="text-center py-1.5 font-medium text-gray-500">Stream ∵</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100 dark:divide-gray-700">
+                  {#each BUILTIN_PROFILES as bp}
+                    <tr>
+                      <td class="py-1.5 font-mono text-gray-600 dark:text-gray-400 pr-4">{bp.pattern}</td>
+                      <td class="py-1.5 text-right text-gray-500 pr-3">{bp.temp}</td>
+                      <td class="py-1.5 text-right text-gray-500 pr-3">{bp.thinkTemp}</td>
+                      <td class="py-1.5 text-right text-gray-500 pr-3">{bp.thinkTopP}</td>
+                      <td class="py-1.5 text-right text-gray-500 pr-3">{bp.thinkMaxTokens}</td>
+                      <td class="py-1.5 text-right text-gray-500 pr-3">{bp.thinkBudget ?? '—'}</td>
+                      <td class="py-1.5 text-center text-gray-500">{bp.streamThink ? '✓' : '✗'}</td>
+                    </tr>
+                  {/each}
+                  <tr class="italic">
+                    <td class="py-1.5 font-mono text-gray-400 pr-4">* (catch-all)</td>
+                    <td class="py-1.5 text-right text-gray-400 pr-3" colspan="4">all null → env config fallback</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         {/if}
       </div>
     {/if}
@@ -926,3 +1189,173 @@
   onconfirm={confirmPlatformModelChange}
   oncancel={() => { platformModelConfirmOpen = false; pendingPlatformModel = undefined; }}
 />
+
+{#if profileModalOpen}
+  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onclick={() => { profileModalOpen = false; }}>
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+    <div class="bg-white dark:bg-gray-900 rounded-xl shadow-2xl w-full max-w-lg mx-4 p-6 space-y-4" onclick={(e) => e.stopPropagation()}>
+      <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+        {profileModalMode === 'create' ? 'Add Platform Profile' : 'Edit Platform Profile'}
+      </h2>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div class="col-span-2">
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+            Model Pattern <span class="text-red-500">*</span>
+            <span class="ml-1 text-gray-400">(e.g. <span class="font-mono">qwen3*</span> or <span class="font-mono">qwen3:8b</span>)</span>
+          </label>
+          <input bind:value={profileForm.modelPattern} placeholder="qwen3*"
+            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500" />
+        </div>
+        <div class="col-span-2">
+          <label class="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Display Name</label>
+          <input bind:value={profileForm.displayName} placeholder="Qwen3 family"
+            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500" />
+        </div>
+
+        <!-- Two-column layout: Standard | Thinking -->
+        <div class="col-span-2 grid grid-cols-2 gap-x-6 gap-y-3 mt-1">
+          <!-- Column headers -->
+          <p class="text-xs text-gray-500 dark:text-gray-400 font-semibold border-b border-gray-200 dark:border-gray-700 pb-1">Standard mode</p>
+          <p class="text-xs text-gray-500 dark:text-gray-400 font-semibold border-b border-gray-200 dark:border-gray-700 pb-1">Thinking mode</p>
+
+          <!-- Temperature row -->
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Temperature <span class="text-gray-400">(blank = inherit)</span></label>
+            <input type="number" step="0.01" min="0" max="2" bind:value={profileForm.temperature} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Temperature</label>
+            <input type="number" step="0.01" min="0" max="2" bind:value={profileForm.thinkingTemperature} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+
+          <!-- Top P row -->
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Top P</label>
+            <input type="number" step="0.01" min="0" max="1" bind:value={profileForm.topP} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Top P</label>
+            <input type="number" step="0.01" min="0" max="1" bind:value={profileForm.thinkingTopP} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+
+          <!-- Top K row -->
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Top K</label>
+            <input type="number" step="1" min="0" bind:value={profileForm.topK} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Top K</label>
+            <input type="number" step="1" min="0" bind:value={profileForm.thinkingTopK} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+
+          <!-- Min P row -->
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Min P</label>
+            <input type="number" step="0.01" min="0" max="1" bind:value={profileForm.minP} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Min P</label>
+            <input type="number" step="0.01" min="0" max="1" bind:value={profileForm.thinkingMinP} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+
+          <!-- Frequency Penalty row -->
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Frequency Penalty</label>
+            <input type="number" step="0.01" min="-2" max="2" bind:value={profileForm.frequencyPenalty} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Frequency Penalty</label>
+            <input type="number" step="0.01" min="-2" max="2" bind:value={profileForm.thinkingFrequencyPenalty} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+
+          <!-- Presence Penalty row -->
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Presence Penalty</label>
+            <input type="number" step="0.01" min="-2" max="2" bind:value={profileForm.presencePenalty} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Presence Penalty</label>
+            <input type="number" step="0.01" min="-2" max="2" bind:value={profileForm.thinkingPresencePenalty} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+
+          <!-- Repetition Penalty row -->
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Repetition Penalty</label>
+            <input type="number" step="0.01" min="1" max="2" bind:value={profileForm.repetitionPenalty} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Repetition Penalty</label>
+            <input type="number" step="0.01" min="1" max="2" bind:value={profileForm.thinkingRepetitionPenalty} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+
+          <!-- Max Tokens row -->
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Max Tokens</label>
+            <input type="number" step="1" min="1" bind:value={profileForm.maxTokens} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Max Tokens</label>
+            <input type="number" step="1" min="1" bind:value={profileForm.thinkingMaxTokens} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+
+          <!-- Budget + Stream row (thinking-only) -->
+          <div></div>
+          <div>
+            <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Thinking Budget <span class="text-gray-400">(LMForge cap)</span></label>
+            <input type="number" step="1" min="1" bind:value={profileForm.thinkingBudget} placeholder=""
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm" />
+          </div>
+
+          <div></div>
+          <div class="flex items-center gap-3">
+            <label class="text-xs text-gray-500 dark:text-gray-400 flex-1">
+              Stream reasoning tokens
+              <span class="text-gray-400 ml-1">(stream_reasoning_deltas)</span>
+            </label>
+            <select bind:value={profileForm.streamThinking}
+              class="rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-2 py-1.5 text-sm">
+              <option value={null}>Inherit</option>
+              <option value={true}>Enabled</option>
+              <option value={false}>Disabled</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="col-span-2">
+          <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Notes</label>
+          <textarea bind:value={profileForm.notes} rows="2" placeholder="Optional notes"
+            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 text-sm resize-none"></textarea>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-3 pt-2">
+        <button onclick={() => profileModalOpen = false}
+          class="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">
+          Cancel
+        </button>
+        <button onclick={saveProfile} disabled={profileSaving}
+          class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+          {profileSaving ? 'Saving...' : profileModalMode === 'create' ? 'Create' : 'Save'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}

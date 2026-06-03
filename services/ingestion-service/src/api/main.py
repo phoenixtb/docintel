@@ -62,6 +62,20 @@ async def lifespan(app: FastAPI):
     logger.info("Ingestion service starting up")
     app.state.job_registry = _job_registry
 
+    # Haystack emits "Warming up component X..." on every Pipeline.run(), even when
+    # warm_up() is already a no-op. Silence that per-run noise at INFO level.
+    logging.getLogger("haystack.core.pipeline.base").setLevel(logging.WARNING)
+
+    # Pre-warm the tokenizer once at startup so the first user document is fast.
+    # Combined with the HF_HOME volume fix, this is a local cache hit (~10ms).
+    try:
+        from ..pipeline import TokenAwareSplitter
+        _splitter = TokenAwareSplitter()
+        _splitter.warm_up()
+        logger.info("TokenAwareSplitter pre-warmed at startup")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TokenAwareSplitter pre-warm failed (non-fatal): %s", exc)
+
     async def _eviction_loop() -> None:
         while True:
             await asyncio.sleep(60)
@@ -272,6 +286,18 @@ async def _ingest_document_background(
             chunk_payloads,
         )
 
+        # Publish COMPLETED so IngestionCompleteConsumer (not bulkPersistChunks) drives status.
+        cfg = get_settings()
+        bus = RedisStreamBus(host=cfg.redis_host, port=cfg.redis_port, password=cfg.redis_password)
+        await bus.publish(TOPIC_INGESTION_COMPLETE, {
+            "documentId": request.document_id,
+            "tenantId":   effective_tenant_id,
+            "chunkCount": result["chunk_count"],
+            "domain":     result["domain"],
+            "status":     "COMPLETED",
+        })
+        await bus.close()
+
         logger.info(
             "Ingestion complete: document_id=%s chunks=%d domain=%s",
             request.document_id,
@@ -281,9 +307,6 @@ async def _ingest_document_background(
 
     except Exception as e:
         logger.exception("Ingestion failed for document %s", request.document_id)
-        # Publish ingestion.complete FAILED so IngestionCompleteConsumer in document-service
-        # can drive the document status to FAILED. Without this, the HTTP ingest path left
-        # documents stuck in PROCESSING indefinitely (only the stream worker published FAILED).
         try:
             cfg = get_settings()
             bus = RedisStreamBus(
@@ -292,12 +315,12 @@ async def _ingest_document_background(
                 password=cfg.redis_password,
             )
             await bus.publish(TOPIC_INGESTION_COMPLETE, {
-                "documentId": request.document_id,
-                "tenantId":   effective_tenant_id,
-                "chunkCount": 0,
-                "domain":     "general",
-                "status":     "FAILED",
-                "error":      str(e),
+                "documentId":   request.document_id,
+                "tenantId":     effective_tenant_id,
+                "chunkCount":   0,
+                "domain":       "general",
+                "status":       "FAILED",
+                "errorMessage": str(e),
             })
             await bus.close()
         except Exception as publish_err:
@@ -332,12 +355,18 @@ async def ingest_document(
     user_clearance: UserClearanceDep,
 ):
     """
-    Accept a document ingestion job and process it asynchronously.
+    Accept a document ingestion job via REST (test/debug path only).
 
-    document-service uploads the file to MinIO and then calls this endpoint
-    with the bucket + object_path. Returns 202 Accepted immediately; the
-    ingestion-service updates document status in PG on completion.
+    Production traffic flows exclusively through the [documents.ready] Redis stream.
+    Disabled by default (INGESTION_REST_ENABLED=false). Enable only for integration tests.
     """
+    cfg = get_settings()
+    if not cfg.ingestion_rest_enabled:
+        raise HTTPException(
+            status_code=404,
+            detail="REST /ingest is disabled. Production ingestion runs through the documents.ready stream.",
+        )
+
     if CLASSIFICATION_ORDER[request.acl.classification] > CLASSIFICATION_ORDER[user_clearance]:
         raise HTTPException(
             status_code=403,
@@ -348,11 +377,8 @@ async def ingest_document(
         )
 
     logger.info(
-        "Ingestion job accepted: document_id=%s tenant=%s file=%s classification=%s",
-        request.document_id,
-        tenant_id,
-        request.filename,
-        request.acl.classification.value,
+        "Ingestion job accepted via REST (test path): document_id=%s tenant=%s file=%s",
+        request.document_id, tenant_id, request.filename,
     )
     background_tasks.add_task(_ingest_document_background, request, tenant_id, request.acl)
     return IngestResponse(status="accepted", document_id=request.document_id)

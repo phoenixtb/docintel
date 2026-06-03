@@ -21,7 +21,7 @@ config:
   # Override key path via E2E_SA_KEY_FILE env var.
   # Pass --no-auth to disable entirely (only works if gateway security is off).
   auth:
-    token_url: "http://localhost:9090/oauth/v2/token"
+    token_url: "http://localhost:9095/oauth/v2/token"
     scopes: "openid email profile"
 
 suites:
@@ -96,3 +96,75 @@ suites:
 
       - question: "Under what circumstances can the contract be renewed or extended?"
         expect_keywords: ["renew", "extend", "term"]
+
+  # ---------------------------------------------------------------------------
+  # Min Score Strict
+  # T11: when no documents pass rag_min_relevance_score and fallback_topk=0
+  # the service must return the no-relevant-documents sentinel rather than a
+  # hallucinated answer.
+  # To run: set RAG_MIN_RELEVANCE_SCORE=0.99 and RAG_MIN_SCORE_FALLBACK_TOPK=0
+  # in the rag-service environment before running this suite.
+  # ---------------------------------------------------------------------------
+  - name: "Min Score Strict"
+    skip_if_env_missing: ["ENABLE_MIN_SCORE_SUITE"]
+    queries:
+      - question: "Highly implausible query that will never match anything in the corpus xyzzy123"
+        expect_no_sources: true
+        expect_keywords: ["not find", "relevant", "no relevant"]
+
+  # ---------------------------------------------------------------------------
+  # Thinking Mode
+  # T6b/T5: when thinking mode is enabled the API must return a non-empty
+  # `thinking` field alongside the answer (the thinking tokens must not be
+  # dropped or leaked into the answer body).
+  # To run: set LLM_THINKING_MODE=true or send thinking=true in the request.
+  # ---------------------------------------------------------------------------
+  - name: "Thinking Mode"
+    skip_if_env_missing: ["ENABLE_THINKING_SUITE"]
+    config_overrides:
+      thinking: true
+    queries:
+      - question: "What are the key principles of a good employee code of conduct?"
+        expect_keywords: ["conduct", "employee", "principle"]
+        expect_thinking_length_min: 10
+
+      - question: "What termination conditions apply to standard vendor contracts?"
+        expect_keywords: ["terminat", "contract", "vendor"]
+        expect_thinking_length_min: 10
+
+  # ---------------------------------------------------------------------------
+  # Cache Hit
+  # Verifies that the second identical request is served from the semantic cache
+  # (cache_hit: true in the metadata event) and contains the same answer tokens.
+  # run_tests.py fires each query twice and checks the second response.
+  # ---------------------------------------------------------------------------
+  - name: "Cache Hit"
+    skip_if_env_missing: ["ENABLE_CACHE_SUITE"]
+    config_overrides:
+      use_cache: true
+    queries:
+      - question: "What is the work from home policy?"
+        expect_cache_hit: true
+        expect_keywords: ["policy"]
+
+  # ---------------------------------------------------------------------------
+  # OPA Denied (Streaming security gap regression)
+  # Proves that the streaming path now enforces OPA — previously the streaming
+  # handler skipped OpaChunkValidator entirely (security gap closed by A6).
+  #
+  # The test user "e2e" must NOT have clearance for "secret" classification.
+  # Documents ingested with classification=secret should be denied.
+  #
+  # To run: set ENABLE_OPA_DENIED_SUITE=1 and ensure at least one document
+  # with classification=secret exists in the tenant corpus.
+  # The suite uses /query/stream to specifically prove the streaming path.
+  # ---------------------------------------------------------------------------
+  - name: "OPA Denied"
+    skip_if_env_missing: ["ENABLE_OPA_DENIED_SUITE"]
+    config_overrides:
+      rag_path: "/api/v1/query/stream"
+    queries:
+      - question: "What is in the classified documents?"
+        expect_opa_denied: true
+        expect_no_sources: true
+        expect_keywords: ["not find", "relevant", "no relevant"]

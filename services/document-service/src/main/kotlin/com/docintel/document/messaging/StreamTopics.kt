@@ -7,9 +7,10 @@ package com.docintel.document.messaging
  * Keep in sync with docintel_common.messaging (Python) TOPIC_* constants.
  */
 object StreamTopics {
-    const val FILES_AVAILABLE   = "files.available"
-    const val DOCUMENTS_READY   = "documents.ready"
+    const val FILES_AVAILABLE    = "files.available"
+    const val DOCUMENTS_READY    = "documents.ready"
     const val INGESTION_COMPLETE = "ingestion.complete"
+    const val DOCUMENTS_PROGRESS = "documents.progress"
 }
 
 /** Published by data-loader when a file is uploaded to MinIO and ready for registration. */

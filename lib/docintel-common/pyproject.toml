@@ -14,6 +14,10 @@ dependencies = [
     "pydantic>=2.0",
     # Redis Streams message bus (optional — only loaded if messaging module is imported)
     "redis>=5.0.0",
+    # model_profile_resolver imports psycopg2 at module load, so it is a hard
+    # dependency of this package — every consumer needs it (not just the ones
+    # that happen to declare it themselves).
+    "psycopg2-binary>=2.9.0",
 ]
 
 [project.optional-dependencies]

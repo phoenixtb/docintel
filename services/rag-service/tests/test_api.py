@@ -5,17 +5,49 @@ API Endpoint Tests
 Tests for FastAPI endpoints.
 """
 
+import asyncio
 import pytest
 import uuid
 from fastapi.testclient import TestClient
+from typing import Generator
 
 from src.api.main import app
 
 
 @pytest.fixture
-def client():
-    """Create FastAPI test client."""
-    return TestClient(app)
+def client() -> Generator[TestClient, None, None]:
+    """Create FastAPI test client with minimal app.state populated."""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.config import Settings
+    from src.api.dependencies import require_internal_token
+    from src.components.model_resolver import TenantResolved
+    # Populate app.state directly so endpoints that depend on Settings/RAGService
+    # work without triggering the full lifespan (which connects to external services).
+    settings = Settings()
+    app.state.settings = settings
+    app.state.llm_semaphore = asyncio.Semaphore(settings.llm_concurrency_limit)
+    app.state.tracer = MagicMock()
+    app.state.model_profile_resolver = MagicMock()
+    app.state.summarizer = MagicMock()
+    app.state.http = MagicMock()
+    # model_resolver.resolve is async — use AsyncMock so await works
+    mock_resolver = MagicMock()
+    mock_resolver.resolve = AsyncMock(
+        return_value=TenantResolved(model="test-model", thinking_mode=False)
+    )
+    app.state.model_resolver = mock_resolver
+    # rag_service.query is async; raise so query endpoint returns 500 (acceptable)
+    mock_rag = MagicMock()
+    mock_rag.query = AsyncMock(side_effect=RuntimeError("LLM not available in test"))
+    app.state.rag_service = mock_rag
+    # Bypass HMAC internal-token auth so validation/routing tests reach their target.
+    app.dependency_overrides[require_internal_token] = lambda: None
+    # raise_server_exceptions=False: unhandled server errors return HTTP 500
+    # rather than re-raising inside the test.
+    try:
+        yield TestClient(app, raise_server_exceptions=False)
+    finally:
+        app.dependency_overrides.clear()
 
 
 @pytest.mark.unit

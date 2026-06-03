@@ -1,0 +1,80 @@
+# docker-compose.storage.yml — data relocation overlay
+# =============================================================================
+# Puts ALL DocIntel persistent data under a single directory (DOCINTEL_DATA_DIR)
+# instead of Docker's default volume location. One switch, everything moves —
+# databases, object storage, caches, metrics. No partial splits.
+#
+# Activated ONLY when DOCINTEL_DATA_DIR is set (see config/defaults.env).
+# When unset, this file is not included in the compose chain and all volumes
+# use Docker's default local driver. See scripts/lib/profile_config.sh.
+#
+# The target subdirectories are created automatically by compose_file_chain()
+# (it reads the `device:` lines below as the single source of truth).
+#
+# NOTE: block style (not inline `{ }`) is required — the ${DOCINTEL_DATA_DIR}
+# braces collide with YAML flow-mapping syntax.
+# =============================================================================
+
+volumes:
+  postgres-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DOCINTEL_DATA_DIR}/postgres
+
+  qdrant-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DOCINTEL_DATA_DIR}/qdrant
+
+  redis-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DOCINTEL_DATA_DIR}/redis
+
+  minio-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DOCINTEL_DATA_DIR}/minio
+
+  clickhouse-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DOCINTEL_DATA_DIR}/clickhouse
+
+  clickhouse-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DOCINTEL_DATA_DIR}/clickhouse-logs
+
+  huggingface-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DOCINTEL_DATA_DIR}/huggingface
+
+  prometheus-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DOCINTEL_DATA_DIR}/prometheus
+
+  grafana-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DOCINTEL_DATA_DIR}/grafana

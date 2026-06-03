@@ -1,0 +1,166 @@
+{
+  "uid": "docintel-analytics",
+  "title": "DocIntel — Analytics (ClickHouse)",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": { "from": "now-30d", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "tenant_id",
+        "label": "Tenant",
+        "type": "query",
+        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+        "query": "SELECT DISTINCT tenant_id FROM docintel_analytics.query_events ORDER BY tenant_id",
+        "includeAll": true,
+        "allValue": "",
+        "multi": false,
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total Queries",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "targets": [
+        {
+          "rawSql": "SELECT count() FROM docintel_analytics.query_events WHERE ($__timeFilter(created_at)) AND (tenant_id = '${tenant_id}' OR '${tenant_id}' = '' OR '${tenant_id}' = 'All')",
+          "format": "table"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Avg Latency (ms)",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "targets": [
+        {
+          "rawSql": "SELECT round(avg(latency_ms), 1) FROM docintel_analytics.query_events WHERE ($__timeFilter(created_at)) AND (tenant_id = '${tenant_id}' OR '${tenant_id}' = '' OR '${tenant_id}' = 'All')",
+          "format": "table"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Cache Hit Rate",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "targets": [
+        {
+          "rawSql": "SELECT round(countIf(cache_hit = true) / count() * 100, 1) FROM docintel_analytics.query_events WHERE ($__timeFilter(created_at)) AND (tenant_id = '${tenant_id}' OR '${tenant_id}' = '' OR '${tenant_id}' = 'All')",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Total Feedback",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "targets": [
+        {
+          "rawSql": "SELECT count() FROM docintel_analytics.feedback_events WHERE ($__timeFilter(created_at)) AND (tenant_id = '${tenant_id}' OR '${tenant_id}' = '' OR '${tenant_id}' = 'All')",
+          "format": "table"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Like Rate",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "targets": [
+        {
+          "rawSql": "SELECT round(countIf(liked = true) / count() * 100, 1) FROM docintel_analytics.feedback_events WHERE ($__timeFilter(created_at)) AND (tenant_id = '${tenant_id}' OR '${tenant_id}' = '' OR '${tenant_id}' = 'All')",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Queries per Hour",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "targets": [
+        {
+          "rawSql": "SELECT toStartOfHour(created_at) AS time, count() AS queries FROM docintel_analytics.query_events WHERE ($__timeFilter(created_at)) AND (tenant_id = '${tenant_id}' OR '${tenant_id}' = '' OR '${tenant_id}' = 'All') GROUP BY time ORDER BY time",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Latency p50 / p95 / p99 (ms)",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "targets": [
+        {
+          "rawSql": "SELECT toStartOfHour(created_at) AS time, quantile(0.50)(latency_ms) AS p50, quantile(0.95)(latency_ms) AS p95, quantile(0.99)(latency_ms) AS p99 FROM docintel_analytics.query_events WHERE ($__timeFilter(created_at)) AND (tenant_id = '${tenant_id}' OR '${tenant_id}' = '' OR '${tenant_id}' = 'All') GROUP BY time ORDER BY time",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 8,
+      "type": "bargauge",
+      "title": "Queries by Model",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "options": { "orientation": "horizontal", "reduceOptions": { "calcs": ["sum"] } },
+      "targets": [
+        {
+          "rawSql": "SELECT model_used, count() AS queries FROM docintel_analytics.query_events WHERE ($__timeFilter(created_at)) AND (tenant_id = '${tenant_id}' OR '${tenant_id}' = '' OR '${tenant_id}' = 'All') GROUP BY model_used ORDER BY queries DESC LIMIT 20",
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Feedback — Likes vs Dislikes per Day",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "targets": [
+        {
+          "rawSql": "SELECT toStartOfDay(created_at) AS time, countIf(liked = true) AS likes, countIf(liked = false) AS dislikes FROM docintel_analytics.feedback_events WHERE ($__timeFilter(created_at)) AND (tenant_id = '${tenant_id}' OR '${tenant_id}' = '' OR '${tenant_id}' = 'All') GROUP BY time ORDER BY time",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Per-Tenant Breakdown",
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 8 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse-docintel" },
+      "targets": [
+        {
+          "rawSql": "SELECT tenant_id, count() AS queries, round(avg(latency_ms), 1) AS avg_ms, round(quantile(0.95)(latency_ms), 1) AS p95_ms, round(countIf(cache_hit = true) / count() * 100, 1) AS cache_hit_pct FROM docintel_analytics.query_events WHERE ($__timeFilter(created_at)) GROUP BY tenant_id ORDER BY queries DESC",
+          "format": "table"
+        }
+      ],
+      "options": { "sortBy": [{ "displayName": "queries", "desc": true }] }
+    }
+  ]
+}

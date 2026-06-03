@@ -8,12 +8,11 @@ them via FastAPI Depends() from api/dependencies.py.
 """
 
 import asyncio
-import contextvars
 import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from typing import Callable, Optional
+from typing import Optional
 
 from docintel_common.tracing import TraceContext, configure_trace_logging
 
@@ -22,12 +21,26 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..components.model_profile_resolver import ModelProfileResolver
 from ..components.model_resolver import TenantModelResolver
 from ..config import Settings
 from ..context import _tenant_ctx, _role_ctx
+from ..events import (
+    ErrorEvent,
+    MetadataEvent,
+    PipelineEvent,
+    QueuedEvent,
+    RoutingEvent,
+    SourcesEvent,
+    StatusEvent,
+    ThinkingTokenEvent,
+    TokenEvent,
+)
 from ..pipelines import RAGService
 from ..tracing import LangfuseTracer
-from .dependencies import RAGServiceDep, SettingsDep, TracerDep, UserContextDep
+from ..utils.asyncio import _run_db
+from .dependencies import ConversationHistoryDep, RAGServiceDep, SettingsDep, TracerDep, UserContextDep
+from .schemas import QueryRequest, QueryResponse
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +54,14 @@ async def _emit_query_event(
     cache_hit: bool,
     source_count: int,
     analytics_url: str,
+    thinking_truncated: bool = False,
+    http_client: Optional[httpx.AsyncClient] = None,
 ) -> None:
     """Fire-and-forget: POST query telemetry to analytics-service."""
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        client = http_client or httpx.AsyncClient(timeout=3.0)
+        close_after = http_client is None
+        try:
             await client.post(
                 f"{analytics_url}/events/query",
                 json={
@@ -55,8 +72,13 @@ async def _emit_query_event(
                     "model_used": model_used,
                     "cache_hit": cache_hit,
                     "source_count": source_count,
+                    "thinking_truncated": thinking_truncated,
                 },
+                timeout=3.0,
             )
+        finally:
+            if close_after:
+                await client.aclose()
     except Exception as e:
         logger.debug("Query telemetry emit failed (non-fatal): %s", e)
 
@@ -72,12 +94,6 @@ def _fire_and_forget(coro) -> asyncio.Task:
     task.add_done_callback(_on_done)
     return task
 
-
-async def _run_db(fn: Callable):
-    """Run a synchronous DB call in the default executor, preserving contextvars for RLS."""
-    ctx = contextvars.copy_context()
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, ctx.run, fn)
 
 
 # =============================================================================
@@ -104,6 +120,10 @@ async def lifespan(app: FastAPI):
     # Probe LLM engines — log reachability and available models (non-fatal)
     await _probe_llm_engine(settings)
 
+    # Fail-fast guard: verify Haystack private symbols used by ThinkingAwareChatGenerator
+    # are still present. Catches silent breakage from a Haystack upgrade before any query.
+    _selftest_thinking_adapter()
+
     # Trigger chat model pre-load in LMForge/Ollama (fire-and-forget).
     # Local engines load models lazily on first request (can take 2-5 s).
     # Sending a tiny request now ensures the model is hot before users query.
@@ -124,6 +144,12 @@ async def lifespan(app: FastAPI):
         default_model=settings.llm_model,
     )
 
+    # Model profile resolver — resolves sampling params (temperature, top_p, etc.)
+    # per (model_name, tenant_id). Chain: tenant DB → platform DB → built-in → env config.
+    app.state.model_profile_resolver = ModelProfileResolver(
+        postgres_url=settings.postgres_url,
+    )
+
     # Anchored iterative summarizer — compresses evicted conversation turns using the
     # fast expansion model. Runs async fire-and-forget after each conversation persist.
     from ..components.summarizer import AnchoredSummarizer
@@ -139,10 +165,37 @@ async def lifespan(app: FastAPI):
     app.state.llm_semaphore = asyncio.Semaphore(settings.llm_concurrency_limit)
     logger.info("LLM concurrency limit: %d", settings.llm_concurrency_limit)
 
+    # Shared HTTP client — connection pool reused across requests (healthcheck,
+    # model list, analytics telemetry). Avoids opening a new TCP connection per
+    # call. The probe / pre-warm helpers use their own short-lived clients since
+    # they fire only at startup before the pool is needed.
+    app.state.http = httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+    )
+
     yield
 
     logger.info("RAG Service shutting down")
     tracer.shutdown()
+    await app.state.http.aclose()
+
+
+def _selftest_thinking_adapter() -> None:
+    """
+    Verify that Haystack's private symbols used by ThinkingAwareChatGenerator
+    still exist. Fails loudly at startup so broken Haystack upgrades are caught
+    before any user query rather than mid-stream.
+    """
+    from ..components.llm_adapter import ThinkingAwareChatGenerator
+    from haystack.components.generators.chat.openai import OpenAIChatGenerator
+
+    if not hasattr(OpenAIChatGenerator, "_handle_stream_response"):
+        raise RuntimeError(
+            "Haystack OpenAIChatGenerator._handle_stream_response is missing. "
+            "ThinkingAwareChatGenerator's override will not fire — thinking tokens "
+            "will be silently dropped. Update llm_adapter.py or pin haystack-ai~=2.18."
+        )
+    logger.info("ThinkingAwareChatGenerator self-test passed")
 
 
 async def _probe_llm_engine(settings: Settings) -> None:
@@ -175,7 +228,7 @@ async def _prewarm_rag_service(rag_service) -> None:
     (60-120 s on CPU) happens during startup instead of blocking the first query.
     """
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, rag_service.warm_up)
         logger.info("RAG pipeline warm-up complete (reranker ready)")
     except Exception as e:
@@ -283,28 +336,9 @@ except ImportError:
 # Request / Response models
 # =============================================================================
 
-class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=2000)
-    tenant_id: str = Field(default="default")
-    user_roles: list[str] = Field(default_factory=list)
-    user_id: Optional[str] = None
-    document_type: Optional[str] = None
-    conversation_id: Optional[str] = None
-    top_k: Optional[int] = Field(default=None, ge=1, le=20)
-    min_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    use_cache: bool = True
-    use_reranking: bool = True
-    # None = use tenant preference; true/false = per-query override
-    thinking_mode: Optional[bool] = None
-
-
-class QueryResponse(BaseModel):
-    answer: str
-    thinking: str = ""
-    sources: list[dict]
-    cache_hit: bool
-    latency_ms: int
-    model_used: str
+# QueryRequest and QueryResponse live in schemas.py (imported above) to avoid
+# circular imports with dependencies.py. HealthResponse stays here — it's not
+# needed by dependencies.
 
 
 class HealthResponse(BaseModel):
@@ -318,10 +352,31 @@ class HealthResponse(BaseModel):
 # Checked via substring match against the lowercased model name.
 _THINKING_MODEL_FAMILIES = {"qwen3", "qwq", "deepseek-r1", "marco-o1", "skywork-o1", ":r1"}
 
+# Substring rules for capability inference when LMForge does not return a
+# `capabilities` block. Keep these in lockstep with the UI's `inferKind`.
+_VISION_KEYWORDS  = ("-vl", ":vl", "vision", "llava", "moondream", "internvl")
+_RERANK_KEYWORDS  = ("rerank", "reranker")
+_EMBED_KEYWORDS   = ("embed", "nomic", "mxbai", "bge", "gte", "e5-")
+
 
 def _model_supports_thinking(model_name: str) -> bool:
     name_lower = model_name.lower()
     return any(family in name_lower for family in _THINKING_MODEL_FAMILIES)
+
+
+def _model_supports_vision(model_name: str) -> bool:
+    n = model_name.lower()
+    return any(kw in n for kw in _VISION_KEYWORDS) or n.startswith("vl")
+
+
+def _model_is_reranker(model_name: str) -> bool:
+    n = model_name.lower()
+    return any(kw in n for kw in _RERANK_KEYWORDS)
+
+
+def _model_is_embed(model_name: str) -> bool:
+    n = model_name.lower()
+    return any(kw in n for kw in _EMBED_KEYWORDS)
 
 
 class ModelInfo(BaseModel):
@@ -329,6 +384,9 @@ class ModelInfo(BaseModel):
     size: Optional[int] = None
     modified_at: Optional[str] = None
     supports_thinking: bool = False
+    supports_vision: bool = False
+    is_reranker: bool = False
+    is_embed: bool = False
 
 
 class ModelListResponse(BaseModel):
@@ -348,7 +406,7 @@ class VectorStatsResponse(BaseModel):
 # =============================================================================
 
 @app.get("/health", response_model=HealthResponse)
-async def health_check(settings: SettingsDep):
+async def health_check(settings: SettingsDep, http_request: Request):
     qdrant_status = "unknown"
     llm_status = "unknown"
 
@@ -360,9 +418,9 @@ async def health_check(settings: SettingsDep):
         qdrant_status = f"error: {str(e)[:50]}"
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{settings.llm_chat_url}/models")
-            llm_status = "connected" if r.status_code == 200 else f"error: HTTP {r.status_code}"
+        client: httpx.AsyncClient = http_request.app.state.http
+        r = await client.get(f"{settings.llm_chat_url}/models", timeout=5.0)
+        llm_status = "connected" if r.status_code == 200 else f"error: HTTP {r.status_code}"
     except Exception as e:
         llm_status = f"error: {str(e)[:50]}"
 
@@ -394,32 +452,38 @@ async def list_models(
     x_tenant_id: Optional[str] = Header(None),
 ):
     """
-    List all chat models available from the configured LLM engine.
-    Uses the standard GET /v1/models endpoint (OpenAI-compatible).
-    Enriches each model with supports_thinking and returns the tenant's thinking_mode preference.
-    """
-    _EMBED_KEYWORDS = {"embed", "nomic", "mxbai", "bge", "gte", "e5-"}
+    List all models available from the configured LLM engine, with capability
+    flags so the UI can filter per-kind dropdowns (chat / vlm / rerank).
 
+    Embed models are returned for completeness but the UI typically hides them
+    because the embed model is env-locked.
+    """
     models: list[ModelInfo] = []
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{settings.llm_chat_url}/models")
-            if r.status_code == 200:
-                raw_models = r.json().get("data", [])
-                for m in raw_models:
-                    name: str = m.get("id", "") or m.get("name", "")
-                    name_lower = name.lower()
-                    if not name or any(kw in name_lower for kw in _EMBED_KEYWORDS):
-                        continue
-                    # LMForge exposes capabilities.thinking — use it when available
-                    capabilities: dict = m.get("capabilities", {})
-                    supports_thinking = capabilities.get("thinking", _model_supports_thinking(name))
-                    models.append(ModelInfo(
-                        name=name,
-                        size=m.get("size"),
-                        modified_at=m.get("modified_at") or m.get("created"),
-                        supports_thinking=supports_thinking,
-                    ))
+        client: httpx.AsyncClient = http_request.app.state.http
+        r = await client.get(f"{settings.llm_chat_url}/models", timeout=10.0)
+        if r.status_code == 200:
+            raw_models = r.json().get("data", [])
+            for m in raw_models:
+                name: str = m.get("id", "") or m.get("name", "")
+                if not name:
+                    continue
+                # LMForge optionally returns a `capabilities` block — use it
+                # when present, fall back to substring inference otherwise.
+                capabilities: dict = m.get("capabilities", {})
+                supports_thinking = capabilities.get("thinking", _model_supports_thinking(name))
+                supports_vision   = capabilities.get("vision",   _model_supports_vision(name))
+                is_reranker       = capabilities.get("rerank",   _model_is_reranker(name))
+                is_embed          = capabilities.get("embed",    _model_is_embed(name))
+                models.append(ModelInfo(
+                    name=name,
+                    size=m.get("size"),
+                    modified_at=m.get("modified_at") or m.get("created"),
+                    supports_thinking=supports_thinking,
+                    supports_vision=supports_vision,
+                    is_reranker=is_reranker,
+                    is_embed=is_embed,
+                ))
     except Exception as exc:
         logger.warning("Failed to fetch model list from %s: %s", settings.llm_chat_url, exc)
 
@@ -473,6 +537,71 @@ async def invalidate_user_settings_cache(
 
 
 # =============================================================================
+# Model profile cache invalidation
+# =============================================================================
+
+@app.get("/internal/model-profiles/resolve/{tenant_id}")
+async def resolve_model_profile(tenant_id: str, model: str, http_request: Request):
+    """
+    Return fully-resolved effective sampling parameters for a (tenant, model) pair.
+    Resolution chain: tenant DB → platform DB → built-in defaults → env var fallbacks.
+    All values are guaranteed non-null (env fallbacks applied).
+    """
+    resolver: ModelProfileResolver = http_request.app.state.model_profile_resolver
+    settings: Settings = http_request.app.state.settings
+    params = await resolver.resolve(model, tenant_id)
+
+    def _v(resolved, fallback):
+        return resolved if resolved is not None else fallback
+
+    return {
+        "model": model,
+        "tenant_id": tenant_id,
+        # Standard mode
+        "temperature": _v(params.temperature, settings.llm_temperature),
+        "top_p": _v(params.top_p, settings.llm_top_p),
+        "max_tokens": _v(params.max_tokens, settings.llm_max_tokens),
+        "frequency_penalty": _v(params.frequency_penalty, settings.llm_frequency_penalty),
+        "presence_penalty": _v(params.presence_penalty, settings.llm_presence_penalty),
+        "repetition_penalty": _v(params.repetition_penalty, settings.llm_repetition_penalty),
+        "top_k": _v(params.top_k, settings.llm_top_k),
+        "min_p": _v(params.min_p, settings.llm_min_p),
+        # Thinking mode
+        "thinking_temperature": _v(params.thinking_temperature, settings.llm_thinking_temperature),
+        "thinking_top_p": _v(params.thinking_top_p, settings.llm_thinking_top_p),
+        "thinking_max_tokens": _v(params.thinking_max_tokens, settings.llm_thinking_max_tokens),
+        "thinking_frequency_penalty": _v(params.thinking_frequency_penalty, settings.llm_thinking_frequency_penalty),
+        "thinking_presence_penalty": _v(params.thinking_presence_penalty, settings.llm_thinking_presence_penalty),
+        "thinking_repetition_penalty": _v(params.thinking_repetition_penalty, settings.llm_thinking_repetition_penalty),
+        "thinking_top_k": _v(params.thinking_top_k, settings.llm_thinking_top_k),
+        "thinking_min_p": _v(params.thinking_min_p, settings.llm_thinking_min_p),
+        "thinking_budget": _v(params.thinking_budget, settings.llm_thinking_budget),
+    }
+
+
+@app.delete("/internal/model-profiles-cache", status_code=204)
+async def invalidate_model_profiles_cache_global(http_request: Request):
+    """
+    Flush the entire ModelProfileResolver cache (platform profiles changed).
+    Called by the UI after platform-scope model profile CRUD.
+    """
+    resolver: ModelProfileResolver = http_request.app.state.model_profile_resolver
+    resolver.invalidate()
+    logger.info("Model profile cache fully invalidated (platform profiles changed)")
+
+
+@app.delete("/internal/model-profiles-cache/{tenant_id}", status_code=204)
+async def invalidate_model_profiles_cache_tenant(tenant_id: str, http_request: Request):
+    """
+    Flush ModelProfileResolver cache entries for a specific tenant.
+    Called by the UI after tenant-scope model profile CRUD.
+    """
+    resolver: ModelProfileResolver = http_request.app.state.model_profile_resolver
+    resolver.invalidate(tenant_id=tenant_id)
+    logger.info("Model profile cache invalidated for tenant %s", tenant_id)
+
+
+# =============================================================================
 # Vector stats
 # =============================================================================
 
@@ -520,8 +649,50 @@ async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep):
 
 
 # =============================================================================
+# SSE serialiser
+# =============================================================================
+
+def _serialize_sse(event: PipelineEvent) -> str:
+    """Convert a typed PipelineEvent into an SSE data line, preserving wire format."""
+    match event:
+        case MetadataEvent(query_id=qid, cache_hit=ch, context_state=cs):
+            payload: dict = {"metadata": {"query_id": qid, "cache_hit": ch}}
+            if cs:
+                payload["metadata"]["context_state"] = cs
+        case RoutingEvent(domain=d, explicit=e):
+            payload = {"routing": {"domain": d, "explicit": e}}
+        case QueuedEvent(message=m):
+            payload = {"queued": True, "message": m}
+        case ThinkingTokenEvent(text=t):
+            payload = {"thinking_token": t}
+        case StatusEvent(stage=s):
+            payload = {"status": s}
+        case TokenEvent(text=t):
+            payload = {"token": t}
+        case SourcesEvent(sources=s, done=d):
+            payload = {"sources": list(s), "done": d}
+        case ErrorEvent(message=m):
+            payload = {"error": m}
+        case _:
+            payload = {}
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+# =============================================================================
 # Query endpoints
 # =============================================================================
+
+def _resolve_effective_model_and_thinking(
+    request: QueryRequest,
+    resolved,
+    effective_model_name: str,
+) -> tuple[str, bool]:
+    """Compute effective_model and effective_thinking from resolver + request override."""
+    effective_thinking = (
+        request.thinking_mode if request.thinking_mode is not None else resolved.thinking_mode
+    ) and _model_supports_thinking(effective_model_name)
+    return effective_model_name, effective_thinking
+
 
 @app.post("/query", response_model=QueryResponse)
 async def query_documents(
@@ -529,38 +700,55 @@ async def query_documents(
     rag_service: RAGServiceDep,
     user_ctx: UserContextDep,
     settings: SettingsDep,
+    history: ConversationHistoryDep,
     http_request: Request,
 ):
     """
     RAG query with tenant isolation and RBAC.
     Gateway claims always take precedence — clients cannot override tenant_id.
     """
-    tenant_id = user_ctx.tenant_id
-    user_roles = user_ctx.roles
-    user_id = user_ctx.user_id
+    model_resolver: TenantModelResolver = http_request.app.state.model_resolver
+    llm_semaphore: asyncio.Semaphore = http_request.app.state.llm_semaphore
+    resolved = await model_resolver.resolve(user_ctx.tenant_id, user_ctx.user_id or "")
+    effective_model, effective_thinking = _resolve_effective_model_and_thinking(
+        request, resolved, resolved.model
+    )
+    request_id = str(uuid.uuid4())
 
     try:
         result = await rag_service.query(
             question=request.question,
-            tenant_id=tenant_id,
-            user_roles=user_roles or None,
-            user_id=user_id,
+            tenant_id=user_ctx.tenant_id,
+            user_context=user_ctx,
+            user_roles=user_ctx.roles or None,
+            user_id=user_ctx.user_id,
+            history=history.messages,
+            context_state=history.context_state,
             document_type=request.document_type,
             top_k=request.top_k,
-            conversation_id=request.conversation_id,
             min_score=request.min_score,
-            user_context=user_ctx,
+            use_cache=request.use_cache,
+            use_reranking=request.use_reranking,
+            effective_model=effective_model,
+            effective_thinking=effective_thinking,
+            settings=settings,
+            llm_semaphore=llm_semaphore,
+            request_id=request_id,
+            model_profile_resolver=http_request.app.state.model_profile_resolver,
+            conversation_id=request.conversation_id,
             summarizer=http_request.app.state.summarizer,
         )
         _fire_and_forget(_emit_query_event(
-            query_id=str(uuid.uuid4()),
-            tenant_id=tenant_id,
-            user_id=user_id or "",
+            query_id=request_id,
+            tenant_id=user_ctx.tenant_id,
+            user_id=user_ctx.user_id or "",
             latency_ms=result["latency_ms"],
             model_used=result.get("model_used", "unknown"),
             cache_hit=result["cache_hit"],
             source_count=len(result["sources"]),
             analytics_url=settings.analytics_service_url,
+            thinking_truncated=result.get("thinking_truncated", False),
+            http_client=http_request.app.state.http,
         ))
         return QueryResponse(
             answer=result["answer"],
@@ -569,6 +757,7 @@ async def query_documents(
             cache_hit=result["cache_hit"],
             latency_ms=result["latency_ms"],
             model_used=result.get("model_used", "unknown"),
+            routed_domain=result.get("detected_domain"),
         )
     except Exception as e:
         logger.exception("Query failed")
@@ -581,343 +770,73 @@ async def query_documents_stream(
     rag_service: RAGServiceDep,
     user_ctx: UserContextDep,
     settings: SettingsDep,
+    history: ConversationHistoryDep,
     http_request: Request,
 ):
-    """
-    RAG query with streaming SSE response.
-
-    Runs embedding + retrieval via the RAGService components,
-    then streams the LLM response token-by-token.
-    """
-    import asyncio
-
-    from ..components.llm_adapter import build_streaming_generator, extract_reasoning_content
-    from ..pipelines.query import _build_section_label
-
-    tenant_id = user_ctx.tenant_id
-    user_roles = user_ctx.roles
-    user_id = user_ctx.user_id
-
+    """Thin streaming handler — delegates all orchestration to RAGService.stream()."""
     llm_semaphore: asyncio.Semaphore = http_request.app.state.llm_semaphore
     model_resolver: TenantModelResolver = http_request.app.state.model_resolver
-    summarizer = http_request.app.state.summarizer
-
-    # Resolve effective model + thinking_mode before entering the generator.
-    # thinking_mode is user-scoped; request.thinking_mode (per-query override) wins.
-    # thinking is additionally gated on model capability.
-    resolved = await model_resolver.resolve(tenant_id, user_id or "")
-    effective_model = resolved.model
-    effective_thinking = (
-        request.thinking_mode if request.thinking_mode is not None else resolved.thinking_mode
-    ) and _model_supports_thinking(effective_model)
-    logger.warning(
-        "Stream query — tenant=%s model=%s thinking=%s (tenant_pref=%s, req_override=%s, model_supports=%s)",
-        tenant_id, effective_model, effective_thinking,
-        resolved.thinking_mode, request.thinking_mode, _model_supports_thinking(effective_model),
+    resolved = await model_resolver.resolve(user_ctx.tenant_id, user_ctx.user_id or "")
+    effective_model, effective_thinking = _resolve_effective_model_and_thinking(
+        request, resolved, resolved.model
     )
+    logger.info(
+        "Stream query — tenant=%s model=%s thinking=%s",
+        user_ctx.tenant_id, effective_model, effective_thinking,
+    )
+    request_id = str(uuid.uuid4())
 
-    async def generate():
+    async def sse_iter():
+        cache_hit = False
+        source_count = 0
         try:
-            # Ensure RAGService is warmed up (embedders available)
-            if not rag_service._ready:
-                rag_service.warm_up()
-
-            query_id = str(uuid.uuid4())
-            loop = asyncio.get_running_loop()
-
-            # Load conversation history (anchored summary + recent verbatim turns)
-            # before emitting the metadata event so context_state is included upfront.
-            stream_history: list[dict] = []
-            context_state: dict = {}
-            if request.conversation_id:
-                stream_history, context_state = rag_service._load_conversation_history(
-                    request.conversation_id, tenant_id
-                )
-
-            metadata_payload: dict = {"query_id": query_id, "cache_hit": False}
-            if context_state.get("has_summary"):
-                metadata_payload["context_state"] = context_state
-            yield f"data: {json.dumps({'metadata': metadata_payload})}\n\n"
-
-            # Embed — run sync calls in executor so they don't block the event loop
-            embed_result = await loop.run_in_executor(
-                None, lambda: rag_service._dense_embedder.run(text=request.question)
-            )
-            query_embedding = embed_result["embedding"]
-            sparse_result = await loop.run_in_executor(
-                None, lambda: rag_service._sparse_embedder.run(text=request.question)
-            )
-            query_sparse_embedding = sparse_result.get("sparse_embedding")
-
-            # ── Semantic cache check ─────────────────────────────────────────
-            if request.use_cache and rag_service._cache_checker:
-                cache_result = await loop.run_in_executor(
-                    None,
-                    lambda: rag_service._cache_checker.run(  # type: ignore[union-attr]
-                        query_embedding=query_embedding,
-                        tenant_id=tenant_id,
-                        user_context=user_ctx,
-                    ),
-                )
-                if cache_result["cache_hit"]:
-                    yield f"data: {json.dumps({'metadata': {'query_id': query_id, 'cache_hit': True}})}\n\n"
-                    yield f"data: {json.dumps({'token': cache_result['cached_response']})}\n\n"
-                    yield f"data: {json.dumps({'sources': cache_result.get('cached_sources', []), 'done': True})}\n\n"
-                    return
-
-            # ── Query Routing (Pattern 1 from production-rag-concepts) ──────
-            # If the caller didn't specify a domain, auto-classify the query
-            # so retrieval stays within the relevant knowledge-base partition.
-            # Confidence threshold: only apply the filter when the classifier
-            # is reasonably sure — below it we fall back to unfiltered search.
-            ROUTING_CONFIDENCE_THRESHOLD = 0.55
-            routed_domain: str | None = None
-
-            if request.document_type and request.document_type != "all":
-                # Explicit caller override — honour it directly.
-                routed_domain = request.document_type
-            else:
-                try:
-                    from docintel_common.domain import get_domain_classifier
-                    clf = get_domain_classifier()
-                    result = await loop.run_in_executor(
-                        None, lambda: clf.classify(request.question)
-                    )
-                    if result.confidence >= ROUTING_CONFIDENCE_THRESHOLD:
-                        routed_domain = result.domain
-                        logger.info(
-                            "Query routed to domain '%s' (confidence=%.2f)",
-                            routed_domain, result.confidence,
-                        )
-                    else:
-                        logger.info(
-                            "Query routing confidence too low (%.2f) — searching all domains",
-                            result.confidence,
-                        )
-                except Exception as e:
-                    logger.warning("Domain classifier failed (non-fatal): %s", e)
-
-            domain_filter = None
-            if routed_domain:
-                domain_filter = {"key": "document_type", "match": {"value": routed_domain}}
-
-            # Re-emit metadata with routing info so the UI can show which domain was used
-            yield f"data: {json.dumps({'routing': {'domain': routed_domain, 'explicit': bool(request.document_type and request.document_type != 'all')}})}\n\n"
-
-            retrieval_result = await loop.run_in_executor(
-                None,
-                lambda: rag_service._pipeline.get_component("retriever").run(  # type: ignore[union-attr]
-                    query_embedding=query_embedding,
-                    query_sparse_embedding=query_sparse_embedding,
-                    tenant_id=tenant_id,
-                    user_roles=user_roles or None,
-                    user_id=user_id,
-                    domain_filter=domain_filter,
-                ),
-            )
-
-            # ── Rerank (same as /query endpoint) ────────────────────────────
-            # Streaming path MUST rerank to match /query quality.
-            top_k = request.top_k or settings.rag_default_top_k
-            if request.use_reranking:
-                try:
-                    rerank_result = await loop.run_in_executor(
-                        None,
-                        lambda: rag_service._pipeline.get_component("reranker").run(  # type: ignore[union-attr]
-                            query=request.question,
-                            documents=retrieval_result["documents"],
-                        ),
-                    )
-                    documents = rerank_result["documents"][:top_k]
-                except Exception as _re:
-                    logger.warning("Reranker failed in streaming path (falling back to retrieval order): %s", _re)
-                    documents = retrieval_result["documents"][:top_k]
-            else:
-                documents = retrieval_result["documents"][:top_k]
-
-            logger.info(
-                "Retrieved %d documents (domain_filter=%s)",
-                len(documents), routed_domain or "none",
-            )
-
-            if not documents:
-                from ..prompts import NO_DOCUMENTS_RESPONSE, NO_RELEVANT_DOCUMENTS_RESPONSE
-                from qdrant_client import QdrantClient as _QC
-                try:
-                    _qc = _QC(url=settings.qdrant_url)
-                    _count = _qc.count(collection_name=f"documents_{tenant_id}", exact=False).count
-                    response_text = (
-                        NO_RELEVANT_DOCUMENTS_RESPONSE.format(query=request.question)
-                        if _count > 0
-                        else NO_DOCUMENTS_RESPONSE
-                    )
-                except Exception:
-                    response_text = NO_DOCUMENTS_RESPONSE
-                if request.conversation_id:
-                    try:
-                        from ..db import add_message
-                        add_message(request.conversation_id, "user", request.question, tenant_id=tenant_id)
-                        add_message(request.conversation_id, "assistant", response_text, tenant_id=tenant_id, sources=[])
-                    except Exception as _e:
-                        logger.warning("Failed to persist no-docs conversation: %s", _e)
-                yield f"data: {json.dumps({'token': response_text})}\n\n"
-                yield f"data: {json.dumps({'sources': [], 'done': True})}\n\n"
-                return
-
-            # Prompt — inject anchored conversation history
-            prompt_result = rag_service._pipeline.get_component("prompt_builder").run(
-                documents=documents,
-                query=request.question,
-                history=stream_history or None,
-            )
-            messages = prompt_result["messages"]
-
-            # Stream LLM via Haystack's OpenAIChatGenerator (engine-agnostic).
-            # The streaming_callback runs inside the executor thread, so we MUST use
-            # call_soon_threadsafe to safely enqueue items into the event loop.
-            # put_nowait alone is not thread-safe — it won't wake a coroutine
-            # waiting on queue.get() if called from outside the event loop thread.
-            queue: asyncio.Queue = asyncio.Queue()
-
-            full_thinking = ""
-            full_answer = ""
-            llm_error: list = []  # mutable container so nonlocal works inside nested async def
-
-            def streaming_callback(chunk):
-                reasoning = extract_reasoning_content(chunk)
-                if reasoning:
-                    loop.call_soon_threadsafe(queue.put_nowait, ("thinking", reasoning))
-                elif chunk.content:
-                    loop.call_soon_threadsafe(queue.put_nowait, ("answer", chunk.content))
-
-            # num_ctx: always set — default 4096 is too tight for RAG prompts that include
-            # retrieved chunks + conversation history on top of the question.
-            # max_tokens: None (omitted) for thinking so the engine uses its own unlimited
-            # budget — -1 is Ollama-specific and rejected as invalid by LMForge/OpenAI.
-            num_ctx = settings.llm_thinking_ctx if effective_thinking else settings.llm_ctx
-            max_tokens = None if effective_thinking else settings.llm_max_tokens
-
-            llm = build_streaming_generator(
-                model=effective_model,
-                chat_url=settings.llm_chat_url,
-                api_key=settings.llm_api_key,
-                streaming_callback=streaming_callback,
-                think=effective_thinking,
-                num_ctx=num_ctx,
-                max_tokens=max_tokens,
-                temperature=settings.llm_temperature,
-                frequency_penalty=settings.llm_frequency_penalty,
-            )
-
-            # Notify the client if it will have to wait for an LLM slot.
-            if llm_semaphore.locked():
-                yield f"data: {json.dumps({'queued': True, 'message': 'Processing your request — a moment please...'})}\n\n"
-
-            async def run_llm():
-                async with llm_semaphore:
-                    try:
-                        # run_in_executor so the sync Ollama HTTP stream doesn't block the event loop.
-                        await loop.run_in_executor(None, lambda: llm.run(messages=messages))
-                    except asyncio.CancelledError:
-                        logger.info("LLM task cancelled (client disconnected)")
-                    except Exception as e:
-                        logger.error("Streaming LLM failed: %s", e)
-                        llm_error.append(e)
-                    finally:
-                        queue.put_nowait(None)
-
-            task = asyncio.create_task(run_llm())
-
-            try:
-                while True:
-                    item = await queue.get()
-                    if item is None:
-                        break
-                    kind, text = item
-                    if kind == "thinking":
-                        full_thinking += text
-                        yield f"data: {json.dumps({'thinking_token': text})}\n\n"
-                    else:
-                        full_answer += text
-                        yield f"data: {json.dumps({'token': text})}\n\n"
-            except GeneratorExit:
-                # Client disconnected — cancel the LLM task to free engine slot
-                task.cancel()
-                logger.info("Client disconnected mid-stream, LLM task cancelled")
-                return
-
-            await task
-
-            # If LLM crashed with no output at all, surface the error to the client
-            # instead of yielding empty answer + sources (which shows a blank panel).
-            if llm_error and not full_answer and not full_thinking:
-                yield f"data: {json.dumps({'error': f'LLM generation failed: {llm_error[0]}'})}\n\n"
-                return
-
-            answer = full_answer.strip()
-
-            sources = []
-            for i, doc in enumerate(documents):
-                chunk_idx = doc.meta.get("chunk_index", i)
-                sources.append({
-                    "ref_id": i + 1,
-                    "document_id": doc.meta.get("document_id", ""),
-                    "filename": doc.meta.get("filename", "Unknown"),
-                    "section": _build_section_label(doc.meta, chunk_idx),
-                    "chunk_index": chunk_idx,
-                    "score": doc.score or 0.0,
-                    "content": (doc.content or "")[:600],
-                    "domain": doc.meta.get("document_type") or doc.meta.get("domain") or "",
-                })
-
-            # ── Semantic cache write (fire-and-forget, errors are non-fatal) ──
-            if request.use_cache and rag_service._cache_writer and answer:
-                _fire_and_forget(asyncio.wrap_future(loop.run_in_executor(
-                    None,
-                    lambda: rag_service._cache_writer.run(  # type: ignore[union-attr]
-                        query=request.question,
-                        query_embedding=query_embedding,
-                        response=answer,
-                        sources=sources,
-                        tenant_id=tenant_id,
-                    ),
-                )))
-
-            if request.conversation_id:
-                try:
-                    from ..db import add_message
-                    import asyncio as _asyncio
-                    add_message(request.conversation_id, "user", request.question, tenant_id=tenant_id)
-                    add_message(request.conversation_id, "assistant", answer, tenant_id=tenant_id, sources=sources)
-                    # Async fire-and-forget: compress history if threshold reached
-                    _asyncio.ensure_future(
-                        rag_service._maybe_compress_history(
-                            request.conversation_id, tenant_id, summarizer
-                        )
-                    )
-                except Exception as e:
-                    logger.warning("Failed to persist streaming conversation: %s", e)
-
-            # Fire-and-forget query telemetry to analytics-service.
-            _fire_and_forget(_emit_query_event(
-                query_id=query_id,
-                tenant_id=tenant_id,
-                user_id=user_id or "",
-                latency_ms=0,
-                model_used=effective_model,
-                cache_hit=False,
-                source_count=len(sources),
-                analytics_url=settings.analytics_service_url,
-            ))
-
-            yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
-
+            async for event in rag_service.stream(
+                question=request.question,
+                tenant_id=user_ctx.tenant_id,
+                user_context=user_ctx,
+                user_roles=user_ctx.roles or None,
+                user_id=user_ctx.user_id,
+                history=history.messages,
+                context_state=history.context_state,
+                document_type=request.document_type,
+                top_k=request.top_k,
+                min_score=request.min_score,
+                use_cache=request.use_cache,
+                use_reranking=request.use_reranking,
+                effective_model=effective_model,
+                effective_thinking=effective_thinking,
+                settings=settings,
+                llm_semaphore=llm_semaphore,
+                request_id=request_id,
+                model_profile_resolver=http_request.app.state.model_profile_resolver,
+                conversation_id=request.conversation_id,
+                summarizer=http_request.app.state.summarizer,
+            ):
+                if isinstance(event, MetadataEvent):
+                    cache_hit = event.cache_hit
+                elif isinstance(event, SourcesEvent):
+                    source_count = len(event.sources)
+                yield _serialize_sse(event)
         except Exception as e:
             logger.exception("Streaming query failed")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield _serialize_sse(ErrorEvent(message=str(e)))
+            return
+
+        _fire_and_forget(_emit_query_event(
+            query_id=request_id,
+            tenant_id=user_ctx.tenant_id,
+            user_id=user_ctx.user_id or "",
+            latency_ms=0,
+            model_used=effective_model,
+            cache_hit=cache_hit,
+            source_count=source_count,
+            analytics_url=settings.analytics_service_url,
+            thinking_truncated=getattr(rag_service, "_last_thinking_truncated", False),
+            http_client=http_request.app.state.http,
+        ))
 
     return StreamingResponse(
-        generate(),
+        sse_iter(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )

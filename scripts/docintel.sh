@@ -6,7 +6,10 @@
 # Use arrow keys to navigate, enter to select.
 #
 # Usage:
-#   ./scripts/docintel.sh       # Interactive mode
+#   ./scripts/docintel.sh                   # Interactive mode
+#   ./scripts/docintel.sh build             # Build (non-interactive)
+#   ./scripts/docintel.sh build --profile=cpu    # Force profile for this run
+#   PROFILE=cu130 ./scripts/docintel.sh build    # Force profile via env
 # ==============================================================================
 
 set -e
@@ -14,6 +17,41 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
+
+# ==============================================================================
+# Parse global --profile= flag before anything else (passed through to sub-scripts)
+# ==============================================================================
+_GLOBAL_PROFILE_FLAG=""
+_DOCINTEL_ARGS_REMAINING=()
+for _a in "$@"; do
+    case "$_a" in
+        --profile=*) _GLOBAL_PROFILE_FLAG="$_a" ;;
+        *)           _DOCINTEL_ARGS_REMAINING+=("$_a") ;;
+    esac
+done
+set -- "${_DOCINTEL_ARGS_REMAINING[@]+"${_DOCINTEL_ARGS_REMAINING[@]}"}"
+
+# Pass profile flag through to sub-scripts via env (build.sh and start.sh read PROFILE env)
+if [ -n "$_GLOBAL_PROFILE_FLAG" ]; then
+    _PROFILE_VAL="${_GLOBAL_PROFILE_FLAG#--profile=}"
+    export PROFILE="$_PROFILE_VAL"
+fi
+
+# ==============================================================================
+# Load profile config for banner display (read-only, no prompt)
+# ==============================================================================
+# shellcheck source=lib/profile_config.sh
+source "${SCRIPT_DIR}/lib/profile_config.sh"
+# shellcheck source=lib/docker_context.sh
+source "${SCRIPT_DIR}/lib/docker_context.sh"
+
+# Quick profile read for banner — skip GPU Docker test to keep startup snappy
+export DOCINTEL_SKIP_GPU_TEST=1
+read_profile ${_GLOBAL_PROFILE_FLAG:+--flag-profile="${_GLOBAL_PROFILE_FLAG#--profile=}"}
+unset DOCINTEL_SKIP_GPU_TEST
+
+_BANNER_PROFILE="${PROFILE:-cpu}"
+_BANNER_DCTX="$(docker_context_label)"
 
 # Colors
 RED='\033[0;31m'
@@ -77,10 +115,13 @@ pick_from_list() {
     local key seq
     while IFS= read -r -n1 -s key; do
         if [[ "$key" == $'\x1b' ]]; then
-            IFS= read -r -n2 -s -t 1 seq
+            # -t 1 is bash 3.2 compatible (macOS); fractional timeouts require bash 4+.
+            # Arrow keys send ESC + 2 bytes almost instantaneously — the 1s timeout
+            # is just a guard for a bare Escape keypress.
+            IFS= read -r -n2 -s -t 1 seq || true
             case "$seq" in
-                '[A') ((cur > 0))     && ((cur--)) ;;
-                '[B') ((cur < n - 1)) && ((cur++)) ;;
+                '[A'|'OA') [[ $cur -gt 0 ]]       && (( cur-- )) || true ;;
+                '[B'|'OB') [[ $cur -lt $((n-1)) ]] && (( cur++ )) || true ;;
             esac
         elif [[ "$key" == '' ]]; then
             break
@@ -139,6 +180,8 @@ ACTIONS=(
     "test"
     "seed"
     "backup"
+    "hw-profile"
+    "docker-engine"
     "cleanup"
     "cleanup-data"
     "cleanup-all"
@@ -156,6 +199,8 @@ LABELS=(
     "Test               Run tests (interactive selector)"
     "Seed Data          Load sample data into running services"
     "Backup             Back up volumes to archive"
+    "Hardware Profile   View/switch GPU build profile [$_BANNER_PROFILE]"
+    "Docker Engine      View/switch Docker context [$_BANNER_DCTX]"
     "Cleanup            Stop and remove containers"
     "Cleanup (data)     Wipe all data volumes (keeps images + models)"
     "Cleanup (full)     Remove containers, volumes, and models"
@@ -204,6 +249,8 @@ clear
 echo ""
 echo -e "  ${BOLD}DocIntel CLI${NC}"
 echo -e "  ${DIM}Manage your DocIntel environment${NC}"
+echo -e "  ${DIM}Hardware profile: ${CYAN}${_BANNER_PROFILE}${NC}${DIM} (source: ${PROFILE_SOURCE})${NC}"
+echo -e "  ${DIM}Docker engine: ${CYAN}${_BANNER_DCTX}${NC}${DIM} (pref: $(read_docker_pref))${NC}"
 echo ""
 
 start_row=5
@@ -214,10 +261,11 @@ draw_menu $start_row
 
 while IFS= read -r -n1 -s key; do
     if [[ "$key" == $'\x1b' ]]; then
-        IFS= read -r -n2 -s -t 1 seq
-        case "$seq" in
-            '[A') ((cursor > 0)) && ((cursor--)) ;;
-            '[B') ((cursor < ${#ACTIONS[@]} - 1)) && ((cursor++)) ;;
+        _seq=''
+        IFS= read -r -n2 -s -t 1 _seq || true
+        case "$_seq" in
+            '[A'|'OA') [[ $cursor -gt 0 ]]                    && (( cursor-- )) || true ;;
+            '[B'|'OB') [[ $cursor -lt $((${#ACTIONS[@]}-1)) ]] && (( cursor++ )) || true ;;
         esac
     elif [[ "$key" == '' ]]; then
         break
@@ -334,6 +382,92 @@ case "$action" in
         ;;
     backup)
         exec "$SCRIPT_DIR/backup.sh"
+        ;;
+    hw-profile)
+        # ── Hardware profile viewer/switcher ──────────────────────────────────
+        # Re-detect with full Docker GPU test (skip flag cleared for this flow)
+        unset DOCINTEL_SKIP_GPU_TEST
+        read_profile
+        print_profile_summary
+
+        PROFILE_OPTS=("auto" "cpu" "cu126" "cu128" "cu129" "cu130" "clear")
+        PROFILE_LBLS=(
+            "Auto-detect       Re-run hardware detection on next build"
+            "cpu               CPU-only PyTorch (~3.4 GB lighter images)"
+            "cu126             NVIDIA CUDA 12.6 (driver >= 545)"
+            "cu128             NVIDIA CUDA 12.8 (driver >= 555)"
+            "cu129             NVIDIA CUDA 12.9 (driver >= 565)"
+            "cu130             NVIDIA CUDA 13.0 (driver >= 580)"
+            "Clear override    Remove .docintel-profile (restore auto-detect)"
+        )
+
+        # Pre-select current profile
+        _pre=0
+        for _i in "${!PROFILE_OPTS[@]}"; do
+            if [ "${PROFILE_OPTS[$_i]}" = "$PROFILE" ] && [ "$PROFILE_SOURCE" != "auto" ]; then
+                _pre=$_i
+            fi
+        done
+
+        echo ""
+        pick_from_list "Select hardware profile" PROFILE_OPTS PROFILE_LBLS "$_pre"
+        _chosen="$PICK_RESULT"
+
+        echo ""
+        case "$_chosen" in
+            auto)
+                clear_profile_override
+                ;;
+            clear)
+                clear_profile_override
+                ;;
+            cpu|cu126|cu128|cu129|cu130)
+                write_profile_override "$_chosen"
+                # Reset the "first build" shown marker so new profile gets a fresh summary
+                rm -f "${PROJECT_DIR}/.docintel-profile-shown"
+                echo -e "  ${GREEN}Profile set to: ${BOLD}${_chosen}${NC}"
+                echo -e "  ${DIM}Next build will use this profile.${NC}"
+                ;;
+        esac
+        echo ""
+        ;;
+    docker-engine)
+        # ── Docker context viewer/switcher ────────────────────────────────────
+        _current_pref="$(read_docker_pref)"
+        _active_ctx="$(_dctx_active)"
+
+        echo -e "  ${BOLD}Select Docker Engine${NC}"
+        echo -e "  ${DIM}Active context: ${_active_ctx:-none} • preference: ${_current_pref}${NC}"
+        echo ""
+
+        # Build option list: "auto" + every detected context (with reachability).
+        DCTX_OPTS=("auto")
+        DCTX_LBLS=("Auto-detect       Prefer OrbStack, fall back automatically")
+        while IFS= read -r _ctx; do
+            [ -z "$_ctx" ] && continue
+            if _dctx_responds "$_ctx"; then
+                _status="running"
+            else
+                _status="stopped"
+            fi
+            DCTX_OPTS+=("$_ctx")
+            DCTX_LBLS+=("$(printf '%-18s%s' "$_ctx" "[$_status]")")
+        done < <(detect_docker_contexts)
+
+        # Pre-select current preference (or "auto").
+        _pre=0
+        for _i in "${!DCTX_OPTS[@]}"; do
+            [ "${DCTX_OPTS[$_i]}" = "$_current_pref" ] && _pre=$_i
+        done
+
+        pick_from_list "Docker Engine" DCTX_OPTS DCTX_LBLS "$_pre"
+        _chosen_ctx="$PICK_RESULT"
+
+        echo ""
+        upsert_env "DOCKER_CONTEXT_PREF" "$_chosen_ctx"
+        echo -e "  ${GREEN}✓${NC} Preference: ${BOLD}${_chosen_ctx}${NC}"
+        ensure_docker_context
+        echo ""
         ;;
     cleanup)
         exec "$SCRIPT_DIR/cleanup.sh"

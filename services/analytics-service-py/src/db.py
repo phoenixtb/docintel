@@ -18,16 +18,22 @@ _CREATE_DATABASE = "CREATE DATABASE IF NOT EXISTS {db}"
 
 _CREATE_QUERY_EVENTS = """
 CREATE TABLE IF NOT EXISTS {db}.query_events (
-    query_id     String,
-    tenant_id    String,
-    user_id      String,
-    latency_ms   UInt32,
-    model_used   String,
-    cache_hit    Bool,
-    source_count UInt8,
-    created_at   DateTime DEFAULT now()
+    query_id          String,
+    tenant_id         String,
+    user_id           String,
+    latency_ms        UInt32,
+    model_used        String,
+    cache_hit         Bool,
+    source_count      UInt8,
+    thinking_truncated Bool DEFAULT false,
+    created_at        DateTime DEFAULT now()
 ) ENGINE = MergeTree()
 ORDER BY (tenant_id, created_at)
+"""
+
+_ALTER_QUERY_EVENTS_THINKING_TRUNCATED = """
+ALTER TABLE {db}.query_events
+    ADD COLUMN IF NOT EXISTS thinking_truncated Bool DEFAULT false
 """
 
 _CREATE_FEEDBACK_EVENTS = """
@@ -58,4 +64,6 @@ def ensure_schema(settings: Settings) -> None:
     client.command(_CREATE_DATABASE.format(db=db))
     client.command(_CREATE_QUERY_EVENTS.format(db=db))
     client.command(_CREATE_FEEDBACK_EVENTS.format(db=db))
+    # Idempotent migration: add thinking_truncated to existing tables
+    client.command(_ALTER_QUERY_EVENTS_THINKING_TRUNCATED.format(db=db))
     logger.info("ClickHouse schema ready (database=%s)", db)

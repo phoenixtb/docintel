@@ -7,6 +7,8 @@ import com.docintel.document.entity.DataSourceStatus
 import com.docintel.document.entity.DeletionTask
 import com.docintel.document.entity.Document
 import com.docintel.document.entity.ProcessingStatus
+import com.docintel.document.messaging.DocumentReadyEvent
+import com.docintel.document.messaging.DocumentStreamPublisher
 import com.docintel.document.repository.ChunkRepository
 import com.docintel.document.repository.DataSourceRepository
 import com.docintel.document.repository.DeletionTaskRepository
@@ -33,7 +35,8 @@ class DocumentService(
     private val chunkRepository: ChunkRepository,
     private val deletionTaskRepository: DeletionTaskRepository,
     private val storageService: StorageService,
-    private val ingestionServiceClient: IngestionServiceClient,
+    private val vectorStoreClient: VectorStoreClient,
+    private val streamPublisher: DocumentStreamPublisher,
     private val eventPublisher: ApplicationEventPublisher,
 ) {
     private val logger = LoggerFactory.getLogger(DocumentService::class.java)
@@ -190,13 +193,13 @@ class DocumentService(
     }
 
     /**
-     * Trigger ingestion for a document.
+     * Trigger ingestion for a document by publishing to the [documents.ready] Redis stream.
      *
-     * NOT annotated @Transactional because the function suspends inside triggerIngestion
-     * (WebClient HTTP call), which would cause the Spring ThreadLocal transaction context
-     * to be lost when the coroutine resumes on a different thread.
+     * The stream worker in ingestion-service picks up the event and runs the full pipeline.
+     * This eliminates the direct REST /ingest call, giving a single ingress path for both
+     * user uploads and data-loader documents.
      */
-    suspend fun processDocument(
+    fun processDocument(
         documentId: UUID,
         tenantId: String,
         domainHint: String = "auto"
@@ -207,29 +210,26 @@ class DocumentService(
         markDocumentProcessing(documentId, tenantId)
 
         return try {
-            ingestionServiceClient.triggerIngestion(
-                documentId = documentId,
-                tenantId = tenantId,
-                bucket = "docintel-$tenantId",
-                objectPath = doc.filePath,
-                filename = doc.filename,
-                domainHint = if (domainHint.isBlank()) "auto" else domainHint,
-                metadata = doc.metadata.toMap()
+            streamPublisher.publishDocumentReady(
+                DocumentReadyEvent(
+                    documentId = documentId.toString(),
+                    tenantId   = tenantId,
+                    bucket     = "docintel-$tenantId",
+                    objectPath = doc.filePath,
+                    filename   = doc.filename,
+                    domainHint = if (domainHint.isBlank()) "auto" else domainHint,
+                    metadata   = doc.metadata.mapValues { it.value }
+                )
             )
             logger.info(
-                "Ingestion triggered for document {} (tenant={}, file={})",
+                "Queued for ingestion via stream: document_id={} tenant={} file={}",
                 documentId, tenantId, doc.filename
             )
             ProcessingResult(documentId = documentId, chunkCount = 0, status = ProcessingStatus.PROCESSING)
 
         } catch (e: Exception) {
-            logger.error("Failed to trigger ingestion for document {}: {}", documentId, e.message, e)
+            logger.error("Failed to queue document {} for ingestion: {}", documentId, e.message, e)
             markDocumentFailed(documentId, tenantId, e.message)
-            try {
-                storageService.deleteDocumentFiles(tenantId, doc.filePath)
-            } catch (se: Exception) {
-                logger.warn("Could not clean up MinIO files for FAILED document {}: {}", documentId, se.message)
-            }
             ProcessingResult(documentId = documentId, chunkCount = 0, status = ProcessingStatus.FAILED, errorMessage = e.message)
         }
     }
@@ -369,7 +369,7 @@ class DocumentService(
      */
     suspend fun deleteAllDocuments(tenantId: String): Int {
         val qdrantDone = try {
-            ingestionServiceClient.deleteTenantVectors(tenantId)
+            vectorStoreClient.deleteTenantVectors(tenantId)
         } catch (e: Exception) {
             logger.warn("Failed to delete Qdrant collection for tenant {}: {}", tenantId, e.message)
             false
@@ -440,18 +440,17 @@ class DocumentService(
     // ==========================================================================
 
     /**
-     * Persist a batch of chunks produced by ingestion-service.
+     * Persist a batch of chunks produced by ingestion-service (replaces the full chunk set).
      *
-     * Validates document ownership, upserts chunks via JPA saveAll,
-     * and updates the document's chunk_count in one transaction.
-     * Replaces the direct psycopg2 INSERT that ingestion-service used to perform.
+     * Clears any existing chunks for this document, saves the new set, and returns the count.
+     * Does NOT flip the document status — [IngestionCompleteConsumer] is the sole authority
+     * for terminal status transitions (COMPLETED / FAILED), preventing the double-COMPLETED bug.
      */
     @Transactional
     fun bulkPersistChunks(documentId: UUID, tenantId: String, requests: List<ChunkPersistRequest>): Int {
-        val doc = documentRepository.findByIdAndTenantId(documentId, tenantId)
+        documentRepository.findByIdAndTenantId(documentId, tenantId)
             ?: throw IllegalArgumentException("Document not found or tenant mismatch: $documentId")
 
-        // Clear any stale chunks from a previous (re)process run before inserting the new set.
         chunkRepository.deleteByDocumentId(documentId)
 
         val entities = requests.map { req ->
@@ -469,20 +468,52 @@ class DocumentService(
         }
         chunkRepository.saveAll(entities)
 
-        doc.chunkCount = requests.size
-        doc.status = ProcessingStatus.COMPLETED
-        documentRepository.save(doc)
-
-        eventPublisher.publishEvent(DocumentStatusEvent(
-            documentId = documentId.toString(),
-            tenantId   = tenantId,
-            status     = "COMPLETED",
-            stage      = "Indexed",
-            filename   = doc.filename,
-            chunkCount = requests.size,
-        ))
-
         logger.info("Bulk persisted {} chunks for document {} (tenant={})", requests.size, documentId, tenantId)
+        return requests.size
+    }
+
+    /**
+     * Append a batch of chunks for a document shard (used by the page-sharded PDF pipeline).
+     *
+     * Unlike [bulkPersistChunks], this does NOT clear existing chunks — it additively upserts.
+     * Used during multi-shard ingestion where each shard appends its chunks independently.
+     * Pass [clearExisting]=true only on the first shard of a fresh ingestion run to remove
+     * any stale chunks from a prior failed attempt.
+     *
+     * Status transition is NOT performed here; the caller publishes [ingestion.complete] after
+     * the final shard and [IngestionCompleteConsumer] drives the terminal status update.
+     */
+    @Transactional
+    fun appendChunks(
+        documentId: UUID,
+        tenantId: String,
+        requests: List<ChunkPersistRequest>,
+        clearExisting: Boolean = false,
+    ): Int {
+        documentRepository.findByIdAndTenantId(documentId, tenantId)
+            ?: throw IllegalArgumentException("Document not found or tenant mismatch: $documentId")
+
+        if (clearExisting) {
+            chunkRepository.deleteByDocumentId(documentId)
+        }
+
+        val entities = requests.map { req ->
+            Chunk(
+                id          = req.chunkId,
+                documentId  = documentId,
+                tenantId    = tenantId,
+                content     = req.content,
+                chunkIndex  = req.chunkIndex,
+                startChar   = req.startChar,
+                endChar     = req.endChar,
+                tokenCount  = req.tokenCount,
+                metadata    = req.metadata,
+            )
+        }
+        chunkRepository.saveAll(entities)
+
+        logger.debug("Appended {} chunks (clearExisting={}) for document {} (tenant={})",
+            requests.size, clearExisting, documentId, tenantId)
         return requests.size
     }
 
@@ -528,6 +559,29 @@ class DocumentService(
     @Transactional(readOnly = true)
     fun listDataSources(tenantId: String): List<DataSourceResponse> =
         dataSourceRepository.findByTenantId(tenantId).map { it.toResponse() }
+
+    fun getStats(tenantId: String): DocumentStatsResponse {
+        val byStatus = documentRepository.countByStatusForTenant(tenantId)
+            .associate { row -> (row[0] as ProcessingStatus).name to (row[1] as Long) }
+        val byDomain = documentRepository.countByDomainForTenant(tenantId)
+            .associate { row -> row[0].toString() to (row[1] as Number).toLong() }
+        val bySource = documentRepository.countBySourceForTenant(tenantId)
+            .associate { row -> row[0].toString() to (row[1] as Number).toLong() }
+        val totalBytes = documentRepository.sumFileSizeForTenant(tenantId)
+        val totalChunks = documentRepository.sumChunkCountForTenant(tenantId)
+        val latestTs = documentRepository.findLatestCreatedAtForTenant(tenantId)
+        val lastUploadedAt = latestTs?.toInstant()
+        val totalDocuments = byStatus.values.sum()
+        return DocumentStatsResponse(
+            totalDocuments = totalDocuments,
+            totalChunks = totalChunks,
+            totalBytes = totalBytes,
+            byStatus = byStatus,
+            byDomain = byDomain,
+            bySource = bySource,
+            lastUploadedAt = lastUploadedAt,
+        )
+    }
 
     // ==========================================================================
     // Private mapping helpers
