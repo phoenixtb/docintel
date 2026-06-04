@@ -22,6 +22,7 @@
     liked?: boolean | null;
     queryId?: string;
     routedDomain?: string;
+    rerankerDegraded?: boolean;
   }
 
   let {
@@ -196,6 +197,18 @@
       </div>
     {/if}
 
+    <!-- ── Reranker degraded warning ──────────────────────────────── -->
+    {#if message.rerankerDegraded}
+      <div class="flex items-center gap-1.5 px-1 text-xs text-amber-600"
+           title="Reranker unavailable — relevance scores are raw retrieval similarity, not reranked">
+        <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+        </svg>
+        <span>Relevance scores unranked (reranker unavailable)</span>
+      </div>
+    {/if}
+
     <!-- ── Answer bubble ──────────────────────────────────────────── -->
     <div class="px-4 py-4 rounded-2xl glass border border-emerald-500/10 hover:border-emerald-500/15 transition-all duration-200
       dark:shadow-none shadow-sm">
@@ -249,8 +262,11 @@
                 {#if source.section}
                   <span class="text-xs text-slate-600 shrink-0">{source.section}</span>
                 {/if}
-                <span class="shrink-0 px-1.5 py-0.5 rounded text-xs font-medium {scoreColor(source.score)}">
-                  {(source.score * 100).toFixed(0)}%
+                <span
+                  class="shrink-0 px-1.5 py-0.5 rounded text-xs font-medium {scoreColor(source.score)}"
+                  title="Retrieval relevance score — not answer confidence"
+                >
+                  {(source.score * 100).toFixed(0)}% relevance
                 </span>
                 <svg class="w-3 h-3 shrink-0 text-slate-600 transition-transform {expandedSources.has(idx) ? 'rotate-180' : ''}"
                   fill="none" stroke="currentColor" viewBox="0 0 24 24">

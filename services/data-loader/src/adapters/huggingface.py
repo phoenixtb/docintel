@@ -115,30 +115,43 @@ def _load_dataset_sync(config: dict, samples: int, tenant_id: str) -> list[Loade
                 break
 
     elif extract_fn == "messages":
+        # Emit one LoadedFile per (user, assistant) turn-pair so that
+        # TokenAwareSplitter never cuts across a Q&A boundary.  Each pair is a
+        # self-contained, coherent chunk which dramatically improves retrieval
+        # precision for Q&A-style corpora (e.g. hr-policies-qa-dataset).
         for idx, row in enumerate(ds):
             if len(results) >= samples:
                 break
             messages = row.get(text_field, []) or []
             if not isinstance(messages, list):
                 continue
-            parts = [
-                f"{msg.get('role', '').upper()}: {msg.get('content', '')}"
-                for msg in messages
-                if isinstance(msg, dict) and msg.get("role") in ("user", "assistant")
-            ]
-            text = "\n".join(parts).strip()
-            if len(text) < 50:
-                continue
-            results.append(LoadedFile(
-                content=text.encode("utf-8"),
-                filename=f"{domain}_{idx:04d}.txt",
-                metadata={
-                    "source": "sample_dataset",
-                    "dataset_key": config.get("_key", "unknown"),
-                    "domain": domain,
-                    "tenant_id": tenant_id,
-                },
-            ))
+
+            # Pair consecutive (user, assistant) turns.
+            pending_user: str | None = None
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                role = msg.get("role", "").lower()
+                content = (msg.get("content") or "").strip()
+                if role == "user":
+                    pending_user = content
+                elif role == "assistant" and pending_user is not None:
+                    text = f"USER: {pending_user}\nASSISTANT: {content}".strip()
+                    pending_user = None
+                    if len(text) < 50:
+                        continue
+                    if len(results) >= samples:
+                        break
+                    results.append(LoadedFile(
+                        content=text.encode("utf-8"),
+                        filename=f"{domain}_{idx:04d}_{len(results):04d}.txt",
+                        metadata={
+                            "source": "sample_dataset",
+                            "dataset_key": config.get("_key", "unknown"),
+                            "domain": domain,
+                            "tenant_id": tenant_id,
+                        },
+                    ))
 
     else:
         # Simple sequential scan — take first `samples` rows with sufficient content

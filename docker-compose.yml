@@ -136,6 +136,13 @@ services:
       - RAG_RETRIEVER_TOP_K=50
       - RAG_RERANKER_TOP_K=10
       - RAG_DEFAULT_TOP_K=5
+      # Abstention gate: minimum retrieval/rerank score for a chunk to reach the LLM.
+      # 0.0 = disabled (all chunks pass, LLM must self-abstain — fragile).
+      # With reranker enabled: calibrate from score distribution via
+      #   python tests/integration/calibrate_threshold.py reports/baseline.json
+      # Typical calibrated value with jina-reranker: 0.25–0.40.
+      - RAG_MIN_RELEVANCE_SCORE=${RAG_MIN_RELEVANCE_SCORE:-0.0}
+      - RAG_MIN_SCORE_FALLBACK_TOPK=${RAG_MIN_SCORE_FALLBACK_TOPK:-0}
       # Domain router — rag-service reads RAG_DOMAIN_ROUTER_MODEL (field: rag_domain_router_model)
       - RAG_USE_DOMAIN_ROUTING=${RAG_USE_DOMAIN_ROUTING:-true}
       - RAG_DOMAIN_ROUTER_MODEL=${DEFAULT_DOMAIN_CLASSIFIER_MODEL:-MoritzLaurer/deberta-v3-base-zeroshot-v1.1-all-33}

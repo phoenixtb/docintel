@@ -327,6 +327,11 @@ try:
     RAG_CACHE_MISSES = Counter("rag_cache_miss_total", "Semantic cache misses", ["tenant"])
     RAG_LLM_QUEUE_WAITING = Gauge("rag_llm_queue_waiting", "Current semaphore waiters")
     RAG_CHUNKS_INDEXED = Counter("rag_indexing_chunks_total", "Total chunks indexed", ["tenant"])
+    RAG_RERANKER_DEGRADED = Counter(
+        "rag_reranker_degraded_total",
+        "Reranker fallback activations (model unreachable or error)",
+        ["tenant"],
+    )
     _METRICS_ENABLED = True
 except ImportError:
     _METRICS_ENABLED = False
@@ -652,13 +657,17 @@ async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep):
 # SSE serialiser
 # =============================================================================
 
-def _serialize_sse(event: PipelineEvent) -> str:
+def _serialize_sse(event: PipelineEvent, tenant_id: str = "") -> str:
     """Convert a typed PipelineEvent into an SSE data line, preserving wire format."""
     match event:
-        case MetadataEvent(query_id=qid, cache_hit=ch, context_state=cs):
+        case MetadataEvent(query_id=qid, cache_hit=ch, context_state=cs, reranker_degraded=rd):
             payload: dict = {"metadata": {"query_id": qid, "cache_hit": ch}}
             if cs:
                 payload["metadata"]["context_state"] = cs
+            if rd:
+                payload["metadata"]["reranker_degraded"] = True
+                if _METRICS_ENABLED:
+                    RAG_RERANKER_DEGRADED.labels(tenant=tenant_id or "unknown").inc()
         case RoutingEvent(domain=d, explicit=e):
             payload = {"routing": {"domain": d, "explicit": e}}
         case QueuedEvent(message=m):
@@ -816,10 +825,10 @@ async def query_documents_stream(
                     cache_hit = event.cache_hit
                 elif isinstance(event, SourcesEvent):
                     source_count = len(event.sources)
-                yield _serialize_sse(event)
+                yield _serialize_sse(event, tenant_id=user_ctx.tenant_id)
         except Exception as e:
             logger.exception("Streaming query failed")
-            yield _serialize_sse(ErrorEvent(message=str(e)))
+            yield _serialize_sse(ErrorEvent(message=str(e)), tenant_id=user_ctx.tenant_id)
             return
 
         _fire_and_forget(_emit_query_event(

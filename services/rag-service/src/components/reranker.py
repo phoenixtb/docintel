@@ -40,7 +40,7 @@ class LmforgeReranker:
         self.top_k = top_k
         self.timeout = timeout
 
-    @component.output_types(documents=list[Document])
+    @component.output_types(documents=list[Document], reranker_degraded=bool)
     def run(
         self,
         query: str,
@@ -48,7 +48,7 @@ class LmforgeReranker:
         top_k: Optional[int] = None,
     ) -> dict[str, Any]:
         if not documents:
-            return {"documents": []}
+            return {"documents": [], "reranker_degraded": False}
 
         effective_top_k = top_k or self.top_k
         doc_texts = [doc.content or "" for doc in documents]
@@ -84,13 +84,17 @@ class LmforgeReranker:
                 )
 
             scored.sort(key=lambda d: d.score or 0.0, reverse=True)
-            return {"documents": scored}
+            return {"documents": scored, "reranker_degraded": False}
 
         except httpx.HTTPError as e:
-            logger.error("LMForge reranker request failed: %s — falling back to unranked", e)
-            for doc in documents[:effective_top_k]:
+            logger.error(
+                "LMForge reranker request failed: %s — falling back to unranked (degraded mode)",
+                e,
+            )
+            fallback = list(documents[:effective_top_k])
+            for doc in fallback:
                 doc.score = doc.score or 0.0
-            return {"documents": documents[:effective_top_k]}
+            return {"documents": fallback, "reranker_degraded": True}
 
 
 # Alias kept for backward compatibility during transition

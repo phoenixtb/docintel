@@ -433,9 +433,22 @@ def _check_url(label: str, url: str, timeout: int = 8) -> None:
         raise PreFlightError(2)
 
 
-def pre_flight(base_url: str, rag_path: str, no_auth: bool, token_url: str | None, tenant_id: str) -> None:
-    """Fail fast with a clear message if the stack or Zitadel is unreachable."""
+def pre_flight(
+    base_url: str,
+    rag_path: str,
+    no_auth: bool,
+    token_url: str | None,
+    tenant_id: str,
+    reranker_url: str | None = None,
+    reranker_model: str | None = None,
+    use_reranking: bool = False,
+) -> dict:
+    """
+    Fail fast with a clear message if the stack or Zitadel is unreachable.
+    Also checks reranker health when use_reranking=True and returns a health dict.
+    """
     print("Pre-flight checks …")
+    health_results: dict = {}
 
     # API Gateway health — always the entry point (rag-service port is not exposed to host)
     gw_health = base_url.rstrip("/") + "/actuator/health"
@@ -448,7 +461,27 @@ def pre_flight(base_url: str, rag_path: str, no_auth: bool, token_url: str | Non
         _check_url("Zitadel", zitadel_base + "/debug/healthz")
         print(f"  ✓ Zitadel reachable ({zitadel_base})")
 
+    # Reranker health — checked whenever use_reranking=True
+    if use_reranking and reranker_url and reranker_model:
+        try:
+            import metrics as _metrics
+            rh = _metrics.reranker_health(reranker_url, reranker_model)
+            health_results["reranker"] = rh
+            if rh["healthy"]:
+                print(f"  ✓ Reranker healthy ({reranker_url}, {rh['latency_ms']}ms)")
+            else:
+                print(
+                    f"  ✗ Reranker UNHEALTHY — HTTP {rh['status_code']} — {rh['error']}\n"
+                    f"    use_reranking=true but reranker is down.\n"
+                    f"    Scores will silently fall back to raw retrieval order.\n"
+                    f"    Pull the model or set USE_RERANKING=false to suppress this warning.",
+                    file=sys.stderr,
+                )
+        except ImportError:
+            pass  # metrics module not available, skip
+
     print()
+    return health_results
 
 
 # =============================================================================
@@ -491,6 +524,7 @@ def call_streaming(
     sources = []
     error = None
     cache_hit = False
+    reranker_degraded = False
     t0 = time.time()
 
     try:
@@ -517,6 +551,8 @@ def call_streaming(
                         if "metadata" in data:
                             meta = data["metadata"]
                             cache_hit = bool(meta.get("cache_hit", False))
+                            if meta.get("reranker_degraded"):
+                                reranker_degraded = True
                         if data.get("thinking_token"):
                             thinking += data["thinking_token"]
                         if data.get("token"):
@@ -541,6 +577,7 @@ def call_streaming(
         "latency_seconds": latency,
         "error": error,
         "cache_hit": cache_hit,
+        "reranker_degraded": reranker_degraded,
     }
 
 
@@ -556,6 +593,7 @@ def evaluate(
     expect_thinking_length_min: int | None = None,
     expect_cache_hit: bool = False,
     expect_opa_denied: bool = False,
+    expect_abstention: bool | None = None,
 ) -> dict:
     """
     Evaluate a streaming result against expectations.
@@ -566,6 +604,8 @@ def evaluate(
     expect_opa_denied        : pass when OPA denied all chunks — sources must be empty
                                and the answer must contain the no-docs sentinel message.
                                Specifically verifies the streaming security gap (A6) is closed.
+    expect_abstention        : when set, checks that the model correctly abstained (True)
+                               or answered (False). Abstention is detected heuristically.
     """
     answer = result["answer"].lower()
 
@@ -595,6 +635,15 @@ def evaluate(
     if expect_cache_hit:
         cache_hit_ok = bool(result.get("cache_hit", False))
 
+    # Abstention correctness (heuristic, no LLM needed)
+    abstention_correct_val: bool | None = None
+    try:
+        import metrics as _m
+        if expect_abstention is not None:
+            abstention_correct_val = _m.abstention_correct(result["answer"], expect_abstention)
+    except ImportError:
+        pass
+
     passed = (
         result["error"] is None
         and len(result["answer"]) >= min_answer_length
@@ -616,6 +665,8 @@ def evaluate(
         "thinking_length": result.get("thinking_length", 0),
         "cache_hit": result.get("cache_hit", False),
         "opa_denied": expect_opa_denied and result["source_count"] == 0,
+        "abstention_correct": abstention_correct_val,
+        "reranker_degraded": result.get("reranker_degraded", False),
     }
 
 
@@ -640,6 +691,35 @@ def write_markdown(report: dict, path: Path) -> None:
         f"",
     ]
 
+    # Infrastructure health (reranker, etc.)
+    if report.get("health"):
+        lines.append("## Infrastructure Health")
+        lines.append("")
+        rh = report["health"].get("reranker")
+        if rh:
+            status = "HEALTHY" if rh["healthy"] else f"UNHEALTHY (HTTP {rh['status_code']})"
+            lines.append(f"- Reranker: **{status}** — {rh['latency_ms']}ms")
+            if rh.get("error"):
+                lines.append(f"  - Error: `{rh['error']}`")
+        lines.append("")
+
+    # Quality summary (if metrics were run)
+    if report.get("quality_summary"):
+        qs = report["quality_summary"]
+        lines += [
+            "## Quality Summary (LLM Judge)",
+            "",
+            f"| Metric | Value |",
+            f"|--------|-------|",
+            f"| Faithfulness (avg) | {qs.get('faithfulness_avg', 'N/A')} |",
+            f"| Answer Relevancy (avg) | {qs.get('answer_relevancy_avg', 'N/A')} |",
+            f"| Abstention Correct | {qs.get('abstention_correct_rate', 'N/A')} |",
+            f"| hit@{qs.get('k', 5)} (avg) | {qs.get('hit_at_k_avg', 'N/A')} |",
+            f"| MRR (avg) | {qs.get('mrr_avg', 'N/A')} |",
+            f"| Context Recall (avg) | {qs.get('context_recall_avg', 'N/A')} |",
+            "",
+        ]
+
     for suite in report["suites"]:
         suite_pass = sum(1 for q in suite["queries"] if q["eval"]["passed"])
         suite_total = len(suite["queries"])
@@ -660,16 +740,45 @@ def write_markdown(report: dict, path: Path) -> None:
                 kw_note = f" | kw {hit_pct}%"
                 if ev["keyword_miss"]:
                     kw_note += f" (missing: {', '.join(ev['keyword_miss'])})"
+
+            # Abstention correctness
+            abstention_note = ""
+            if ev.get("abstention_correct") is not None:
+                abstention_note = f" | abstention={'✓' if ev['abstention_correct'] else '✗'}"
+
+            # Degraded reranker note
+            degraded_note = " | ⚠ reranker-degraded" if ev.get("reranker_degraded") else ""
+
             lines += [
                 f"### {icon} {q['question']}",
                 f"",
-                f"*{res['latency_seconds']}s · {res['source_count']} sources{kw_note}*",
+                f"*{res['latency_seconds']}s · {res['source_count']} sources"
+                f"{kw_note}{abstention_note}{degraded_note}*",
                 f"",
             ]
+
+            # Retrieval + judge metrics (if present)
+            qm = q.get("quality_metrics")
+            if qm:
+                ret = qm.get("retrieval", {})
+                gen = qm.get("generation", {})
+                metric_parts = []
+                if ret.get("hit_at_k") is not None:
+                    metric_parts.append(f"hit@{ret.get('k',5)}={'✓' if ret['hit_at_k'] else '✗'}")
+                if ret.get("mrr") is not None:
+                    metric_parts.append(f"MRR={ret['mrr']}")
+                if gen.get("faithfulness") is not None:
+                    metric_parts.append(f"faith={gen['faithfulness']:.2f}")
+                if gen.get("answer_relevancy") is not None:
+                    metric_parts.append(f"rel={gen['answer_relevancy']:.2f}")
+                if gen.get("judge_error"):
+                    metric_parts.append(f"judge-err={gen['judge_error'][:40]}")
+                if metric_parts:
+                    lines += [f"*Metrics: {' | '.join(metric_parts)}*", ""]
+
             if res["error"]:
                 lines += [f"> **Error:** {res['error']}", f""]
             elif res["answer"]:
-                # Trim to 600 chars for readability
                 preview = res["answer"][:600]
                 if len(res["answer"]) > 600:
                     preview += "…"
@@ -681,7 +790,7 @@ def write_markdown(report: dict, path: Path) -> None:
                     score_pct = int((s.get("score") or 0) * 100)
                     lines.append(
                         f"- [{s.get('ref_id', '?')}] `{s.get('filename', '')}` "
-                        f"— {s.get('section', '')} ({score_pct}%)"
+                        f"— {s.get('section', '')} (relevance {score_pct}%)"
                     )
                 lines.append("")
 
@@ -715,6 +824,14 @@ def main() -> int:
                         help="Ingestion service URL (default: http://localhost:8001)")
     parser.add_argument("--data-loader-url", dest="data_loader_url", default="http://localhost:8002",
                         help="Data-loader service URL for dataset seeding (default: http://localhost:8002)")
+    parser.add_argument(
+        "--metrics", dest="run_metrics", action="store_true",
+        help="Run retrieval metrics and LLM-judge generation quality evaluation per query.",
+    )
+    parser.add_argument("--judge-url", dest="judge_url", default=None,
+                        help="Override judge LLM URL (default: config judge_url or http://localhost:11430/v1)")
+    parser.add_argument("--judge-model", dest="judge_model", default=None,
+                        help="Override judge model (default: config judge_model or qwen3.5:4b)")
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -732,6 +849,10 @@ def main() -> int:
     use_reranking = run_cfg.get("use_reranking", True)
     timeout   = run_cfg.get("timeout_seconds", 120)
     min_answer_length = run_cfg.get("min_answer_length", 5)
+    reranker_url = run_cfg.get("reranker_url")
+    reranker_model = run_cfg.get("reranker_model")
+    judge_url = args.judge_url or run_cfg.get("judge_url", "http://localhost:11430/v1")
+    judge_model = args.judge_model or run_cfg.get("judge_model", "qwen3.5:4b")
 
     # Token acquisition — skipped if --no-auth or no auth config present
     bearer_token: str | None = None
@@ -744,14 +865,26 @@ def main() -> int:
         bearer_token, _token_expires_in = acquire_token(auth_cfg, None, None)
         _token_acquired_at = time.time()
 
-    # Pre-flight: fail fast if the stack is not reachable
-    pre_flight(
+    # Pre-flight: fail fast if the stack is not reachable; also checks reranker
+    health_results = pre_flight(
         base_url=base_url,
         rag_path=rag_path,
         no_auth=args.no_auth,
         token_url=auth_cfg.get("token_url") if auth_cfg else None,
         tenant_id=tenant_id,
+        reranker_url=reranker_url,
+        reranker_model=reranker_model,
+        use_reranking=use_reranking,
     )
+
+    # Import metrics module if --metrics was requested
+    _metrics_mod = None
+    if args.run_metrics:
+        try:
+            import metrics as _metrics_mod  # type: ignore[import]
+            print(f"Quality metrics enabled (judge: {judge_model} @ {judge_url})\n")
+        except ImportError:
+            print("WARNING: metrics.py not found — --metrics flag ignored.\n", file=sys.stderr)
 
     suites = cfg["suites"]
     if args.suite:
@@ -773,7 +906,9 @@ def main() -> int:
             "use_cache": use_cache,
             "use_reranking": use_reranking,
             "authenticated": bearer_token is not None,
+            "metrics_enabled": _metrics_mod is not None,
         },
+        "health": health_results,
         "suites": [],
         "summary": {"total": 0, "passed": 0, "failed": 0},
     }
@@ -790,6 +925,14 @@ def main() -> int:
     print(f"{'─' * 70}\n")
 
     total = passed = 0
+    # Accumulators for quality summary
+    faithfulness_vals: list[float] = []
+    relevancy_vals: list[float] = []
+    abstention_correct_count = 0
+    abstention_total = 0
+    hit_at_k_vals: list[float] = []
+    mrr_vals: list[float] = []
+    recall_vals: list[float] = []
 
     try:
         for suite_def in suites:
@@ -825,6 +968,8 @@ def main() -> int:
                 expect_thinking_min = qdef.get("expect_thinking_length_min")
                 expect_cache_hit = bool(qdef.get("expect_cache_hit", False))
                 expect_opa_denied = bool(qdef.get("expect_opa_denied", False))
+                expect_abstention = qdef.get("expect_abstention")  # bool or None
+                relevant_docs = qdef.get("relevant_docs")          # list or None
 
                 # Refresh token if expiry is within 2 minutes (checked per-query
                 # because individual LLM responses can take 2-4 minutes each)
@@ -865,7 +1010,41 @@ def main() -> int:
                     expect_thinking_length_min=expect_thinking_min,
                     expect_cache_hit=expect_cache_hit,
                     expect_opa_denied=expect_opa_denied,
+                    expect_abstention=expect_abstention,
                 )
+
+                # Quality metrics (only when --metrics flag is set)
+                quality_metrics: dict | None = None
+                if _metrics_mod is not None:
+                    ret_m = _metrics_mod.retrieval_metrics(
+                        sources=result["sources"],
+                        relevant_docs=relevant_docs or [],
+                        k=5,
+                    )
+                    gen_m = _metrics_mod.generation_judge(
+                        question=question,
+                        answer=result["answer"],
+                        sources=result["sources"],
+                        expect_abstention=bool(expect_abstention),
+                        judge_url=judge_url,
+                        judge_model=judge_model,
+                    )
+                    quality_metrics = {"retrieval": ret_m, "generation": gen_m}
+                    # Accumulate for summary
+                    if gen_m.get("faithfulness") is not None:
+                        faithfulness_vals.append(gen_m["faithfulness"])
+                    if gen_m.get("answer_relevancy") is not None:
+                        relevancy_vals.append(gen_m["answer_relevancy"])
+                    if expect_abstention is not None:
+                        abstention_total += 1
+                        if gen_m.get("abstention_correct"):
+                            abstention_correct_count += 1
+                    if ret_m.get("hit_at_k") is not None:
+                        hit_at_k_vals.append(float(ret_m["hit_at_k"]))
+                    if ret_m.get("mrr") is not None:
+                        mrr_vals.append(ret_m["mrr"])
+                    if ret_m.get("context_recall") is not None:
+                        recall_vals.append(ret_m["context_recall"])
 
                 icon = PASS if ev["passed"] else FAIL
                 kw_info = ""
@@ -877,6 +1056,10 @@ def main() -> int:
                     kw_info += f" cache={'HIT' if ev['cache_hit'] else 'MISS'}"
                 if expect_opa_denied:
                     kw_info += f" opa={'DENIED' if ev['opa_denied'] else 'ALLOWED(unexpected)'}"
+                if ev.get("abstention_correct") is not None:
+                    kw_info += f" abs={'✓' if ev['abstention_correct'] else '✗'}"
+                if ev.get("reranker_degraded"):
+                    kw_info += " ⚠ranker"
                 print(f"\r   {icon}  {question[:60]:<60} {result['latency_seconds']:5.1f}s  "
                       f"{result['source_count']} src{kw_info}")
 
@@ -885,6 +1068,7 @@ def main() -> int:
                     "expect_keywords": expect_kw,
                     "result": result,
                     "eval": ev,
+                    "quality_metrics": quality_metrics,
                 })
                 total += 1
                 if ev["passed"]:
@@ -917,6 +1101,24 @@ def main() -> int:
         "passed": passed,
         "failed": total - passed,
     }
+
+    # Quality summary aggregation
+    def _avg(vals: list[float]) -> str | None:
+        return f"{sum(vals)/len(vals):.3f}" if vals else None
+
+    if _metrics_mod is not None:
+        report["quality_summary"] = {
+            "k": 5,
+            "faithfulness_avg": _avg(faithfulness_vals),
+            "answer_relevancy_avg": _avg(relevancy_vals),
+            "abstention_correct_rate": (
+                f"{abstention_correct_count}/{abstention_total}"
+                if abstention_total else None
+            ),
+            "hit_at_k_avg": _avg(hit_at_k_vals),
+            "mrr_avg": _avg(mrr_vals),
+            "context_recall_avg": _avg(recall_vals),
+        }
 
     json_path = Path(str(out_prefix) + ".json")
     md_path   = Path(str(out_prefix) + ".md")

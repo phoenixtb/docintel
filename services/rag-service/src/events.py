@@ -40,6 +40,7 @@ class MetadataEvent:
     query_id: str
     cache_hit: bool
     context_state: Optional[dict] = None
+    reranker_degraded: Optional[bool] = None
 
 
 @dataclass(frozen=True)

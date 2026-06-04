@@ -582,8 +582,19 @@ class RAGService:
                     ),
                 )
                 documents = rerank_result["documents"]
+                if rerank_result.get("reranker_degraded"):
+                    yield MetadataEvent(
+                        query_id=request_id,
+                        cache_hit=False,
+                        reranker_degraded=True,
+                    )
             except Exception as e:
                 logger.warning("Reranker failed, falling back to retrieval order: %s", e)
+                yield MetadataEvent(
+                    query_id=request_id,
+                    cache_hit=False,
+                    reranker_degraded=True,
+                )
 
         # ── 8. Min-score / top-k filter ───────────────────────────────────────
         if effective_min_score > 0.0:

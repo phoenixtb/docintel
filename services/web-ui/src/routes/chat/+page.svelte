@@ -28,6 +28,7 @@
     liked?: boolean | null;
     queryId?: string;
     routedDomain?: string;
+    rerankerDegraded?: boolean;
     metadata?: { type: string; compressed_turns: number; summary_upto_count: number };
   }
 
@@ -54,6 +55,7 @@
   let currentSources: Source[] = $state([]);
   let currentQueryId = $state('');
   let currentRoutedDomain = $state<string | null>(null);
+  let currentRerankerDegraded = $state(false);
   let contextState = $state<ContextState | null>(null);
   let streamAbort: AbortController | null = null;
 
@@ -213,6 +215,7 @@
     currentThinking = '';
     currentSources = [];
     currentQueryId = '';
+    currentRerankerDegraded = false;
     
     streamAbort = new AbortController();
     try {
@@ -261,6 +264,7 @@
             const data = JSON.parse(dataLine);
             if (data.metadata?.query_id) currentQueryId = data.metadata.query_id;
             if (data.metadata?.context_state) contextState = data.metadata.context_state;
+            if (data.metadata?.reranker_degraded) currentRerankerDegraded = true;
             if (data.routing?.domain) currentRoutedDomain = data.routing.domain;
             if (data.queued) { isQueued = true; }
             if (data.thinking_token) { isQueued = false; currentThinking += data.thinking_token; }
@@ -284,6 +288,7 @@
         liked: null,
         queryId: currentQueryId || undefined,
         routedDomain: currentRoutedDomain || undefined,
+        rerankerDegraded: currentRerankerDegraded || undefined,
       }];
       
       const conv = conversations.find(c => c.id === activeConversationId);
@@ -313,6 +318,7 @@
       currentSources = [];
       currentQueryId = '';
       currentRoutedDomain = null;
+      currentRerankerDegraded = false;
     }
   }
   
