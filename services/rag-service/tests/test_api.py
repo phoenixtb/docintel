@@ -54,10 +54,21 @@ def client() -> Generator[TestClient, None, None]:
 class TestHealthEndpoint:
     """Tests for health check endpoint."""
 
-    def test_health_check(self, client: TestClient):
-        """Health endpoint returns 200 OK."""
+    def test_health_check(self, client: TestClient, monkeypatch):
+        """Health endpoint returns 200 OK without requiring a live Qdrant/LLM."""
+        import qdrant_client as qdrant_client_module
+
+        class FakeQdrantClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_collections(self):
+                return None
+
+        monkeypatch.setattr(qdrant_client_module, "QdrantClient", FakeQdrantClient)
+
         response = client.get("/health")
-        
+
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
