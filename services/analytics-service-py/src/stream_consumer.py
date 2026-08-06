@@ -43,6 +43,8 @@ _COLUMNS = [
     "query_id", "tenant_id", "user_id", "latency_ms", "model_used",
     "cache_hit", "source_count", "thinking_truncated",
     "prompt_tokens", "completion_tokens", "cost_usd",
+    "query_text", "retrieval_mode", "rerank_candidates_in",
+    "rerank_candidates_out", "reranker_degraded", "trace_id",
 ]
 
 
@@ -59,6 +61,12 @@ def _row_from_payload(payload: dict) -> list:
         int(payload.get("prompt_tokens", 0) or 0),
         int(payload.get("completion_tokens", 0) or 0),
         float(payload.get("cost_usd", 0.0) or 0.0),
+        str(payload.get("query_text", "")),
+        str(payload.get("retrieval_mode", "")),
+        int(payload.get("rerank_candidates_in", 0) or 0),
+        int(payload.get("rerank_candidates_out", 0) or 0),
+        bool(payload.get("reranker_degraded", False)),
+        str(payload.get("trace_id", "")),
     ]
 
 

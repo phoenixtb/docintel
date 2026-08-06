@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS {db}.query_events (
     prompt_tokens      UInt32 DEFAULT 0,
     completion_tokens  UInt32 DEFAULT 0,
     cost_usd           Float64 DEFAULT 0.0,
+    query_text          String DEFAULT '',
+    retrieval_mode       String DEFAULT '',
+    rerank_candidates_in  UInt16 DEFAULT 0,
+    rerank_candidates_out UInt16 DEFAULT 0,
+    reranker_degraded     Bool DEFAULT false,
+    trace_id              String DEFAULT '',
     created_at        DateTime DEFAULT now()
 ) ENGINE = MergeTree()
 ORDER BY (tenant_id, created_at)
@@ -46,6 +52,17 @@ ALTER TABLE {db}.query_events
     ADD COLUMN IF NOT EXISTS cost_usd Float64 DEFAULT 0.0
 """
 
+# B1/B3/B4 — Insights transparency + corpus-gap + trace deep-link columns.
+_ALTER_QUERY_EVENTS_INSIGHTS = """
+ALTER TABLE {db}.query_events
+    ADD COLUMN IF NOT EXISTS query_text String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS retrieval_mode String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS rerank_candidates_in UInt16 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS rerank_candidates_out UInt16 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS reranker_degraded Bool DEFAULT false,
+    ADD COLUMN IF NOT EXISTS trace_id String DEFAULT ''
+"""
+
 _CREATE_FEEDBACK_EVENTS = """
 CREATE TABLE IF NOT EXISTS {db}.feedback_events (
     query_id   String,
@@ -53,9 +70,21 @@ CREATE TABLE IF NOT EXISTS {db}.feedback_events (
     user_id    String,
     liked      Nullable(Bool),
     comment    Nullable(String),
+    query_text   String DEFAULT '',
+    answer_text  String DEFAULT '',
+    sources_json String DEFAULT '',
     created_at DateTime DEFAULT now()
 ) ENGINE = MergeTree()
 ORDER BY (tenant_id, created_at)
+"""
+
+# B1 — Feedback Review page needs the query/answer/sources shown at the time
+# feedback was given (denormalized from the frontend, not joined at read time).
+_ALTER_FEEDBACK_EVENTS_REVIEW_FIELDS = """
+ALTER TABLE {db}.feedback_events
+    ADD COLUMN IF NOT EXISTS query_text String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS answer_text String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS sources_json String DEFAULT ''
 """
 
 
@@ -77,4 +106,6 @@ def ensure_schema(settings: Settings) -> None:
     # Idempotent migrations: add columns to existing tables
     client.command(_ALTER_QUERY_EVENTS_THINKING_TRUNCATED.format(db=db))
     client.command(_ALTER_QUERY_EVENTS_TOKENS_COST.format(db=db))
+    client.command(_ALTER_QUERY_EVENTS_INSIGHTS.format(db=db))
+    client.command(_ALTER_FEEDBACK_EVENTS_REVIEW_FIELDS.format(db=db))
     logger.info("ClickHouse schema ready (database=%s)", db)

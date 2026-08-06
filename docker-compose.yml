@@ -307,6 +307,9 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
+      # B4: browser-reachable Langfuse URL for Insights trace deep-links
+      # (distinct from rag-service's internal LANGFUSE_HOST=http://langfuse-web:3000)
+      - LANGFUSE_PUBLIC_HOST=${LANGFUSE_PUBLIC_HOST:-http://localhost:3000}
     depends_on:
       clickhouse:
         condition: service_healthy

@@ -169,3 +169,44 @@ async def test_row_columns_and_types_match_query_events_schema(fake_bus):
     assert row[columns.index("prompt_tokens")] == 120
     assert row[columns.index("completion_tokens")] == 45
     assert row[columns.index("cost_usd")] == pytest.approx(0.0021)
+
+
+@pytest.mark.asyncio
+async def test_row_includes_insights_fields(fake_bus):
+    """B1/B3/B4 — query_text, retrieval_mode, rerank counts, reranker_degraded,
+    trace_id must all flow from the stream payload into the ClickHouse row."""
+    await fake_bus.ensure_group(TOPIC_ANALYTICS_QUERY, _CONSUMER_GROUP)
+    await fake_bus.publish(
+        TOPIC_ANALYTICS_QUERY,
+        _event_payload(
+            query_id="q1",
+            query_text="What is the refund policy?",
+            retrieval_mode="hybrid",
+            rerank_candidates_in=20,
+            rerank_candidates_out=5,
+            reranker_degraded=True,
+            trace_id="trace-abc-123",
+        ),
+    )
+
+    mock_ch = MagicMock()
+    consumer = AnalyticsStreamConsumer(_settings(analytics_consumer_batch_size=1), bus=fake_bus)
+
+    with patch("src.stream_consumer.get_client", return_value=mock_ch):
+        run_task = asyncio.create_task(consumer.run())
+        for _ in range(50):
+            await asyncio.sleep(0.05)
+            if consumer.batches_flushed >= 1:
+                break
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+    _, kwargs = mock_ch.insert.call_args
+    columns = kwargs["column_names"]
+    row = mock_ch.insert.call_args[0][1][0]
+    assert row[columns.index("query_text")] == "What is the refund policy?"
+    assert row[columns.index("retrieval_mode")] == "hybrid"
+    assert row[columns.index("rerank_candidates_in")] == 20
+    assert row[columns.index("rerank_candidates_out")] == 5
+    assert row[columns.index("reranker_degraded")] is True
+    assert row[columns.index("trace_id")] == "trace-abc-123"

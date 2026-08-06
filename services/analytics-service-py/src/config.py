@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     # XREADGROUP, before ack) leaves messages in the PEL; reclaim after this.
     analytics_consumer_claim_idle_ms: int = 300_000
 
+    # ── B4 — Langfuse trace deep-links ─────────────────────────────────────────
+    # Browser-reachable Langfuse URL (distinct from any internal service DNS
+    # name) used to build clickable trace links in the Insights UI.
+    langfuse_public_host: str = "http://localhost:3000"
+
 
 @lru_cache
 def get_settings() -> Settings:
