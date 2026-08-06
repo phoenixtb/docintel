@@ -919,6 +919,89 @@ def write_json(report: dict, path: Path) -> None:
 
 
 # =============================================================================
+# G3 — CI evaluation gate
+# =============================================================================
+
+def check_gate(report: dict, gate_cfg: dict, retrieval_only: bool = False) -> list[str]:
+    """
+    Check aggregate quality metrics (report["quality_summary"]) against the
+    config.gate thresholds from queries.yaml.
+
+    Returns a list of human-readable breach messages naming the metric and its
+    actual vs. threshold value — empty list means the gate passed.
+
+    faithfulness_min is only enforced when the judge actually produced a value
+    (faithfulness_avg is not None) — CI runs with --retrieval-only and no
+    judge, so that criterion is silently skipped there (documented in
+    integration-tests.yml), never silently "passed".
+
+    abstention_correct uses a lower bar in --retrieval-only mode (see
+    abstention_correct_min_retrieval_only in queries.yaml): with no generated
+    text to check, abstention is judged from source_count alone, which can't
+    distinguish "retrieved a genuinely near-miss doc that the LLM would still
+    correctly refuse to answer from" from a real miss. Falls back to
+    abstention_correct_min if the retrieval-only key isn't configured.
+    """
+    breaches: list[str] = []
+    qs = report.get("quality_summary") or {}
+
+    def _to_float(v) -> float | None:
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    hit_min = gate_cfg.get("hit_at_k_min")
+    if hit_min is not None:
+        hit_avg = _to_float(qs.get("hit_at_k_avg"))
+        if hit_avg is None:
+            breaches.append(
+                "hit_at_k: no covered queries produced a retrieval-metric sample "
+                "(need --metrics/--retrieval-only and relevant_docs in queries.yaml)"
+            )
+        elif hit_avg < hit_min:
+            breaches.append(f"hit_at_k_avg={hit_avg:.3f} below gate {hit_min}")
+
+    abstention_min = (
+        gate_cfg.get("abstention_correct_min_retrieval_only", gate_cfg.get("abstention_correct_min"))
+        if retrieval_only
+        else gate_cfg.get("abstention_correct_min")
+    )
+    if abstention_min is not None:
+        rate_str = qs.get("abstention_correct_rate")  # "N/M" or None
+        rate = None
+        if rate_str:
+            num_s, _, den_s = rate_str.partition("/")
+            try:
+                num, den = int(num_s), int(den_s)
+                rate = (num / den) if den else None
+            except ValueError:
+                rate = None
+        if rate is None:
+            breaches.append("abstention_correct: no expect_abstention queries were evaluated")
+        elif rate < abstention_min:
+            breaches.append(f"abstention_correct_rate={rate:.3f} ({rate_str}) below gate {abstention_min}")
+
+    faith_min = gate_cfg.get("faithfulness_min")
+    faith_avg = _to_float(qs.get("faithfulness_avg"))
+    if faith_min is not None and faith_avg is not None and faith_avg < faith_min:
+        breaches.append(f"faithfulness_avg={faith_avg:.3f} below gate {faith_min}")
+
+    if not gate_cfg.get("allow_reranker_degraded", True):
+        degraded = [
+            q["question"]
+            for suite in report.get("suites", [])
+            for q in suite["queries"]
+            if q["eval"].get("reranker_degraded")
+        ]
+        if degraded:
+            preview = ", ".join(degraded[:3]) + ("…" if len(degraded) > 3 else "")
+            breaches.append(f"reranker_degraded on {len(degraded)} query(ies): {preview}")
+
+    return breaches
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -953,7 +1036,21 @@ def main() -> int:
                         help="Override judge LLM URL (default: config judge_url or http://localhost:11430/v1)")
     parser.add_argument("--judge-model", dest="judge_model", default=None,
                         help="Override judge model (default: config judge_model or qwen3.5:4b)")
+    parser.add_argument(
+        "--retrieval-only", dest="retrieval_only", action="store_true",
+        help="G3: skip LLM generation and the LLM judge entirely — send retrieve_only=true "
+             "to the RAG service and evaluate retrieval/rerank/abstention-gate metrics only. "
+             "Cheap (embed + rerank via LMForge, no generation). Implies --metrics.",
+    )
+    parser.add_argument(
+        "--gate", dest="run_gate", action="store_true",
+        help="G3: after the run, check aggregate quality metrics against the "
+             "config.gate thresholds in queries.yaml; non-zero exit + named metric on breach.",
+    )
     args = parser.parse_args()
+
+    if args.retrieval_only:
+        args.run_metrics = True
 
     config_path = Path(args.config)
     if not config_path.exists():
@@ -1028,6 +1125,7 @@ def main() -> int:
             "use_reranking": use_reranking,
             "authenticated": bearer_token is not None,
             "metrics_enabled": _metrics_mod is not None,
+            "retrieval_only": args.retrieval_only,
         },
         "health": health_results,
         "suites": [],
@@ -1039,7 +1137,11 @@ def main() -> int:
     data_loader_url = getattr(args, "data_loader_url", "http://localhost:8002")
 
     if not no_setup:
-        setup_e2e_environment(tenant_id=tenant_id, data_loader_url=data_loader_url)
+        setup_e2e_environment(
+            tenant_id=tenant_id,
+            data_loader_url=data_loader_url,
+            seed_samples=run_cfg.get("seed_samples"),
+        )
         print()
 
     print(f"\nDocIntel Integration Tests — {base_url}{rag_path}")
@@ -1073,6 +1175,17 @@ def main() -> int:
             extra_payload: dict = {}
             if "thinking" in cfg_overrides:
                 extra_payload["thinking"] = cfg_overrides["thinking"]
+            if args.retrieval_only:
+                extra_payload["retrieve_only"] = True
+
+            # Retrieval-only has no answer text — suites that depend on generated
+            # text (cache-hit replay, thinking tokens) aren't meaningful here.
+            if args.retrieval_only and any(
+                q.get("expect_cache_hit") or q.get("expect_thinking_length_min") is not None
+                for q in suite_def["queries"]
+            ):
+                print(f"   ⏭  Suite '{suite_name}' skipped (--retrieval-only: generation-dependent suite)")
+                continue
 
             print(f"▶  Suite: {suite_name}  ({doc_type})")
 
@@ -1102,7 +1215,7 @@ def main() -> int:
                         _token_acquired_at = time.time()
 
                 # Cache hit test: fire query twice; evaluate the second response
-                if expect_cache_hit:
+                if expect_cache_hit and not args.retrieval_only:
                     print(f"   ⋯  [warm] {question[:55]}", end="", flush=True)
                     call_streaming(
                         base_url=base_url, rag_path=rag_path, question=question,
@@ -1132,6 +1245,7 @@ def main() -> int:
                     expect_cache_hit=expect_cache_hit,
                     expect_opa_denied=expect_opa_denied,
                     expect_abstention=expect_abstention,
+                    retrieval_only=args.retrieval_only,
                 )
 
                 # Quality metrics (only when --metrics flag is set)
@@ -1142,14 +1256,26 @@ def main() -> int:
                         relevant_docs=relevant_docs or [],
                         k=5,
                     )
-                    gen_m = _metrics_mod.generation_judge(
-                        question=question,
-                        answer=result["answer"],
-                        sources=result["sources"],
-                        expect_abstention=bool(expect_abstention),
-                        judge_url=judge_url,
-                        judge_model=judge_model,
-                    )
+                    if args.retrieval_only:
+                        # No answer text was generated — skip the LLM judge
+                        # entirely (that's the point of --retrieval-only).
+                        # abstention_correct comes from evaluate()'s
+                        # source_count-based judgment above.
+                        gen_m = {
+                            "faithfulness": None,
+                            "answer_relevancy": None,
+                            "abstention_correct": ev.get("abstention_correct"),
+                            "judge_error": None,
+                        }
+                    else:
+                        gen_m = _metrics_mod.generation_judge(
+                            question=question,
+                            answer=result["answer"],
+                            sources=result["sources"],
+                            expect_abstention=bool(expect_abstention),
+                            judge_url=judge_url,
+                            judge_model=judge_model,
+                        )
                     quality_metrics = {"retrieval": ret_m, "generation": gen_m}
                     # Accumulate for summary
                     if gen_m.get("faithfulness") is not None:
@@ -1244,6 +1370,12 @@ def main() -> int:
             "context_recall_avg": _avg(recall_vals),
         }
 
+    gate_breaches: list[str] = []
+    if args.run_gate:
+        gate_cfg = run_cfg.get("gate", {})
+        gate_breaches = check_gate(report, gate_cfg, retrieval_only=args.retrieval_only)
+        report["gate"] = {"config": gate_cfg, "breaches": gate_breaches, "passed": not gate_breaches}
+
     json_path = Path(str(out_prefix) + ".json")
     md_path   = Path(str(out_prefix) + ".md")
     write_json(report, json_path)
@@ -1252,8 +1384,19 @@ def main() -> int:
     print(f"{'─' * 70}")
     print(f"Results: {passed}/{total} passed")
     print(f"JSON  → {json_path}")
-    print(f"MD    → {md_path}\n")
+    print(f"MD    → {md_path}")
 
+    if args.run_gate:
+        if gate_breaches:
+            print(f"\n✗ GATE FAILED — {len(gate_breaches)} breach(es):")
+            for b in gate_breaches:
+                print(f"  - {b}")
+        else:
+            print("\n✓ GATE PASSED")
+    print()
+
+    if args.run_gate and gate_breaches:
+        return 1
     return 0 if passed == total else 1
 
 

@@ -464,12 +464,17 @@ class RAGService:
         conversation_id: str | None = None,
         summarizer=None,
         tracer: LangfuseTracer | None = None,
+        retrieve_only: bool = False,
     ) -> AsyncIterator[PipelineEvent]:
         """
         Unified RAG streaming generator — single source of truth for both paths.
 
         Yields typed PipelineEvents in stream order. Callers serialize to SSE
         (streaming handler) or aggregate into a dict (query handler).
+
+        retrieve_only: short-circuit after the min-score/top-k gate (step 8),
+        skipping prompt build + LLM generation. Embed/retrieve/rerank/gate all
+        still run — used for cheap CI/local retrieval-quality checks.
         """
         loop = asyncio.get_running_loop()
         cfg = settings
@@ -648,6 +653,14 @@ class RAGService:
             documents = above
 
         documents = documents[:effective_top_k]
+
+        # ── 8b. Retrieve-only short-circuit (G3) ────────────────────────────────
+        # Skips generation entirely — correct for both the abstain case (empty
+        # documents) and the answerable case (non-empty documents); the caller
+        # judges abstention from source_count, not from answer text.
+        if retrieve_only:
+            yield SourcesEvent(sources=_build_sources(documents), done=True)
+            return
 
         # ── 9. No-docs branch ─────────────────────────────────────────────────
         if not documents:
@@ -940,6 +953,7 @@ class RAGService:
         conversation_id: str | None = None,
         summarizer=None,
         tracer: LangfuseTracer | None = None,
+        retrieve_only: bool = False,
     ) -> dict:
         """
         Drain stream() into the legacy dict shape consumed by /query.
@@ -977,6 +991,7 @@ class RAGService:
             conversation_id=conversation_id,
             summarizer=summarizer,
             tracer=tracer,
+            retrieve_only=retrieve_only,
         ):
             match event:
                 case MetadataEvent(cache_hit=ch, retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout, reranker_degraded=rd):

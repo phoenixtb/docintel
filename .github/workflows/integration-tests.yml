@@ -5,42 +5,45 @@ on:
     branches: [main]
   workflow_dispatch:
 
-jobs:
-  integration:
-    name: Integration Tests
-    runs-on: ubuntu-latest
+# =============================================================================
+# G3 — CI evaluation gate
+# =============================================================================
+# GitHub-hosted runners have no LMForge (or any OpenAI-compatible embed/
+# rerank/generation endpoint) reachable. rag-service's dense embedder and
+# reranker both call out to LLM_EMBED_URL / LLM_RERANK_URL for every query —
+# so even the cheap --retrieval-only path (embed + rerank, no generation)
+# cannot run here. Standing up the full compose stack and calling
+# run_tests.py would fail every single query with a connection error; that's
+# not a quality gate, it's a guaranteed failure unrelated to the PR's changes
+# (see tasks/05-2026-gaps-plan.md G3 and the note in `retrieval-gate` below).
+#
+# So this workflow gates what's ACTUALLY runnable on a hosted runner: the
+# harness's own logic (gate thresholds, abstention scoring, retrieval
+# metrics — see tests/integration/test_harness.py). The `retrieval-gate` job
+# probes for a reachable LLM endpoint first and skips itself cleanly if none
+# is found — it does real work automatically if this workflow is ever moved
+# to a self-hosted runner with LMForge/Ollama/vLLM reachable, with zero
+# changes needed here.
+#
+# The real quality gate — retrieval + rerank + abstention, no LLM judge,
+# cheap — run locally or as a nightly job on a machine with LMForge up:
+#
+#   cd tests/integration && uv sync
+#   uv run python run_tests.py --retrieval-only --gate
+#
+# The full gate — adds ragas faithfulness/answer_relevancy via the LLM judge
+# (expensive: one full generation + two judge calls per query) — local/
+# nightly only, never in per-PR CI:
+#
+#   uv run python run_tests.py --metrics --gate
+# =============================================================================
 
+jobs:
+  harness-unit-tests:
+    name: Harness Unit Tests
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # Start only the infrastructure services (no Ollama — use a mock/stub in tests)
-      - name: Start infrastructure
-        run: |
-          docker compose up -d postgres redis qdrant minio clickhouse
-          # Wait for postgres to be ready
-          docker compose exec -T postgres pg_isready -U docintel -t 30
-
-      - name: Build and start app services
-        env:
-          CORS_ALLOWED_ORIGINS: "http://localhost:3001"
-          ZITADEL_SERVICE_ACCOUNT_PAT: "ci-test-token"
-          ZITADEL_MASTERKEY: "CITestMasterkeyNeeds32Characters"
-        run: |
-          docker compose build --parallel
-          docker compose up -d
-
-      - name: Wait for services
-        run: |
-          for svc in "localhost:8080/health" "localhost:8000/health" "localhost:8081/actuator/health" "localhost:8082/actuator/health"; do
-            echo "Waiting for $svc..."
-            for i in $(seq 1 30); do
-              curl -sf "http://$svc" && break
-              sleep 5
-            done
-          done
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -51,17 +54,94 @@ jobs:
         working-directory: tests/integration
         run: uv sync --extra dev
 
-      - name: Run integration tests
+      - name: Run harness logic tests (gate thresholds, abstention scoring, retrieval metrics)
+        working-directory: tests/integration
+        run: uv run pytest test_harness.py -v
+
+  retrieval-gate:
+    name: Retrieval + Abstention Gate
+    runs-on: ubuntu-latest
+    needs: harness-unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe for a reachable LLM endpoint
+        id: probe
+        run: |
+          URL="${LLM_EMBED_URL:-http://host.docker.internal:11430/v1}/models"
+          if curl -sf --max-time 5 "$URL" > /dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "No LLM endpoint reachable at $URL — this runner has no LMForge/Ollama/vLLM."
+            echo "Skipping the live retrieval gate (see workflow header for the local/nightly command)."
+          fi
+        env:
+          LLM_EMBED_URL: ${{ secrets.LLM_EMBED_URL }}
+
+      - name: Set up Docker Buildx
+        if: steps.probe.outputs.available == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Start infrastructure
+        if: steps.probe.outputs.available == 'true'
+        run: |
+          docker compose up -d postgres redis qdrant minio clickhouse
+          docker compose exec -T postgres pg_isready -U docintel -t 30
+
+      - name: Build and start app services
+        if: steps.probe.outputs.available == 'true'
+        env:
+          CORS_ALLOWED_ORIGINS: "http://localhost:3001"
+          ZITADEL_SERVICE_ACCOUNT_PAT: "ci-test-token"
+          ZITADEL_MASTERKEY: "CITestMasterkeyNeeds32Characters"
+        run: |
+          docker compose build --parallel
+          docker compose up -d
+
+      - name: Wait for services
+        if: steps.probe.outputs.available == 'true'
+        run: |
+          for svc in "localhost:8080/health" "localhost:8000/health" "localhost:8081/actuator/health" "localhost:8082/actuator/health"; do
+            echo "Waiting for $svc..."
+            for i in $(seq 1 30); do
+              curl -sf "http://$svc" && break
+              sleep 5
+            done
+          done
+
+      - name: Install uv
+        if: steps.probe.outputs.available == 'true'
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        if: steps.probe.outputs.available == 'true'
+        working-directory: tests/integration
+        run: uv sync --extra dev
+
+      - name: Run retrieval + abstention gate (no LLM judge — see workflow header)
+        if: steps.probe.outputs.available == 'true'
         env:
           GATEWAY_URL: http://localhost:8080
           ZITADEL_URL: http://localhost:9090
         working-directory: tests/integration
-        run: uv run python run_tests.py
+        run: uv run python run_tests.py --retrieval-only --gate --out reports/ci
+
+      - name: Upload report JSON
+        if: steps.probe.outputs.available == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-report
+          path: tests/integration/reports/ci.json
+          if-no-files-found: ignore
 
       - name: Dump service logs on failure
-        if: failure()
+        if: steps.probe.outputs.available == 'true' && failure()
         run: docker compose logs --tail=100
 
       - name: Teardown
-        if: always()
+        if: steps.probe.outputs.available == 'true' && always()
         run: docker compose down -v

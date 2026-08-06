@@ -798,6 +798,7 @@ async def query_documents(
             conversation_id=request.conversation_id,
             summarizer=http_request.app.state.summarizer,
             tracer=tracer,
+            retrieve_only=request.retrieve_only,
         )
         model_used = result.get("model_used", "unknown")
         tokens_used = result.get("tokens_used") or {}
@@ -901,6 +902,7 @@ async def query_documents_stream(
                 conversation_id=request.conversation_id,
                 summarizer=http_request.app.state.summarizer,
                 tracer=tracer,
+                retrieve_only=request.retrieve_only,
             ):
                 if isinstance(event, MetadataEvent):
                     cache_hit = event.cache_hit
