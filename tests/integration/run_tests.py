@@ -234,27 +234,27 @@ def _ensure_tenant_exists(base_url: str, tenant_id: str, bearer_token: str) -> N
         sys.exit(1)
 
 
-def setup_e2e_environment(
+# Fallback when queries.yaml has no config.seed_samples block (backward compat
+# with older configs / other callers of setup_e2e_environment).
+DEFAULT_SEED_SAMPLES: dict[str, int] = {"techqa": 5, "hr_policies": 5, "cuad": 5}
+
+
+def _load_one_dataset(
+    dataset_key: str,
+    samples: int,
     tenant_id: str,
-    base_url: str = "http://localhost:8080",
-    ingestion_url: str = "http://localhost:8001",
-    data_loader_url: str = "http://localhost:8003",
-    bearer_token: str | None = None,
+    data_loader_url: str,
+    user_id: str,
 ) -> None:
     """
-    Seed test datasets into the e2e tenant via the data-loader service.
+    Start a data-loader job for a single dataset and block until it finishes.
 
-    Dataset loading moved from ingestion-service (/ingest/dataset/*) to
-    data-loader (/datasets/*) as part of the Phase 1 pipeline redesign.
-    The data-loader auth uses X-User-Id (not the HMAC service token).
-
-    Seeds all three suites' datasets so every query suite has documents.
-    The 'e2e' tenant is pre-seeded in the DB (config/postgres/init.sql).
-    Blocks until the ingestion job completes or raises on error.
+    data-loader's /datasets/load takes ONE samples_per_dataset value applied
+    uniformly to every dataset in the request — calling it once per dataset
+    (each with its own sample count) is how G1 gets per-dataset seed sizes
+    (see queries.yaml config.seed_samples) without touching data-loader itself.
     """
-    user_id = "e2e-test-runner"
-
-    print("Setup: seeding test datasets into e2e tenant …")
+    print(f"Setup: seeding '{dataset_key}' (samples={samples}) into e2e tenant …")
     try:
         resp = httpx.post(
             f"{data_loader_url}/datasets/load",
@@ -263,13 +263,13 @@ def setup_e2e_environment(
                 "X-User-Id": user_id,
                 "X-Tenant-Id": tenant_id,
             },
-            json={"datasets": ["techqa", "hr_policies", "cuad"], "samples_per_dataset": 5},
+            json={"datasets": [dataset_key], "samples_per_dataset": samples},
             timeout=30,
         )
         resp.raise_for_status()
     except Exception as exc:
         print(
-            f"ERROR: Failed to start seed job — {exc}\n"
+            f"ERROR: Failed to start seed job for '{dataset_key}' — {exc}\n"
             f"  Is data-loader reachable at {data_loader_url}?\n",
             file=sys.stderr,
         )
@@ -317,21 +317,55 @@ def setup_e2e_environment(
                     print(f"\r  Ingesting … {done_docs}/{total_docs} ({pct}%)", end="", flush=True)
                 elif etype == "done":
                     done_docs = event.get("processed", total_docs)
-                    print(f"\r  ✓ Ingested {done_docs} documents into tenant '{tenant_id}'")
+                    print(f"\r  ✓ Ingested {done_docs} documents for '{dataset_key}' into tenant '{tenant_id}'")
                     success = True
                     return
                 elif etype == "error":
                     reason = event.get("reason", event)
-                    print(f"\nERROR: Seed job failed: {reason}", file=sys.stderr)
+                    print(f"\nERROR: Seed job failed for '{dataset_key}': {reason}", file=sys.stderr)
                     sys.exit(1)
 
     if not success:
         print(
-            "\nERROR: Seed job stream closed without a 'done' event.\n"
+            f"\nERROR: Seed job stream closed without a 'done' event for '{dataset_key}'.\n"
             "  The ingestion job likely failed — check ingestion-service logs.\n",
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+def setup_e2e_environment(
+    tenant_id: str,
+    base_url: str = "http://localhost:8080",
+    ingestion_url: str = "http://localhost:8001",
+    data_loader_url: str = "http://localhost:8003",
+    bearer_token: str | None = None,
+    seed_samples: dict[str, int] | None = None,
+) -> None:
+    """
+    Seed test datasets into the e2e tenant via the data-loader service.
+
+    Dataset loading moved from ingestion-service (/ingest/dataset/*) to
+    data-loader (/datasets/*) as part of the Phase 1 pipeline redesign.
+    The data-loader auth uses X-User-Id (not the HMAC service token).
+
+    seed_samples: per-dataset sample counts (see queries.yaml config.seed_samples,
+    G1). Falls back to DEFAULT_SEED_SAMPLES (5 each — the pre-G1 behavior) when
+    not provided. One data-loader job is started per dataset sequentially.
+
+    Blocks until every dataset's ingestion job completes or raises on error.
+    """
+    user_id = "e2e-test-runner"
+    samples = seed_samples or DEFAULT_SEED_SAMPLES
+
+    for dataset_key in ("techqa", "hr_policies", "cuad"):
+        _load_one_dataset(
+            dataset_key=dataset_key,
+            samples=samples.get(dataset_key, DEFAULT_SEED_SAMPLES[dataset_key]),
+            tenant_id=tenant_id,
+            data_loader_url=data_loader_url,
+            user_id=user_id,
+        )
 
 
 def teardown_e2e_environment(
@@ -654,6 +688,7 @@ def evaluate(
     expect_cache_hit: bool = False,
     expect_opa_denied: bool = False,
     expect_abstention: bool | None = None,
+    retrieval_only: bool = False,
 ) -> dict:
     """
     Evaluate a streaming result against expectations.
@@ -665,7 +700,11 @@ def evaluate(
                                and the answer must contain the no-docs sentinel message.
                                Specifically verifies the streaming security gap (A6) is closed.
     expect_abstention        : when set, checks that the model correctly abstained (True)
-                               or answered (False). Abstention is detected heuristically.
+                               or answered (False). Abstention is detected heuristically
+                               from answer text, UNLESS retrieval_only.
+    retrieval_only            : G3 — no answer text was generated (retrieve_only request).
+                               Abstention is judged from source_count instead of text, and
+                               keyword/answer-length checks are skipped (nothing to check).
     """
     answer = result["answer"].lower()
 
@@ -677,13 +716,21 @@ def evaluate(
     ).lower()
     combined = answer + " " + source_text
 
-    keyword_hits = [kw for kw in expect_keywords if kw.lower() in combined]
-    keyword_miss = [kw for kw in expect_keywords if kw.lower() not in combined]
+    keyword_hits = [] if retrieval_only else [kw for kw in expect_keywords if kw.lower() in combined]
+    keyword_miss = [] if retrieval_only else [kw for kw in expect_keywords if kw.lower() not in combined]
 
     # OPA denied implies empty sources — treat identically to expect_no_sources
     effective_no_sources = expect_no_sources or expect_opa_denied
     if effective_no_sources:
         sources_ok = result["source_count"] == 0
+    elif expect_abstention is True:
+        # G1 fix: correctness for near-miss abstention queries is judged by
+        # abstention_correct below, not by source_count. A correct abstention
+        # can legitimately produce zero sources (the min-score gate filtered
+        # everything out — the canned no-relevant-docs response) — the old
+        # `source_count > 0` requirement made every correctly-abstaining query
+        # count as "failed" here, which is exactly backwards.
+        sources_ok = True
     else:
         sources_ok = result["source_count"] > 0
 
@@ -695,22 +742,32 @@ def evaluate(
     if expect_cache_hit:
         cache_hit_ok = bool(result.get("cache_hit", False))
 
-    # Abstention correctness (heuristic, no LLM needed)
+    # Abstention correctness. retrieval_only has no answer text to run the
+    # heuristic on — the RAG service already made the abstain/answer decision
+    # via the min-score gate, so source_count==0 IS that decision (see G3
+    # RAGService.stream retrieve_only branch).
     abstention_correct_val: bool | None = None
-    try:
-        import metrics as _m
-        if expect_abstention is not None:
-            abstention_correct_val = _m.abstention_correct(result["answer"], expect_abstention)
-    except ImportError:
-        pass
+    if expect_abstention is not None:
+        if retrieval_only:
+            abstention_correct_val = (result["source_count"] == 0) == expect_abstention
+        else:
+            try:
+                import metrics as _m
+                abstention_correct_val = _m.abstention_correct(result["answer"], expect_abstention)
+            except ImportError:
+                pass
 
     passed = (
         result["error"] is None
-        and len(result["answer"]) >= min_answer_length
+        and (retrieval_only or len(result["answer"]) >= min_answer_length)
         and sources_ok
         and len(keyword_miss) == 0
         and thinking_ok
         and cache_hit_ok
+        # G1 fix: a query with a wrong abstention decision must not pass just
+        # because keywords happened to match (they can, via the echoed
+        # question text in the no-relevant-docs sentinel).
+        and abstention_correct_val is not False
     )
 
     return {
