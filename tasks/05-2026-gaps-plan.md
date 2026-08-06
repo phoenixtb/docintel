@@ -15,6 +15,7 @@ Ordered by measured-quality impact per unit of effort.
   1. Raise `samples_per_dataset` for HR (and technical) in `setup_e2e_environment` so every `expect_abstention: false` query has a covering doc — verify per-query with `relevant_docs` hits; OR relabel uncoverable queries `expect_abstention: true`.
   2. Add 3–5 near-miss abstention queries per domain (the WFH pattern: plausible topic, no covering doc).
   3. Re-run tau calibration (`calibrate_threshold.py`) on a tau=0 pass after the corpus change; update `RAG_MIN_RELEVANCE_SCORE` if the gap moves.
+  - Note: tau=0.55 was calibrated on the MLX mxfp8 reranker build. The `qwen3-reranker:0.6b:8bit` shortcut is platform-neutral (LMForge resolves MLX on Mac, GGUF on llama.cpp), but non-Mac deployments should recalibrate once — different quants can shift the score distribution.
 - **Acceptance:** every failure in a full `--metrics` run is a genuine pipeline deficiency; pass-rate becomes the release KPI.
 
 ## G2. Wire QueryExpander (query rewriting)
@@ -73,7 +74,10 @@ Audit verdict (Aug 2026): the gateway surface is already Bearer-JWT + consistent
 
 ### G7-P1 — strong recommendations
 5. Align gateway base `application.yml` with the docker profile (models, datasets, SSE timeout routes) — local vs compose currently expose different surfaces.
-6. Split public vs internal document routes: `from-path`, chunk bulk/append, data-source CRUD ride under the same `/api/v1/documents/**` glob — OPA-deny for non-service roles or move under `/internal`.
+6. Split public vs internal document routes — allowlist at the edge, defense in depth:
+   (a) replace the wholesale `/api/v1/documents/**` → `/internal/documents/**` glob rewrite with explicit gateway route definitions (method + exact path) for the public endpoints only — deny-by-default; unrouted = nonexistent publicly;
+   (b) enforce the existing service-to-service HMAC (`InternalAuthFilter`) on `from-path`, chunk bulk/append, and data-source CRUD so a mis-route still 403s;
+   (c) keep an OPA deny for those paths as the third layer (backstop, not the primary control).
 7. Naming: camelCase (Kotlin) vs snake_case (Python) forces dual client models — document as-is in the OpenAPI spec (do not churn both stacks now); revisit only if client pain is real.
 8. Pagination: document both existing styles (Spring `Page` for documents, `limit/offset` for conversations); don't introduce a third.
 9. Upload: verify gateway proxy body limit covers the 100MB document-service cap; note absence of resumable upload for mobile networks (defer implementation).
