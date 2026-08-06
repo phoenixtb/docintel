@@ -32,6 +32,15 @@ Ordered by risk-reduction value. Each item is self-contained.
 - **Also:** analytics-py handlers are `async def` but call the sync `clickhouse-connect` client — blocks the event loop. Offload via `run_in_executor`/`asyncio.to_thread` or make handlers sync (uvicorn threadpool). (Query-event inserts move to the batched stream consumer in A7; this fix still applies to feedback + read endpoints.)
 - **Acceptance:** repo grep for `analytics-service` (Kotlin path) only appears in git history; `rg requirements.txt tests/` empty; platform_admin sees global stats, tenant admin only their own; event ingestion does not block the loop under concurrent load.
 
+### A5. CostTracker — wire or remove
+- **Problem:** `services/rag-service/src/components/observability.py` CostTracker exists but is never called.
+- **Fix (preferred):** wire into the generation path — record prompt/completion tokens per query, label by tenant + model, expose as Prometheus counters (`rag_llm_tokens_total{kind=prompt|completion}`), and include token counts in the analytics event already posted to analytics-service.
+- **Acceptance:** counter increments visible in `/metrics` after a query; token fields present in ClickHouse `query_events`.
+
+### A6. REST `/ingest` debug path
+- **Problem:** `INGESTION_REST_ENABLED=false` in prod, endpoint semi-documented.
+- **Fix:** keep disabled; add one line to `docs/services/` docs stating it is a debug-only path and the stream is the production route. No code change.
+
 ### A7. Analytics ingest via Redis Streams (fire-and-forget + batching)
 - **Problem:** rag-service ships query telemetry via HTTP POST per query (`services/rag-service/src/api/main.py` `_post_query_event`); analytics-py inserts row-per-request into ClickHouse — the known anti-pattern (part explosion). Events are lost whenever analytics-service is down.
 - **Design:** reuse the existing bus — all machinery is already in `docintel_common.messaging.RedisStreamBus` (publish, consumer groups, ack, `claim_idle`), and ingestion-service already runs this exact consumer pattern (`stream_worker.py`).
@@ -42,15 +51,6 @@ Ordered by risk-reduction value. Each item is self-contained.
   5. **Ops:** Prometheus gauge for consumer lag (XINFO GROUPS lag) + counter for batch flushes; alert path via existing Prometheus.
 - **Benefits:** query path sheds the HTTP call; events survive analytics downtime (stream retention); ClickHouse gets proper batches.
 - **Acceptance:** harness run with analytics-service stopped mid-run loses zero events after it restarts (consumer catches up); ClickHouse receives batched inserts (verify part count stays flat under load); feedback endpoint unchanged.
-
-### A5. CostTracker — wire or remove
-- **Problem:** `services/rag-service/src/components/observability.py` CostTracker exists but is never called.
-- **Fix (preferred):** wire into the generation path — record prompt/completion tokens per query, label by tenant + model, expose as Prometheus counters (`rag_llm_tokens_total{kind=prompt|completion}`), and include token counts in the analytics event already posted to analytics-service.
-- **Acceptance:** counter increments visible in `/metrics` after a query; token fields present in ClickHouse `query_events`.
-
-### A6. REST `/ingest` debug path
-- **Problem:** `INGESTION_REST_ENABLED=false` in prod, endpoint semi-documented.
-- **Fix:** keep disabled; add one line to `docs/services/` docs stating it is a debug-only path and the stream is the production route. No code change.
 
 ---
 
