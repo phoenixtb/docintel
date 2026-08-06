@@ -30,6 +30,11 @@
     routedDomain?: string;
     rerankerDegraded?: boolean;
     metadata?: { type: string; compressed_turns: number; summary_upto_count: number };
+    // B3 — "Why this answer" panel data, carried on MetadataEvent(s) from the SSE stream.
+    retrievalMode?: string;
+    rerankCandidatesIn?: number;
+    rerankCandidatesOut?: number;
+    cacheHit?: boolean;
   }
 
   interface ContextState {
@@ -56,6 +61,10 @@
   let currentQueryId = $state('');
   let currentRoutedDomain = $state<string | null>(null);
   let currentRerankerDegraded = $state(false);
+  let currentRetrievalMode = $state<string | null>(null);
+  let currentRerankCandidatesIn = $state<number | null>(null);
+  let currentRerankCandidatesOut = $state<number | null>(null);
+  let currentCacheHit = $state(false);
   let contextState = $state<ContextState | null>(null);
   let streamAbort: AbortController | null = null;
 
@@ -216,6 +225,10 @@
     currentSources = [];
     currentQueryId = '';
     currentRerankerDegraded = false;
+    currentRetrievalMode = null;
+    currentRerankCandidatesIn = null;
+    currentRerankCandidatesOut = null;
+    currentCacheHit = false;
     
     streamAbort = new AbortController();
     try {
@@ -265,6 +278,10 @@
             if (data.metadata?.query_id) currentQueryId = data.metadata.query_id;
             if (data.metadata?.context_state) contextState = data.metadata.context_state;
             if (data.metadata?.reranker_degraded) currentRerankerDegraded = true;
+            if (data.metadata?.cache_hit) currentCacheHit = true;
+            if (data.metadata?.retrieval_mode) currentRetrievalMode = data.metadata.retrieval_mode;
+            if (data.metadata?.rerank_candidates_in != null) currentRerankCandidatesIn = data.metadata.rerank_candidates_in;
+            if (data.metadata?.rerank_candidates_out != null) currentRerankCandidatesOut = data.metadata.rerank_candidates_out;
             if (data.routing?.domain) currentRoutedDomain = data.routing.domain;
             if (data.queued) { isQueued = true; }
             if (data.thinking_token) { isQueued = false; currentThinking += data.thinking_token; }
@@ -289,6 +306,10 @@
         queryId: currentQueryId || undefined,
         routedDomain: currentRoutedDomain || undefined,
         rerankerDegraded: currentRerankerDegraded || undefined,
+        retrievalMode: currentRetrievalMode || undefined,
+        rerankCandidatesIn: currentRerankCandidatesIn ?? undefined,
+        rerankCandidatesOut: currentRerankCandidatesOut ?? undefined,
+        cacheHit: currentCacheHit,
       }];
       
       const conv = conversations.find(c => c.id === activeConversationId);
@@ -319,6 +340,10 @@
       currentQueryId = '';
       currentRoutedDomain = null;
       currentRerankerDegraded = false;
+      currentRetrievalMode = null;
+      currentRerankCandidatesIn = null;
+      currentRerankCandidatesOut = null;
+      currentCacheHit = false;
     }
   }
   

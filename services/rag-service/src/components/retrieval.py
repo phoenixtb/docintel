@@ -119,7 +119,7 @@ class SecureRetriever:
         filt = models.Filter(must=must)
         return filt
 
-    @component.output_types(documents=list[Document])
+    @component.output_types(documents=list[Document], retrieval_mode=str)
     def run(
         self,
         query_embedding: list[float],
@@ -134,7 +134,8 @@ class SecureRetriever:
         )
         acl_filter = self._build_acl_filter(user_roles, user_id, domain_filter)
 
-        if self._use_hybrid and query_sparse_embedding is not None:
+        use_hybrid = self._use_hybrid and query_sparse_embedding is not None
+        if use_hybrid:
             result = hybrid_retriever.run(
                 query_embedding=query_embedding,
                 query_sparse_embedding=query_sparse_embedding,
@@ -146,7 +147,10 @@ class SecureRetriever:
                 filters=acl_filter,
             )
 
-        return {"documents": result["documents"]}
+        return {
+            "documents": result["documents"],
+            "retrieval_mode": "hybrid" if use_hybrid else "dense",
+        }
 
 
 __all__ = ["SecureRetriever"]

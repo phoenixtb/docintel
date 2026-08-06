@@ -66,6 +66,7 @@ from docintel_common.security import Classification, UserContext
 
 from ..components.routing import DomainFilterBuilder
 from ..config import Settings, get_settings
+from ..tracing import LangfuseTracer
 
 logger = logging.getLogger(__name__)
 
@@ -462,6 +463,7 @@ class RAGService:
         model_profile_resolver: ModelProfileResolver | None = None,
         conversation_id: str | None = None,
         summarizer=None,
+        tracer: LangfuseTracer | None = None,
     ) -> AsyncIterator[PipelineEvent]:
         """
         Unified RAG streaming generator — single source of truth for both paths.
@@ -476,6 +478,31 @@ class RAGService:
 
         if not self._ready:
             await loop.run_in_executor(None, self.warm_up)
+
+        # Defaults for exit paths that skip retrieval/rerank entirely
+        # (cache hit, embedding/retrieval error) — read by main.py via
+        # getattr(rag_service, "_last_*") once the generator completes.
+        self._last_retrieval_mode = ""
+        self._last_rerank_candidates_in = 0
+        self._last_rerank_candidates_out = 0
+        self._last_reranker_degraded = False
+
+        # B4 — create a Langfuse trace with an explicit id equal to request_id
+        # (== query_id) so ClickHouse can store a single id that both
+        # identifies the query and deep-links to its trace.
+        trace = None
+        if tracer is not None and tracer.enabled:
+            trace = tracer.start_trace(
+                name="rag_query",
+                trace_id=request_id,
+                inputs={"question": question},
+                user_id=user_id,
+                session_id=conversation_id,
+                tags=[tenant_id],
+            )
+            self._last_trace_id = request_id
+        else:
+            self._last_trace_id = ""
 
         # ── 1. Initial metadata ───────────────────────────────────────────────
         initial_context = context_state if (context_state and context_state.get("has_summary")) else None
@@ -556,6 +583,12 @@ class RAGService:
                 ),
             )
             retrieved_docs = retrieval_result["documents"]
+            self._last_retrieval_mode = retrieval_result.get("retrieval_mode", "dense")
+            yield MetadataEvent(
+                query_id=request_id,
+                cache_hit=False,
+                retrieval_mode=self._last_retrieval_mode,
+            )
         except Exception as e:
             logger.error("Retrieval failed: %s", e)
             yield ErrorEvent(message=f"Retrieval failed: {e}")
@@ -582,6 +615,7 @@ class RAGService:
 
         # ── 7. Rerank ─────────────────────────────────────────────────────────
         if use_reranking and documents:
+            candidates_in = len(documents)
             try:
                 rerank_result = await loop.run_in_executor(
                     None,
@@ -591,19 +625,20 @@ class RAGService:
                     ),
                 )
                 documents = rerank_result["documents"]
-                if rerank_result.get("reranker_degraded"):
-                    yield MetadataEvent(
-                        query_id=request_id,
-                        cache_hit=False,
-                        reranker_degraded=True,
-                    )
+                self._last_reranker_degraded = bool(rerank_result.get("reranker_degraded"))
             except Exception as e:
                 logger.warning("Reranker failed, falling back to retrieval order: %s", e)
-                yield MetadataEvent(
-                    query_id=request_id,
-                    cache_hit=False,
-                    reranker_degraded=True,
-                )
+                self._last_reranker_degraded = True
+
+            self._last_rerank_candidates_in = candidates_in
+            self._last_rerank_candidates_out = len(documents)
+            yield MetadataEvent(
+                query_id=request_id,
+                cache_hit=False,
+                reranker_degraded=self._last_reranker_degraded,
+                rerank_candidates_in=self._last_rerank_candidates_in,
+                rerank_candidates_out=self._last_rerank_candidates_out,
+            )
 
         # ── 8. Min-score / top-k filter ───────────────────────────────────────
         if effective_min_score > 0.0:
@@ -834,6 +869,10 @@ class RAGService:
         # ── 13. Build sources ─────────────────────────────────────────────────
         sources = _build_sources(documents)
 
+        if trace is not None:
+            trace.update(output={"answer": answer, "source_count": len(sources)})
+            trace.flush()
+
         # ── 14. Cache write (fire-and-forget) ─────────────────────────────────
         if use_cache and self._cache_writer and answer:
             async def _write_cache():
@@ -900,6 +939,7 @@ class RAGService:
         model_profile_resolver: ModelProfileResolver | None = None,
         conversation_id: str | None = None,
         summarizer=None,
+        tracer: LangfuseTracer | None = None,
     ) -> dict:
         """
         Drain stream() into the legacy dict shape consumed by /query.
@@ -910,6 +950,10 @@ class RAGService:
         sources: list[dict] = []
         cache_hit = False
         detected_domain: str | None = None
+        retrieval_mode: str | None = None
+        rerank_candidates_in: int | None = None
+        rerank_candidates_out: int | None = None
+        reranker_degraded: bool | None = None
 
         async for event in self.stream(
             question=question,
@@ -932,10 +976,19 @@ class RAGService:
             model_profile_resolver=model_profile_resolver,
             conversation_id=conversation_id,
             summarizer=summarizer,
+            tracer=tracer,
         ):
             match event:
-                case MetadataEvent(cache_hit=ch):
+                case MetadataEvent(cache_hit=ch, retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout, reranker_degraded=rd):
                     cache_hit = ch
+                    if rm is not None:
+                        retrieval_mode = rm
+                    if cin is not None:
+                        rerank_candidates_in = cin
+                    if cout is not None:
+                        rerank_candidates_out = cout
+                    if rd is not None:
+                        reranker_degraded = rd
                 case RoutingEvent(domain=d):
                     detected_domain = d
                 case ThinkingTokenEvent(text=t):
@@ -962,4 +1015,9 @@ class RAGService:
             "thinking_truncated": getattr(self, "_last_thinking_truncated", False),
             "tokens_used": getattr(self, "_last_tokens_used", {"prompt": 0, "completion": 0}),
             "cost_usd": getattr(self, "_last_cost_usd", 0.0),
+            "retrieval_mode": retrieval_mode or "",
+            "rerank_candidates_in": rerank_candidates_in or 0,
+            "rerank_candidates_out": rerank_candidates_out or 0,
+            "reranker_degraded": bool(reranker_degraded),
+            "trace_id": getattr(self, "_last_trace_id", ""),
         }

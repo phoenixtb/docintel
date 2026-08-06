@@ -41,6 +41,12 @@ class MetadataEvent:
     cache_hit: bool
     context_state: Optional[dict] = None
     reranker_degraded: Optional[bool] = None
+    # B3 — per-answer transparency ("Why this answer" panel). Emitted
+    # incrementally as each pipeline stage completes; the UI merges fields
+    # from successive MetadataEvents onto the in-progress message.
+    retrieval_mode: Optional[str] = None
+    rerank_candidates_in: Optional[int] = None
+    rerank_candidates_out: Optional[int] = None
 
 
 @dataclass(frozen=True)

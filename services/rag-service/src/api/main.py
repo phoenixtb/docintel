@@ -67,6 +67,12 @@ async def _publish_query_event(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     cost_usd: float = 0.0,
+    query_text: str = "",
+    retrieval_mode: str = "",
+    rerank_candidates_in: int = 0,
+    rerank_candidates_out: int = 0,
+    reranker_degraded: bool = False,
+    trace_id: str = "",
 ) -> None:
     """Fire-and-forget: publish query telemetry to the analytics.query stream."""
     try:
@@ -84,6 +90,14 @@ async def _publish_query_event(
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "cost_usd": cost_usd,
+                # B1/B4 — query text (top-queries / corpus-gap analytics) and
+                # retrieval/rerank/trace metadata for the Insights quality page.
+                "query_text": query_text,
+                "retrieval_mode": retrieval_mode,
+                "rerank_candidates_in": rerank_candidates_in,
+                "rerank_candidates_out": rerank_candidates_out,
+                "reranker_degraded": reranker_degraded,
+                "trace_id": trace_id,
             },
             maxlen=_ANALYTICS_STREAM_MAXLEN,
         )
@@ -687,14 +701,23 @@ async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep):
 def _serialize_sse(event: PipelineEvent, tenant_id: str = "") -> str:
     """Convert a typed PipelineEvent into an SSE data line, preserving wire format."""
     match event:
-        case MetadataEvent(query_id=qid, cache_hit=ch, context_state=cs, reranker_degraded=rd):
+        case MetadataEvent(
+            query_id=qid, cache_hit=ch, context_state=cs, reranker_degraded=rd,
+            retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout,
+        ):
             payload: dict = {"metadata": {"query_id": qid, "cache_hit": ch}}
             if cs:
                 payload["metadata"]["context_state"] = cs
-            if rd:
-                payload["metadata"]["reranker_degraded"] = True
-                if _METRICS_ENABLED:
+            if rd is not None:
+                payload["metadata"]["reranker_degraded"] = rd
+                if rd and _METRICS_ENABLED:
                     RAG_RERANKER_DEGRADED.labels(tenant=tenant_id or "unknown").inc()
+            if rm is not None:
+                payload["metadata"]["retrieval_mode"] = rm
+            if cin is not None:
+                payload["metadata"]["rerank_candidates_in"] = cin
+            if cout is not None:
+                payload["metadata"]["rerank_candidates_out"] = cout
         case RoutingEvent(domain=d, explicit=e):
             payload = {"routing": {"domain": d, "explicit": e}}
         case QueuedEvent(message=m):
@@ -738,6 +761,7 @@ async def query_documents(
     settings: SettingsDep,
     history: ConversationHistoryDep,
     http_request: Request,
+    tracer: TracerDep,
 ):
     """
     RAG query with tenant isolation and RBAC.
@@ -773,6 +797,7 @@ async def query_documents(
             model_profile_resolver=http_request.app.state.model_profile_resolver,
             conversation_id=request.conversation_id,
             summarizer=http_request.app.state.summarizer,
+            tracer=tracer,
         )
         model_used = result.get("model_used", "unknown")
         tokens_used = result.get("tokens_used") or {}
@@ -802,6 +827,12 @@ async def query_documents(
             prompt_tokens=tokens_used.get("prompt", 0),
             completion_tokens=tokens_used.get("completion", 0),
             cost_usd=cost_usd,
+            query_text=request.question,
+            retrieval_mode=result.get("retrieval_mode", ""),
+            rerank_candidates_in=result.get("rerank_candidates_in", 0),
+            rerank_candidates_out=result.get("rerank_candidates_out", 0),
+            reranker_degraded=result.get("reranker_degraded", False),
+            trace_id=result.get("trace_id", ""),
         ))
         return QueryResponse(
             answer=result["answer"],
@@ -825,6 +856,7 @@ async def query_documents_stream(
     settings: SettingsDep,
     history: ConversationHistoryDep,
     http_request: Request,
+    tracer: TracerDep,
 ):
     """Thin streaming handler — delegates all orchestration to RAGService.stream()."""
     llm_semaphore: asyncio.Semaphore = http_request.app.state.llm_semaphore
@@ -842,6 +874,10 @@ async def query_documents_stream(
     async def sse_iter():
         cache_hit = False
         source_count = 0
+        retrieval_mode = ""
+        rerank_candidates_in = 0
+        rerank_candidates_out = 0
+        reranker_degraded = False
         try:
             async for event in rag_service.stream(
                 question=request.question,
@@ -864,9 +900,18 @@ async def query_documents_stream(
                 model_profile_resolver=http_request.app.state.model_profile_resolver,
                 conversation_id=request.conversation_id,
                 summarizer=http_request.app.state.summarizer,
+                tracer=tracer,
             ):
                 if isinstance(event, MetadataEvent):
                     cache_hit = event.cache_hit
+                    if event.retrieval_mode is not None:
+                        retrieval_mode = event.retrieval_mode
+                    if event.rerank_candidates_in is not None:
+                        rerank_candidates_in = event.rerank_candidates_in
+                    if event.rerank_candidates_out is not None:
+                        rerank_candidates_out = event.rerank_candidates_out
+                    if event.reranker_degraded is not None:
+                        reranker_degraded = event.reranker_degraded
                 elif isinstance(event, SourcesEvent):
                     source_count = len(event.sources)
                 yield _serialize_sse(event, tenant_id=user_ctx.tenant_id)
@@ -903,6 +948,12 @@ async def query_documents_stream(
             prompt_tokens=tokens_used.get("prompt", 0),
             completion_tokens=tokens_used.get("completion", 0),
             cost_usd=cost_usd,
+            query_text=request.question,
+            retrieval_mode=retrieval_mode,
+            rerank_candidates_in=rerank_candidates_in,
+            rerank_candidates_out=rerank_candidates_out,
+            reranker_degraded=reranker_degraded,
+            trace_id=getattr(rag_service, "_last_trace_id", ""),
         ))
 
     return StreamingResponse(

@@ -490,3 +490,113 @@ async def test_query_result_includes_tokens_used_and_cost():
 
     assert result["tokens_used"] == {"prompt": 10, "completion": 5}
     assert isinstance(result["cost_usd"], float)
+
+
+# ---------------------------------------------------------------------------
+# B3/B4 — retrieval mode, rerank candidate counts, reranker_degraded, trace_id
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_emits_retrieval_mode_metadata():
+    """Retriever reports retrieval_mode; stream() must surface it in a MetadataEvent."""
+    svc = _make_service()
+    svc._retriever.run.return_value = {"documents": [_make_doc()], "retrieval_mode": "hybrid"}
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    modes = [e.retrieval_mode for e in events if isinstance(e, MetadataEvent) and e.retrieval_mode is not None]
+    assert modes == ["hybrid"]
+    assert svc._last_retrieval_mode == "hybrid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_emits_rerank_candidate_counts():
+    """Reranker receives N docs and returns M — stream() must report both counts."""
+    svc = _make_service()
+    svc._retriever.run.return_value = {"documents": [_make_doc(), _make_doc(), _make_doc()]}
+    svc._opa_validator.run.return_value = {"documents": [_make_doc(), _make_doc(), _make_doc()]}
+    svc._reranker.run.return_value = {"documents": [_make_doc()], "reranker_degraded": False}
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    meta_with_counts = [
+        e for e in events
+        if isinstance(e, MetadataEvent) and e.rerank_candidates_in is not None
+    ]
+    assert len(meta_with_counts) == 1
+    assert meta_with_counts[0].rerank_candidates_in == 3
+    assert meta_with_counts[0].rerank_candidates_out == 1
+    assert meta_with_counts[0].reranker_degraded is False
+    assert svc._last_rerank_candidates_in == 3
+    assert svc._last_rerank_candidates_out == 1
+    assert svc._last_reranker_degraded is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_reranker_failure_marks_degraded_with_counts():
+    """Reranker exception → degraded=True, candidates_out falls back to candidates_in."""
+    svc = _make_service()
+    svc._retriever.run.return_value = {"documents": [_make_doc(), _make_doc()]}
+    svc._opa_validator.run.return_value = {"documents": [_make_doc(), _make_doc()]}
+    svc._reranker.run.side_effect = RuntimeError("reranker unreachable")
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    degraded_events = [
+        e for e in events
+        if isinstance(e, MetadataEvent) and e.reranker_degraded is True
+    ]
+    assert degraded_events
+    assert svc._last_reranker_degraded is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_no_trace_id_when_tracer_absent():
+    """No tracer passed in → _last_trace_id is empty (no Langfuse dependency)."""
+    svc = _make_service()
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc)))
+    assert svc._last_trace_id == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_creates_trace_with_request_id_when_tracer_enabled():
+    """B4 — when the tracer is enabled, the Langfuse trace id equals request_id
+    so ClickHouse's trace_id column can deep-link straight to it."""
+    svc = _make_service()
+    mock_tracer = MagicMock()
+    mock_tracer.enabled = True
+    mock_trace = MagicMock()
+    mock_tracer.start_trace.return_value = mock_trace
+
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc, tracer=mock_tracer)))
+
+    mock_tracer.start_trace.assert_called_once()
+    assert mock_tracer.start_trace.call_args.kwargs["trace_id"] == "req-001"
+    assert svc._last_trace_id == "req-001"
+    mock_trace.update.assert_called_once()
+    mock_trace.flush.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_query_result_includes_retrieval_and_rerank_fields():
+    """query() dict aggregates the new B3/B4 fields for the non-streaming /query path."""
+    svc = _make_service()
+    svc._retriever.run.return_value = {"documents": [_make_doc(), _make_doc()], "retrieval_mode": "dense"}
+    svc._opa_validator.run.return_value = {"documents": [_make_doc(), _make_doc()]}
+    svc._reranker.run.return_value = {"documents": [_make_doc()], "reranker_degraded": False}
+    with _patch_llm(svc, ["answer"]):
+        result = await svc.query(**_make_stream_kwargs(svc))
+
+    assert result["retrieval_mode"] == "dense"
+    assert result["rerank_candidates_in"] == 2
+    assert result["rerank_candidates_out"] == 1
+    assert result["reranker_degraded"] is False
+    assert result["trace_id"] == ""
