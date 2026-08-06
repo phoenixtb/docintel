@@ -1066,6 +1066,8 @@ def main() -> int:
                 suite_result["queries"].append({
                     "question": question,
                     "expect_keywords": expect_kw,
+                    "expect_abstention": expect_abstention,
+                    "relevant_docs": relevant_docs,
                     "result": result,
                     "eval": ev,
                     "quality_metrics": quality_metrics,

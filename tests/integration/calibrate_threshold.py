@@ -59,19 +59,13 @@ def main() -> None:
             qm = q.get("quality_metrics", {}) or {}
             ret = qm.get("retrieval", {}) if qm else {}
 
-            # Determine expect_abstention from eval (abstention_correct is set
-            # when expect_abstention was specified in yaml)
-            abstention_correct = ev.get("abstention_correct")
-            # We can infer expect_abstention from quality_metrics context but
-            # it's safest to look at whether sources==0 AND answer contains sentinel
-            # OR we just look at expect_keywords length + source_count pattern.
-            # Fallback: use abstention_correct field directly.
-
             query_rows.append({
                 "question": q.get("question", "")[:60],
                 "top_score": top_score,
                 "source_count": result.get("source_count", 0),
-                "abstention_correct": abstention_correct,
+                # Ground-truth label from queries.yaml (persisted into the report).
+                "expect_abstention": q.get("expect_abstention"),
+                "abstention_correct": ev.get("abstention_correct"),
                 "hit_at_k": ret.get("hit_at_k"),
                 "mrr": ret.get("mrr"),
             })
@@ -81,21 +75,29 @@ def main() -> None:
         sys.exit(0)
 
     # Print score distribution table
-    print(f"\n{'─'*80}")
-    print(f"{'Question':<62} {'TopScore':>9} {'Sources':>7} {'AbsOK':>6}")
-    print(f"{'─'*80}")
+    print(f"\n{'─'*88}")
+    print(f"{'Question':<60} {'TopScore':>9} {'Src':>4} {'Expect':>8} {'Hit':>4}")
+    print(f"{'─'*88}")
     for r in query_rows:
         ts = _fmt(r["top_score"]) if r["top_score"] is not None else "    N/A"
-        abs_ok = "✓" if r["abstention_correct"] else ("✗" if r["abstention_correct"] is False else "?")
-        print(f"{r['question']:<62} {ts:>9} {r['source_count']:>7} {abs_ok:>6}")
-    print(f"{'─'*80}\n")
+        exp = "ABSTAIN" if r["expect_abstention"] is True else (
+            "ANSWER" if r["expect_abstention"] is False else "?")
+        hit = "✓" if r["hit_at_k"] is True else ("✗" if r["hit_at_k"] is False else "-")
+        print(f"{r['question']:<60} {ts:>9} {r['source_count']:>4} {exp:>8} {hit:>4}")
+    print(f"{'─'*88}\n")
 
-    # Split into groups where abstention_correct is known
+    # Group by GROUND-TRUTH expect_abstention (from queries.yaml), not by whether
+    # the model happened to abstain. abstention queries should score low; answerable
+    # queries score high. For the answerable group we only trust queries with a
+    # confirmed retrieval hit (hit_at_k True) when relevant_docs were specified —
+    # this filters out corpus-gap queries (expect ANSWER but no matching doc exists),
+    # whose low scores would otherwise poison the separation boundary.
     abs_scores = [r["top_score"] for r in query_rows
-                  if r["abstention_correct"] is True and r["top_score"] is not None]
+                  if r["expect_abstention"] is True and r["top_score"] is not None]
     ans_scores = [r["top_score"] for r in query_rows
-                  if r["abstention_correct"] is False and r["top_score"] is not None
-                  and r["source_count"] > 0]
+                  if r["expect_abstention"] is False and r["top_score"] is not None
+                  and r["source_count"] > 0
+                  and r["hit_at_k"] is not False]  # exclude confirmed retrieval misses
 
     print(f"Abstention queries — top-source scores (should be low for good calibration):")
     if abs_scores:

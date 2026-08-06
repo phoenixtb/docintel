@@ -23,7 +23,7 @@ config:
 
   # Reranker health check (checked in pre-flight when use_reranking is true).
   reranker_url: "http://localhost:11430/v1"
-  reranker_model: "jina-reranker-v2:multilingual"
+  reranker_model: "qwen3-reranker:0.6b:8bit"
 
   # LLM judge for --metrics mode (uses LMForge qwen3.5 by default).
   judge_url: "http://localhost:11430/v1"

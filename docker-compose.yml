@@ -126,22 +126,23 @@ services:
       - LLM_THINKING_TEMPERATURE=${LLM_THINKING_TEMPERATURE:-0.6}
       - LLM_THINKING_TOP_P=${LLM_THINKING_TOP_P:-0.95}
       - LLM_THINKING_MAX_TOKENS=${LLM_THINKING_MAX_TOKENS:-8192}
-      # Reranker — LMForge /v1/rerank (replaces Infinity sidecar)
-      # Disabled until an MLX-format reranker is added to the LMForge catalog.
-      # Re-enable by setting USE_RERANKING=true once a compatible model is pulled.
-      - RERANKER_MODEL=${LLM_RERANK_MODEL:-jina-reranker-v2:multilingual}
+      # Reranker — LMForge /v1/rerank (Qwen3-Reranker cross-encoder, MLX)
+      # 0.6b:8bit = fast on-device default; qwen3-reranker:4b:8bit for higher quality.
+      - RERANKER_MODEL=${LLM_RERANK_MODEL:-qwen3-reranker:0.6b:8bit}
       - RERANKER_URL=${LLM_RERANK_URL:-http://host.docker.internal:11430/v1}
-      - USE_RERANKING=${USE_RERANKING:-false}
+      - USE_RERANKING=${USE_RERANKING:-true}
       # RAG Pipeline Configuration
       - RAG_RETRIEVER_TOP_K=50
       - RAG_RERANKER_TOP_K=10
       - RAG_DEFAULT_TOP_K=5
-      # Abstention gate: minimum retrieval/rerank score for a chunk to reach the LLM.
-      # 0.0 = disabled (all chunks pass, LLM must self-abstain — fragile).
-      # With reranker enabled: calibrate from score distribution via
-      #   python tests/integration/calibrate_threshold.py reports/baseline.json
-      # Typical calibrated value with jina-reranker: 0.25–0.40.
-      - RAG_MIN_RELEVANCE_SCORE=${RAG_MIN_RELEVANCE_SCORE:-0.0}
+      # Abstention gate: minimum rerank score for a chunk to reach the LLM.
+      # Qwen3-Reranker emits sigmoid scores (0.5 = neutral). Calibrated default
+      # 0.55 sits in the empirical gap between noise/off-topic chunks (~0.50–0.51)
+      # and genuinely relevant chunks (~0.62–0.73) — gates false-confidence
+      # matches (e.g. WFH→work-life-balance) while keeping real answers.
+      # Recalibrate from score distribution via
+      #   python tests/integration/calibrate_threshold.py reports/<report>.json
+      - RAG_MIN_RELEVANCE_SCORE=${RAG_MIN_RELEVANCE_SCORE:-0.55}
       - RAG_MIN_SCORE_FALLBACK_TOPK=${RAG_MIN_SCORE_FALLBACK_TOPK:-0}
       # Domain router — rag-service reads RAG_DOMAIN_ROUTER_MODEL (field: rag_domain_router_model)
       - RAG_USE_DOMAIN_ROUTING=${RAG_USE_DOMAIN_ROUTING:-true}
@@ -336,8 +337,8 @@ services:
       - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b}
       - LLM_VLM_MODEL=${LLM_VLM_MODEL:-qwen2.5-vl:3b:4bit}
       - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-qwen3-embed:0.6b:8bit}
-      - LLM_RERANK_MODEL=${LLM_RERANK_MODEL:-jina-reranker-v2:multilingual}
-      - USE_RERANKING=${USE_RERANKING:-false}
+      - LLM_RERANK_MODEL=${LLM_RERANK_MODEL:-qwen3-reranker:0.6b:8bit}
+      - USE_RERANKING=${USE_RERANKING:-true}
     depends_on:
       postgres:
         condition: service_healthy

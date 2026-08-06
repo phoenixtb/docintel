@@ -31,7 +31,7 @@ class LmforgeReranker:
     def __init__(
         self,
         url: str = "http://host.docker.internal:11430/v1",
-        model: str = "jina-reranker-v2:multilingual",
+        model: str = "qwen3-reranker:0.6b:8bit",
         top_k: int = 10,
         timeout: float = 30.0,
     ):
