@@ -105,8 +105,8 @@ services:
       #   Ollama   (any platform, default): http://host.docker.internal:11434/v1
       #   vLLM     (Linux/NVIDIA): http://host.docker.internal:8000/v1
       #   LM Studio (Windows/macOS): http://host.docker.internal:1234/v1
-      - LLM_CHAT_URL=${LLM_CHAT_URL:-http://host.docker.internal:11434/v1}
-      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b}
+      - LLM_CHAT_URL=${LLM_CHAT_URL:-http://host.docker.internal:11430/v1}
+      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b:6bit}
       - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-phi3:mini}
       - LLM_API_KEY=${LLM_API_KEY:-none}
       - LLM_EXPANSION_MODEL=${LLM_EXPANSION_MODEL:-qwen3:1.7b}
@@ -247,7 +247,7 @@ services:
       - LLM_VLM_MODEL=${LLM_VLM_MODEL:-qwen2.5-vl:3b:4bit}
       - VLM_MAX_CONCURRENCY=${VLM_MAX_CONCURRENCY:-2}
       - VLM_RENDER_DPI=${VLM_RENDER_DPI:-150}
-      - INGESTION_USE_PAGE_ROUTING=${INGESTION_USE_PAGE_ROUTING:-false}
+      - INGESTION_USE_PAGE_ROUTING=${INGESTION_USE_PAGE_ROUTING:-true}
       - HAYSTACK_TELEMETRY_ENABLED=false
       # DOMAIN_CLASSIFIER_MODEL is consumed by docintel-common inside the container image
       - INTERNAL_GATEWAY_SECRET=${INTERNAL_GATEWAY_SECRET:-}
@@ -334,7 +334,7 @@ services:
       # Active model ids — surfaced by GET /internal/active-models for the UI's
       # "Active Models" panel. Source of truth is the deployment env (these
       # mirror the values passed to rag-service / ingestion-service above).
-      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b}
+      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b:6bit}
       - LLM_VLM_MODEL=${LLM_VLM_MODEL:-qwen2.5-vl:3b:4bit}
       - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-qwen3-embed:0.6b:8bit}
       - LLM_RERANK_MODEL=${LLM_RERANK_MODEL:-qwen3-reranker:0.6b:8bit}

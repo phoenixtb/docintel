@@ -48,11 +48,11 @@ class Settings(BaseSettings):
     llm_api_key: str = "none"
 
     # LLM — chat generation and streaming
-    llm_model: str = "qwen3.5:4b"
+    llm_model: str = "qwen3.5:4b:6bit"
     llm_fallback_model: str = "phi3:mini"
 
     # Embeddings — dense vectors (1024-dim for qwen3-embed). Must match qdrant_embedding_dim.
-    llm_embed_model: str = "qwen3-embed:0.6b:4bit"
+    llm_embed_model: str = "qwen3-embed:0.6b:8bit"
     llm_embed_dim: int = 1024
 
     # LLM generation sampling parameters — global env-level fallbacks.
@@ -103,7 +103,10 @@ class Settings(BaseSettings):
     rag_retriever_top_k: int = 50
     rag_reranker_top_k: int = 10
     rag_default_top_k: int = 5
-    rag_min_relevance_score: float = 0.0
+    # Abstention gate — calibrated for qwen3-reranker sigmoid scores (0.5 = neutral):
+    # noise/off-topic chunks score ~0.50-0.51, relevant chunks >=0.62. Recalibrate
+    # via tests/integration/calibrate_threshold.py when the reranker model changes.
+    rag_min_relevance_score: float = 0.55
     # When no doc passes rag_min_relevance_score, how many top docs to return anyway.
     # 0 = strict (return empty → NO_RELEVANT_DOCUMENTS_RESPONSE).
     # Set to 1 to always return at least one result regardless of score.
@@ -127,8 +130,8 @@ class Settings(BaseSettings):
     # ── Semantic caching ──────────────────────────────────────────────────────
     use_cache: bool = True
 
-    # ── Domain routing (optional, disabled by default) ────────────────────────
-    rag_use_domain_routing: bool = False
+    # ── Domain routing ────────────────────────────────────────────────────────
+    rag_use_domain_routing: bool = True
     rag_domain_router_model: str = "MoritzLaurer/deberta-v3-base-zeroshot-v1.1-all-33"
     rag_domain_routing_confidence: float = 0.6
 

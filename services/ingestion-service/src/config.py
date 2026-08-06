@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     docling_do_ocr: bool = Field(default=False, alias="DOCLING_DO_OCR")
 
     # Feature flag: enable per-page router (Phase 2/3). Set to True after smoke tests pass.
-    ingestion_use_page_routing: bool = Field(default=False, alias="INGESTION_USE_PAGE_ROUTING")
+    ingestion_use_page_routing: bool = Field(default=True, alias="INGESTION_USE_PAGE_ROUTING")
     docling_do_table_structure: bool = Field(default=True, alias="DOCLING_DO_TABLE_STRUCTURE")
 
     # --- Ingestion pipeline ---
