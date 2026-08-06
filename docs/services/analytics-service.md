@@ -4,8 +4,6 @@
 **Port:** `8001`  
 **Source:** `services/analytics-service-py/`
 
-> Note: There is also a stub Kotlin analytics service at `services/analytics-service/` (Spring Boot + ClickHouse). The active deployed service is the Python implementation (`analytics-service-py`).
-
 ---
 
 ## Responsibilities

@@ -13,6 +13,7 @@ Endpoints:
   GET  /health
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -66,9 +67,14 @@ def _settings() -> Settings:
 # Events
 # =============================================================================
 
-@app.post("/events/query", status_code=204)
+@app.post("/events/query", status_code=202)
 async def ingest_query_event(event: QueryEvent):
-    """Called by rag-service (fire-and-forget) after each query."""
+    """Called by rag-service (fire-and-forget) after each query.
+
+    202 Accepted: this is fire-and-forget telemetry, not a durable write
+    acknowledgement. (A7 replaces this direct insert with a Redis Streams
+    producer/consumer — this handler stays as the pre-A7 direct-insert path.)
+    """
     settings = _settings()
     db = settings.clickhouse_database
     try:
@@ -92,12 +98,13 @@ async def ingest_query_event(event: QueryEvent):
         raise HTTPException(status_code=500, detail="Event ingestion failed")
 
 
-@app.post("/events/feedback", status_code=204)
+@app.post("/events/feedback", status_code=202)
 async def ingest_feedback_event(event: FeedbackEvent):
     """Called by frontend on like/dislike."""
     settings = _settings()
     db = settings.clickhouse_database
-    try:
+
+    def _insert():
         client = get_client(settings)
         client.insert(
             f"{db}.feedback_events",
@@ -107,6 +114,9 @@ async def ingest_feedback_event(event: FeedbackEvent):
             ]],
             column_names=["query_id", "tenant_id", "user_id", "liked", "comment"],
         )
+
+    try:
+        await asyncio.to_thread(_insert)
     except Exception as e:
         logger.warning("Failed to insert feedback_event: %s", e)
         raise HTTPException(status_code=500, detail="Event ingestion failed")
@@ -116,17 +126,27 @@ async def ingest_feedback_event(event: FeedbackEvent):
 # Analytics
 # =============================================================================
 
-def _resolve_tenant(request: Request, query_tenant_id: str | None) -> str | None:
+def _resolve_tenant(request: Request, _query_tenant_id: str | None) -> str | None:
     """
-    Resolve tenant_id from the trusted X-Tenant-Id header (set by the gateway).
-    Falls back to the query parameter only if the header is absent (e.g. direct
-    internal calls from rag-service / admin-service that set tenant_id in the body).
-    Never trusts raw query strings from untrusted clients.
+    Resolve the effective tenant filter for analytics reads.
+
+    Role-aware (ported from the Kotlin analytics-service): `platform_admin`
+    (from the gateway-injected X-User-Role header) sees global aggregates
+    (no tenant filter). Every other role is forced to their own tenant from
+    the trusted X-Tenant-Id header. The tenant_id query parameter is never
+    trusted for scoping — a client could otherwise pass an arbitrary
+    tenant_id to view another tenant's stats — so it is intentionally
+    unused; a non-admin caller with no tenant header gets an empty
+    (non-matching) scope rather than an attacker-controlled one.
     """
+    role = request.headers.get("X-User-Role", "tenant_user")
+    if role == "platform_admin":
+        return None
+
     header_tenant = request.headers.get("X-Tenant-Id")
     if header_tenant and header_tenant not in ("", "default"):
         return header_tenant
-    return query_tenant_id
+    return None
 
 
 @app.get("/analytics/feedback/summary")
@@ -138,7 +158,8 @@ async def feedback_summary(
     effective_tenant = _resolve_tenant(request, tenant_id)
     settings = _settings()
     db = settings.clickhouse_database
-    try:
+
+    def _run():
         client = get_client(settings)
         if effective_tenant:
             result = client.query(
@@ -153,6 +174,9 @@ async def feedback_summary(
             )
         row = result.first_row
         return {"liked": row[0], "disliked": row[1], "total": row[2]}
+
+    try:
+        return await asyncio.to_thread(_run)
     except Exception as e:
         logger.error("Analytics query failed: %s", e)
         raise HTTPException(status_code=500, detail="Analytics query failed")
@@ -167,7 +191,8 @@ async def queries_summary(
     effective_tenant = _resolve_tenant(request, tenant_id)
     settings = _settings()
     db = settings.clickhouse_database
-    try:
+
+    def _run():
         client = get_client(settings)
         if effective_tenant:
             result = client.query(
@@ -186,6 +211,9 @@ async def queries_summary(
             "avg_latency_ms": round(row[1], 1),
             "cache_hit_rate": round(row[2], 3),
         }
+
+    try:
+        return await asyncio.to_thread(_run)
     except Exception as e:
         logger.error("Analytics query failed: %s", e)
         raise HTTPException(status_code=500, detail="Analytics query failed")
@@ -203,7 +231,8 @@ async def queries_timeseries(
     settings = _settings()
     db = settings.clickhouse_database
     trunc = "toStartOfHour" if bucket == "hour" else "toStartOfDay"
-    try:
+
+    def _run():
         client = get_client(settings)
         if effective_tenant:
             result = client.query(
@@ -236,6 +265,9 @@ async def queries_timeseries(
             }
             for row in result.result_rows
         ]
+
+    try:
+        return await asyncio.to_thread(_run)
     except Exception as e:
         logger.error("Analytics timeseries failed: %s", e)
         raise HTTPException(status_code=500, detail="Analytics query failed")
@@ -251,7 +283,8 @@ async def queries_by_model(
     effective_tenant = _resolve_tenant(request, tenant_id)
     settings = _settings()
     db = settings.clickhouse_database
-    try:
+
+    def _run():
         client = get_client(settings)
         if effective_tenant:
             result = client.query(
@@ -274,6 +307,9 @@ async def queries_by_model(
             {"model": row[0], "count": row[1], "avg_latency_ms": round(row[2], 1)}
             for row in result.result_rows
         ]
+
+    try:
+        return await asyncio.to_thread(_run)
     except Exception as e:
         logger.error("Analytics by-model failed: %s", e)
         raise HTTPException(status_code=500, detail="Analytics query failed")
@@ -291,7 +327,8 @@ async def feedback_timeseries(
     settings = _settings()
     db = settings.clickhouse_database
     trunc = "toStartOfHour" if bucket == "hour" else "toStartOfDay"
-    try:
+
+    def _run():
         client = get_client(settings)
         if effective_tenant:
             result = client.query(
@@ -316,6 +353,9 @@ async def feedback_timeseries(
             {"ts": str(row[0]), "likes": row[1], "dislikes": row[2]}
             for row in result.result_rows
         ]
+
+    try:
+        return await asyncio.to_thread(_run)
     except Exception as e:
         logger.error("Analytics feedback timeseries failed: %s", e)
         raise HTTPException(status_code=500, detail="Analytics query failed")
@@ -328,9 +368,13 @@ async def feedback_timeseries(
 @app.get("/health")
 async def health():
     settings = _settings()
-    try:
+
+    def _ping():
         client = get_client(settings)
         client.command("SELECT 1")
+
+    try:
+        await asyncio.to_thread(_ping)
         ch_status = "connected"
     except Exception as e:
         ch_status = f"error: {str(e)[:60]}"

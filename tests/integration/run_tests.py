@@ -101,7 +101,7 @@ def acquire_token(
     except ImportError:
         print(
             "ERROR: PyJWT not installed. Run:\n"
-            "  pip install -r tests/integration/requirements.txt\n",
+            "  cd tests/integration && uv sync\n",
             file=sys.stderr,
         )
         sys.exit(1)

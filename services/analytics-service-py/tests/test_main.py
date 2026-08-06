@@ -55,7 +55,7 @@ class TestQueryEventIngestion:
             "source_count": 5,
         }
         resp = client.post("/events/query", json=payload)
-        assert resp.status_code == 204
+        assert resp.status_code == 202
         mock_clickhouse.insert.assert_called_once()
         call_kwargs = mock_clickhouse.insert.call_args
         assert "query_events" in call_kwargs[0][0]
@@ -71,7 +71,7 @@ class TestQueryEventIngestion:
             "thinking_truncated": True,
         }
         resp = client.post("/events/query", json=payload)
-        assert resp.status_code == 204
+        assert resp.status_code == 202
         call_kwargs = mock_clickhouse.insert.call_args
         row = call_kwargs[0][1][0]
         # thinking_truncated value must be True in the inserted row
@@ -97,7 +97,7 @@ class TestFeedbackEventIngestion:
             "comment": "great answer",
         }
         resp = client.post("/events/feedback", json=payload)
-        assert resp.status_code == 204
+        assert resp.status_code == 202
         mock_clickhouse.insert.assert_called_once()
         call_kwargs = mock_clickhouse.insert.call_args
         assert "feedback_events" in call_kwargs[0][0]
@@ -144,6 +144,52 @@ class TestAnalyticsEndpoints:
         mock_clickhouse.query.side_effect = RuntimeError("CH timeout")
         resp = client.get("/analytics/queries/summary")
         assert resp.status_code == 500
+
+
+class TestRoleAwareTenantScoping:
+    """
+    Ported from the Kotlin analytics-service: platform_admin gets global
+    aggregates; every other role is forced to their own tenant (X-Tenant-Id
+    header) regardless of what the tenant_id query parameter says.
+    """
+
+    def _mock_query_result(self, mock_ch, row):
+        result = MagicMock()
+        result.first_row = row
+        mock_ch.query.return_value = result
+
+    def test_platform_admin_sees_global_stats_ignoring_tenant_header(self, client, mock_clickhouse):
+        self._mock_query_result(mock_clickhouse, (100, 1250.5, 0.3))
+        resp = client.get(
+            "/analytics/queries/summary",
+            headers={"X-Tenant-Id": "alpha", "X-User-Role": "platform_admin"},
+        )
+        assert resp.status_code == 200
+        call_args = mock_clickhouse.query.call_args
+        assert "parameters" not in call_args.kwargs or call_args.kwargs.get("parameters") is None
+
+    def test_tenant_admin_forced_to_own_tenant_header(self, client, mock_clickhouse):
+        self._mock_query_result(mock_clickhouse, (5, 200.0, 0.1))
+        resp = client.get(
+            "/analytics/queries/summary",
+            headers={"X-Tenant-Id": "alpha", "X-User-Role": "tenant_admin"},
+        )
+        assert resp.status_code == 200
+        call_args = mock_clickhouse.query.call_args
+        assert call_args.kwargs.get("parameters") == {"tenant_id": "alpha"}
+
+    def test_tenant_admin_cannot_escalate_via_query_param(self, client, mock_clickhouse):
+        """A tenant_admin passing ?tenant_id=beta must still be scoped to their
+        own X-Tenant-Id header (alpha), never the query-param value."""
+        self._mock_query_result(mock_clickhouse, (5, 200.0, 0.1))
+        resp = client.get(
+            "/analytics/queries/summary",
+            params={"tenant_id": "beta"},
+            headers={"X-Tenant-Id": "alpha", "X-User-Role": "tenant_admin"},
+        )
+        assert resp.status_code == 200
+        call_args = mock_clickhouse.query.call_args
+        assert call_args.kwargs.get("parameters") == {"tenant_id": "alpha"}
 
 
 class TestSqlInjectionProtection:
