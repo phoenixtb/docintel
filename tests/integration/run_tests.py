@@ -338,11 +338,21 @@ def teardown_e2e_environment(
     base_url: str,
     tenant_id: str,
     bearer_token: str | None,
+    purge: bool = False,
 ) -> None:
     """
     Delete all documents from the e2e tenant by listing then deleting each one.
     Uses the standard authenticated gateway endpoints — no HMAC needed.
     Always called (try/finally) to prevent artifact accumulation.
+
+    Document deletion is async: DELETE /api/v1/documents/{id} marks the document
+    DELETING and returns 202 Accepted (queued) — the row + Qdrant vectors are
+    cleaned up later by document-service's DeletionTaskWorker. 202 is the normal
+    success response here, not an error.
+
+    If purge=True, also removes leftover `documents.data_sources` rows for this
+    tenant via a direct psql fallback (see `_purge_data_sources_via_psql` — no
+    document-service API exists for tenant-scoped data-source deletion).
     """
     print(f"\nTeardown: deleting all documents for tenant '{tenant_id}' …")
     headers: dict[str, str] = {"X-Tenant-Id": tenant_id}
@@ -383,7 +393,9 @@ def teardown_e2e_environment(
                     headers=headers,
                     timeout=30,
                 )
-                if del_resp.status_code in (200, 204, 404):
+                # 200/204: synchronous delete. 202: queued for async deletion
+                # (DeletionTaskWorker). 404: already gone. All are success.
+                if del_resp.status_code in (200, 202, 204, 404):
                     deleted += 1
                 else:
                     errors += 1
@@ -391,9 +403,57 @@ def teardown_e2e_environment(
         if errors:
             print(f"  ⚠  Deleted {deleted} docs, {errors} errors. Manual cleanup may be required.")
         else:
-            print(f"  ✓ Tenant '{tenant_id}' cleaned up ({deleted} documents deleted).")
+            print(f"  ✓ Tenant '{tenant_id}' cleaned up ({deleted} documents deleted, async cleanup queued).")
     except Exception as exc:
         print(f"  ⚠  Teardown failed (non-fatal): {exc}", file=sys.stderr)
+
+    if purge:
+        _purge_data_sources_via_psql(tenant_id)
+
+
+def _purge_data_sources_via_psql(tenant_id: str) -> None:
+    """
+    Delete leftover `documents.data_sources` rows for [tenant_id].
+
+    No document-service API exists for tenant-scoped data-source deletion, so this
+    shells out to `docker compose exec postgres psql` (the postgres container has
+    no host port binding — see docker-compose.yml). Manual equivalent, for
+    reference:
+
+        docker compose exec postgres psql -U docintel -d docintel -c \\
+            "DELETE FROM documents.data_sources WHERE tenant_id = '<tenant_id>';"
+
+    Non-fatal: prints a warning and continues if docker/psql is unavailable
+    (e.g. running against a remote stack without local docker access).
+    """
+    import subprocess
+
+    project_root = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+    sql = f"DELETE FROM documents.data_sources WHERE tenant_id = '{tenant_id}';"
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "docintel", "-d", "docintel", "-c", sql],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            print(f"  ✓ Purged data_sources rows for tenant '{tenant_id}' ({result.stdout.strip()}).")
+        else:
+            print(
+                f"  ⚠  data_sources purge failed (non-fatal): {result.stderr.strip()}\n"
+                f"     Manual fallback: docker compose exec postgres psql -U docintel -d docintel "
+                f"-c \"{sql}\"",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(
+            f"  ⚠  data_sources purge failed (non-fatal): {exc}\n"
+            f"     Manual fallback: docker compose exec postgres psql -U docintel -d docintel "
+            f"-c \"{sql}\"",
+            file=sys.stderr,
+        )
 
 
 # =============================================================================
@@ -820,6 +880,10 @@ def main() -> int:
     parser.add_argument("--no-auth", dest="no_auth", action="store_true", help="Skip token acquisition (direct RAG service)")
     parser.add_argument("--no-setup", dest="no_setup", action="store_true",
                         help="Skip dataset seeding and teardown (use when data is already ingested)")
+    parser.add_argument("--purge", dest="purge", action="store_true",
+                        help="On teardown, also purge leftover documents.data_sources rows for the "
+                             "e2e tenant via psql (docker compose exec postgres). No document-service "
+                             "API exists for this — see _purge_data_sources_via_psql.")
     parser.add_argument("--ingestion-url", dest="ingestion_url", default="http://localhost:8001",
                         help="Ingestion service URL (default: http://localhost:8001)")
     parser.add_argument("--data-loader-url", dest="data_loader_url", default="http://localhost:8002",
@@ -1096,6 +1160,7 @@ def main() -> int:
                 base_url=base_url,
                 tenant_id=tenant_id,
                 bearer_token=bearer_token,
+                purge=args.purge,
             )
 
     report["summary"] = {
