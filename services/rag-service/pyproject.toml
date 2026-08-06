@@ -39,7 +39,10 @@ dependencies = [
     "fastembed>=0.4.0",
 
     # Observability
-    "langfuse>=2.57.0",
+    # tracing.py wraps the v2 API (client.trace/span/generation) — v3+ removed
+    # it (OTEL-based rewrite). Unpinned, uv resolves 4.x and every traced query
+    # dies with AttributeError. Bump only together with a tracing.py rewrite.
+    "langfuse>=2.57.0,<3",
     "prometheus-fastapi-instrumentator>=7.0.0",
     "prometheus-client>=0.21.0",
     
