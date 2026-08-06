@@ -28,8 +28,9 @@ Ordered by risk-reduction value. Each item is self-contained.
 
 ### A4. Dead code removal
 - **Problem:** Kotlin `services/analytics-service` duplicates `analytics-service-py` (compose builds only the Python one). `services/ingestion-service/src/db.py` is a deprecated stub. `run_tests.py` still references deleted `requirements.txt` in an error message.
-- **Fix:** delete the Kotlin analytics service (git history preserves it), delete the stub, fix the error string to reference `uv sync`.
-- **Acceptance:** repo grep for `analytics-service` (Kotlin path) only appears in git history; `rg requirements.txt tests/` empty.
+- **Fix:** delete the Kotlin analytics service (git history preserves it), delete the stub, fix the error string to reference `uv sync`. **Before deletion, port two behaviors from the Kotlin impl into `analytics-service-py`:** (1) role-aware tenant scoping — `platform_admin` (from `X-User-Role`) gets global aggregates, everyone else is forced to their own tenant (Python currently has no role awareness); (2) return `202 Accepted` on event ingestion instead of 204 (fire-and-forget semantics).
+- **Also:** analytics-py handlers are `async def` but call the sync `clickhouse-connect` client — blocks the event loop. Offload via `run_in_executor`/`asyncio.to_thread` or make handlers sync (uvicorn threadpool). Set `async_insert=1` on inserts so ClickHouse batches internally instead of row-per-request parts.
+- **Acceptance:** repo grep for `analytics-service` (Kotlin path) only appears in git history; `rg requirements.txt tests/` empty; platform_admin sees global stats, tenant admin only their own; event ingestion does not block the loop under concurrent load.
 
 ### A5. CostTracker — wire or remove
 - **Problem:** `services/rag-service/src/components/observability.py` CostTracker exists but is never called.
