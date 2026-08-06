@@ -24,27 +24,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install -e ".[dev]"
+        run: uv sync --extra dev
 
       - name: Lint with Ruff
         run: |
-          ruff check src/
-          ruff format --check src/
+          uv run ruff check src/
+          uv run ruff format --check src/
 
       - name: Type check with MyPy
         run: |
-          mypy src/ --ignore-missing-imports
+          uv run mypy src/ --ignore-missing-imports
 
       - name: Run tests
         run: |
-          pytest tests/ -v
+          uv run pytest tests/ -v
 
   # ===========================================================================
   # Analytics Service (Python)
@@ -59,16 +58,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: uv sync --extra dev
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: uv run pytest tests/ -v
 
   # ===========================================================================
   # Kotlin Services

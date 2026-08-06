@@ -26,25 +26,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.11"
-          cache: 'pip'
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: uv sync --extra dev
 
       - name: Lint
         run: |
-          ruff check src/
-          ruff format --check src/
+          uv run ruff check src/
+          uv run ruff format --check src/
 
       - name: Type check
-        run: mypy src/ --ignore-missing-imports
+        run: uv run mypy src/ --ignore-missing-imports
 
       - name: Run tests
-        run: pytest tests/ -v --cov=src --cov-report=xml
+        run: uv run pytest tests/ -v --cov=src --cov-report=xml
 
       - name: Build Docker image
         run: docker build -t docintel/rag-service:${{ github.sha }} .
