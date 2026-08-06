@@ -29,8 +29,19 @@ Ordered by risk-reduction value. Each item is self-contained.
 ### A4. Dead code removal
 - **Problem:** Kotlin `services/analytics-service` duplicates `analytics-service-py` (compose builds only the Python one). `services/ingestion-service/src/db.py` is a deprecated stub. `run_tests.py` still references deleted `requirements.txt` in an error message.
 - **Fix:** delete the Kotlin analytics service (git history preserves it), delete the stub, fix the error string to reference `uv sync`. **Before deletion, port two behaviors from the Kotlin impl into `analytics-service-py`:** (1) role-aware tenant scoping — `platform_admin` (from `X-User-Role`) gets global aggregates, everyone else is forced to their own tenant (Python currently has no role awareness); (2) return `202 Accepted` on event ingestion instead of 204 (fire-and-forget semantics).
-- **Also:** analytics-py handlers are `async def` but call the sync `clickhouse-connect` client — blocks the event loop. Offload via `run_in_executor`/`asyncio.to_thread` or make handlers sync (uvicorn threadpool). Set `async_insert=1` on inserts so ClickHouse batches internally instead of row-per-request parts.
+- **Also:** analytics-py handlers are `async def` but call the sync `clickhouse-connect` client — blocks the event loop. Offload via `run_in_executor`/`asyncio.to_thread` or make handlers sync (uvicorn threadpool). (Query-event inserts move to the batched stream consumer in A7; this fix still applies to feedback + read endpoints.)
 - **Acceptance:** repo grep for `analytics-service` (Kotlin path) only appears in git history; `rg requirements.txt tests/` empty; platform_admin sees global stats, tenant admin only their own; event ingestion does not block the loop under concurrent load.
+
+### A7. Analytics ingest via Redis Streams (fire-and-forget + batching)
+- **Problem:** rag-service ships query telemetry via HTTP POST per query (`services/rag-service/src/api/main.py` `_post_query_event`); analytics-py inserts row-per-request into ClickHouse — the known anti-pattern (part explosion). Events are lost whenever analytics-service is down.
+- **Design:** reuse the existing bus — all machinery is already in `docintel_common.messaging.RedisStreamBus` (publish, consumer groups, ack, `claim_idle`), and ingestion-service already runs this exact consumer pattern (`stream_worker.py`).
+  1. **Producer:** rag-service publishes `analytics.query` to the stream instead of HTTP POST (it already depends on docintel-common; publish with `maxlen` trim ~100k to bound memory).
+  2. **Consumer:** analytics-py adds a background consumer task (group `analytics-service`): buffer events, flush to ClickHouse as one batched `client.insert` every N events (e.g. 200) or T seconds (e.g. 5s), whichever first; ack after successful insert.
+  3. **Feedback stays REST** (browser → gateway → analytics) with direct insert — human-click volume, batching pointless.
+  4. **Semantics:** at-least-once — duplicates possible on crash-between-insert-and-ack. Acceptable for analytics; optionally use `ReplacingMergeTree(query_id)` for exactness. Use `claim_idle` for orphaned messages (same as ingestion).
+  5. **Ops:** Prometheus gauge for consumer lag (XINFO GROUPS lag) + counter for batch flushes; alert path via existing Prometheus.
+- **Benefits:** query path sheds the HTTP call; events survive analytics downtime (stream retention); ClickHouse gets proper batches.
+- **Acceptance:** harness run with analytics-service stopped mid-run loses zero events after it restarts (consumer catches up); ClickHouse receives batched inserts (verify part count stays flat under load); feedback endpoint unchanged.
 
 ### A5. CostTracker — wire or remove
 - **Problem:** `services/rag-service/src/components/observability.py` CostTracker exists but is never called.
@@ -80,7 +91,7 @@ Pages (SvelteKit routes under `/insights`, visible to tenant-admin role):
 
 ### Sequencing
 ```
-A1 → A2 → A3/A4 (parallelizable) → A5
+A1 → A2 → A3/A4 (parallelizable) → A5 → A7 (after A4's analytics-py cleanup)
 B1 → B2 → B3 → B4 (B independent of A except A5 enriches B1 data)
 ```
 
