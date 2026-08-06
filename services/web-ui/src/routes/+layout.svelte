@@ -28,6 +28,7 @@
     const role = authState.user?.role ?? 'tenant_user';
     if (path.startsWith('/admin') && role !== 'platform_admin') return false;
     if (path.startsWith('/settings') && role === 'tenant_user') return false;
+    if (path.startsWith('/insights') && role === 'tenant_user') return false;
     return true;
   }
 
@@ -58,6 +59,7 @@
     ];
     if (role === 'tenant_admin' || role === 'platform_admin') {
       items.push({ href: '/settings', label: 'Manage' });
+      items.push({ href: '/insights/usage', label: 'Insights' });
     }
     if (role === 'platform_admin') {
       items.push({ href: '/admin', label: 'Platform' });
