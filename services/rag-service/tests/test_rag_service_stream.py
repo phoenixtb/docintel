@@ -125,10 +125,19 @@ async def _collect(gen: AsyncIterator) -> list:
     return [event async for event in gen]
 
 
-def _patch_llm(svc: RAGService, tokens: list[str], thinking: list[str] | None = None):
+def _patch_llm(
+    svc: RAGService,
+    tokens: list[str],
+    thinking: list[str] | None = None,
+    usage: dict | None = None,
+):
     """
     Patch build_streaming_generator so that calling llm.run() enqueues tokens
     into the queue that stream() reads.  Returns the patch context manager.
+
+    usage: if given, emits a trailing no-content chunk carrying
+    meta["usage"] — mirrors the real trailing chunk an engine sends when it
+    honours stream_options.include_usage (see llm_adapter.extract_usage).
     """
     thinking = thinking or []
 
@@ -146,6 +155,11 @@ def _patch_llm(svc: RAGService, tokens: list[str], thinking: list[str] | None = 
                 chunk = MagicMock()
                 chunk.content = tok
                 chunk.meta = {}
+                callback(chunk)
+            if usage is not None:
+                chunk = MagicMock()
+                chunk.content = ""
+                chunk.meta = {"usage": usage}
                 callback(chunk)
 
         llm_mock.run.side_effect = _run_side_effect
@@ -433,3 +447,46 @@ async def test_query_drains_stream_into_dict():
     assert isinstance(result["cache_hit"], bool)
     assert isinstance(result["latency_ms"], int)
     assert result["model_used"] == "test-model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_captures_token_usage_when_engine_reports_it():
+    """
+    A5: when the engine sends a trailing usage chunk, RAGService records
+    prompt/completion tokens via CostTracker on _last_tokens_used/_last_cost_usd
+    (read by api/main.py after the stream completes).
+    """
+    svc = _make_service()
+    usage = {"prompt_tokens": 120, "completion_tokens": 45, "total_tokens": 165}
+    with _patch_llm(svc, ["The ", "answer."], usage=usage):
+        await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    assert svc._last_tokens_used == {"prompt": 120, "completion": 45}
+    assert isinstance(svc._last_cost_usd, float)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_zero_tokens_when_engine_omits_usage():
+    """Engines that don't honour stream_options.include_usage leave usage absent
+    — CostTracker must degrade to zero tokens/cost, not raise."""
+    svc = _make_service()
+    with _patch_llm(svc, ["The ", "answer."]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    assert svc._last_tokens_used == {"prompt": 0, "completion": 0}
+    assert svc._last_cost_usd == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_query_result_includes_tokens_used_and_cost():
+    """query() dict result surfaces tokens_used/cost_usd for the /query handler."""
+    svc = _make_service()
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    with _patch_llm(svc, ["answer"], usage=usage):
+        result = await svc.query(**_make_stream_kwargs(svc))
+
+    assert result["tokens_used"] == {"prompt": 10, "completion": 5}
+    assert isinstance(result["cost_usd"], float)

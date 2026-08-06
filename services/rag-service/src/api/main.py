@@ -55,6 +55,9 @@ async def _emit_query_event(
     source_count: int,
     analytics_url: str,
     thinking_truncated: bool = False,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cost_usd: float = 0.0,
     http_client: Optional[httpx.AsyncClient] = None,
 ) -> None:
     """Fire-and-forget: POST query telemetry to analytics-service."""
@@ -73,6 +76,9 @@ async def _emit_query_event(
                     "cache_hit": cache_hit,
                     "source_count": source_count,
                     "thinking_truncated": thinking_truncated,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "cost_usd": cost_usd,
                 },
                 timeout=3.0,
             )
@@ -331,6 +337,16 @@ try:
         "rag_reranker_degraded_total",
         "Reranker fallback activations (model unreachable or error)",
         ["tenant"],
+    )
+    RAG_LLM_TOKENS = Counter(
+        "rag_llm_tokens_total",
+        "LLM tokens consumed per generation (prompt/completion), from engine usage stats",
+        ["tenant", "model", "kind"],
+    )
+    RAG_LLM_COST_USD = Counter(
+        "rag_llm_cost_usd_total",
+        "Estimated LLM cost in USD (LiteLLM pricing table; 0 for unpriced/local models)",
+        ["tenant", "model"],
     )
     _METRICS_ENABLED = True
 except ImportError:
@@ -747,16 +763,34 @@ async def query_documents(
             conversation_id=request.conversation_id,
             summarizer=http_request.app.state.summarizer,
         )
+        model_used = result.get("model_used", "unknown")
+        tokens_used = result.get("tokens_used") or {}
+        cost_usd = result.get("cost_usd", 0.0)
+        if _METRICS_ENABLED:
+            tenant_label = user_ctx.tenant_id or "unknown"
+            if tokens_used.get("prompt"):
+                RAG_LLM_TOKENS.labels(
+                    tenant=tenant_label, model=model_used, kind="prompt"
+                ).inc(tokens_used["prompt"])
+            if tokens_used.get("completion"):
+                RAG_LLM_TOKENS.labels(
+                    tenant=tenant_label, model=model_used, kind="completion"
+                ).inc(tokens_used["completion"])
+            if cost_usd:
+                RAG_LLM_COST_USD.labels(tenant=tenant_label, model=model_used).inc(cost_usd)
         _fire_and_forget(_emit_query_event(
             query_id=request_id,
             tenant_id=user_ctx.tenant_id,
             user_id=user_ctx.user_id or "",
             latency_ms=result["latency_ms"],
-            model_used=result.get("model_used", "unknown"),
+            model_used=model_used,
             cache_hit=result["cache_hit"],
             source_count=len(result["sources"]),
             analytics_url=settings.analytics_service_url,
             thinking_truncated=result.get("thinking_truncated", False),
+            prompt_tokens=tokens_used.get("prompt", 0),
+            completion_tokens=tokens_used.get("completion", 0),
+            cost_usd=cost_usd,
             http_client=http_request.app.state.http,
         ))
         return QueryResponse(
@@ -831,6 +865,21 @@ async def query_documents_stream(
             yield _serialize_sse(ErrorEvent(message=str(e)), tenant_id=user_ctx.tenant_id)
             return
 
+        tokens_used = getattr(rag_service, "_last_tokens_used", {}) or {}
+        cost_usd = getattr(rag_service, "_last_cost_usd", 0.0)
+        if _METRICS_ENABLED:
+            tenant_label = user_ctx.tenant_id or "unknown"
+            if tokens_used.get("prompt"):
+                RAG_LLM_TOKENS.labels(
+                    tenant=tenant_label, model=effective_model, kind="prompt"
+                ).inc(tokens_used["prompt"])
+            if tokens_used.get("completion"):
+                RAG_LLM_TOKENS.labels(
+                    tenant=tenant_label, model=effective_model, kind="completion"
+                ).inc(tokens_used["completion"])
+            if cost_usd:
+                RAG_LLM_COST_USD.labels(tenant=tenant_label, model=effective_model).inc(cost_usd)
+
         _fire_and_forget(_emit_query_event(
             query_id=request_id,
             tenant_id=user_ctx.tenant_id,
@@ -841,6 +890,9 @@ async def query_documents_stream(
             source_count=source_count,
             analytics_url=settings.analytics_service_url,
             thinking_truncated=getattr(rag_service, "_last_thinking_truncated", False),
+            prompt_tokens=tokens_used.get("prompt", 0),
+            completion_tokens=tokens_used.get("completion", 0),
+            cost_usd=cost_usd,
             http_client=http_request.app.state.http,
         ))
 

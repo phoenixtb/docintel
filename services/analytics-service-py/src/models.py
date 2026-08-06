@@ -11,6 +11,9 @@ class QueryEvent(BaseModel):
     cache_hit: bool = False
     source_count: int = 0
     thinking_truncated: bool = False
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
 
 
 class FeedbackEvent(BaseModel):

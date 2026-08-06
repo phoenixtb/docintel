@@ -37,8 +37,14 @@ from haystack.utils import Secret
 
 from ..components.cache import SemanticCacheChecker, SemanticCacheWriter
 from ..components.embedders import BM25SparseTextEmbedder
-from ..components.llm_adapter import build_streaming_generator, extract_lmforge_status, extract_reasoning_content
+from ..components.llm_adapter import (
+    build_streaming_generator,
+    extract_lmforge_status,
+    extract_reasoning_content,
+    extract_usage,
+)
 from ..components.model_profile_resolver import ModelProfileResolver
+from ..components.observability import CostTracker
 from ..components.opa import OpaChunkValidator
 from ..components.prompt import PromptBuilder
 from ..components.reranker import LmforgeReranker
@@ -178,6 +184,9 @@ class RAGService:
         self._opa_validator: Optional[OpaChunkValidator] = None
         self._reranker: Optional[LmforgeReranker] = None
         self._prompt_builder: Optional[PromptBuilder] = None
+
+        # Cost/token accounting — per-tenant in-memory accumulator
+        self._cost_tracker = CostTracker()
 
     # ── Initialisation ───────────────────────────────────────────────────────
 
@@ -693,8 +702,18 @@ class RAGService:
 
         queue: asyncio.Queue = asyncio.Queue()
         llm_error: list = []
+        usage_holder: dict = {}
 
         def streaming_callback(chunk):
+            # Usage arrives on a trailing chunk with no content when the engine
+            # honours stream_options.include_usage (see llm_adapter.extract_usage).
+            # Captured unconditionally — this chunk carries no content/reasoning
+            # so it falls through the branches below without enqueuing anything.
+            usage = extract_usage(chunk)
+            if usage:
+                usage_holder["prompt_tokens"] = usage.get("prompt_tokens", 0)
+                usage_holder["completion_tokens"] = usage.get("completion_tokens", 0)
+
             # LMForge lifecycle status events — only enqueue the status signal when
             # the chunk carries no content/reasoning (it's a pure lifecycle event).
             # If LMForge includes the status field on content chunks (observed in
@@ -790,6 +809,27 @@ class RAGService:
             self._last_thinking_truncated = (thinking_chars / 4) >= 0.9 * thinking_budget_resolved
         else:
             self._last_thinking_truncated = False
+
+        # Cost/token accounting — engines that don't honour stream_options.include_usage
+        # (see extract_usage) leave usage_holder empty; CostTracker degrades to zero
+        # cost/tokens in that case rather than failing the request.
+        litellm_response = None
+        if usage_holder:
+            _prompt_tok = usage_holder.get("prompt_tokens", 0)
+            _completion_tok = usage_holder.get("completion_tokens", 0)
+            litellm_response = {
+                "model": effective_model,
+                "usage": {
+                    "prompt_tokens": _prompt_tok,
+                    "completion_tokens": _completion_tok,
+                    "total_tokens": _prompt_tok + _completion_tok,
+                },
+            }
+        cost_result = self._cost_tracker.run(
+            response=answer, tenant_id=tenant_id, litellm_response=litellm_response
+        )
+        self._last_tokens_used = cost_result["tokens_used"]
+        self._last_cost_usd = cost_result["cost_usd"]
 
         # ── 13. Build sources ─────────────────────────────────────────────────
         sources = _build_sources(documents)
@@ -920,4 +960,6 @@ class RAGService:
             "model_used": effective_model,
             "detected_domain": detected_domain,
             "thinking_truncated": getattr(self, "_last_thinking_truncated", False),
+            "tokens_used": getattr(self, "_last_tokens_used", {"prompt": 0, "completion": 0}),
+            "cost_usd": getattr(self, "_last_cost_usd", 0.0),
         }

@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS {db}.query_events (
     cache_hit         Bool,
     source_count      UInt8,
     thinking_truncated Bool DEFAULT false,
+    prompt_tokens      UInt32 DEFAULT 0,
+    completion_tokens  UInt32 DEFAULT 0,
+    cost_usd           Float64 DEFAULT 0.0,
     created_at        DateTime DEFAULT now()
 ) ENGINE = MergeTree()
 ORDER BY (tenant_id, created_at)
@@ -34,6 +37,13 @@ ORDER BY (tenant_id, created_at)
 _ALTER_QUERY_EVENTS_THINKING_TRUNCATED = """
 ALTER TABLE {db}.query_events
     ADD COLUMN IF NOT EXISTS thinking_truncated Bool DEFAULT false
+"""
+
+_ALTER_QUERY_EVENTS_TOKENS_COST = """
+ALTER TABLE {db}.query_events
+    ADD COLUMN IF NOT EXISTS prompt_tokens UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS completion_tokens UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS cost_usd Float64 DEFAULT 0.0
 """
 
 _CREATE_FEEDBACK_EVENTS = """
@@ -64,6 +74,7 @@ def ensure_schema(settings: Settings) -> None:
     client.command(_CREATE_DATABASE.format(db=db))
     client.command(_CREATE_QUERY_EVENTS.format(db=db))
     client.command(_CREATE_FEEDBACK_EVENTS.format(db=db))
-    # Idempotent migration: add thinking_truncated to existing tables
+    # Idempotent migrations: add columns to existing tables
     client.command(_ALTER_QUERY_EVENTS_THINKING_TRUNCATED.format(db=db))
+    client.command(_ALTER_QUERY_EVENTS_TOKENS_COST.format(db=db))
     logger.info("ClickHouse schema ready (database=%s)", db)

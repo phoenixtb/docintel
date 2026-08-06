@@ -77,7 +77,8 @@ async def ingest_query_event(event: QueryEvent):
     """
     settings = _settings()
     db = settings.clickhouse_database
-    try:
+
+    def _insert():
         client = get_client(settings)
         client.insert(
             f"{db}.query_events",
@@ -86,13 +87,18 @@ async def ingest_query_event(event: QueryEvent):
                 event.latency_ms, event.model_used,
                 event.cache_hit, event.source_count,
                 event.thinking_truncated,
+                event.prompt_tokens, event.completion_tokens, event.cost_usd,
             ]],
             column_names=[
                 "query_id", "tenant_id", "user_id",
                 "latency_ms", "model_used", "cache_hit", "source_count",
                 "thinking_truncated",
+                "prompt_tokens", "completion_tokens", "cost_usd",
             ],
         )
+
+    try:
+        await asyncio.to_thread(_insert)
     except Exception as e:
         logger.warning("Failed to insert query_event: %s", e)
         raise HTTPException(status_code=500, detail="Event ingestion failed")

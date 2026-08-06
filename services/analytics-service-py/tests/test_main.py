@@ -74,8 +74,42 @@ class TestQueryEventIngestion:
         assert resp.status_code == 202
         call_kwargs = mock_clickhouse.insert.call_args
         row = call_kwargs[0][1][0]
+        columns = call_kwargs[1].get("column_names") or call_kwargs[0][2]
         # thinking_truncated value must be True in the inserted row
-        assert row[-1] is True  # last inserted column
+        assert row[columns.index("thinking_truncated")] is True
+
+    def test_ingest_query_event_includes_tokens_and_cost(self, client, mock_clickhouse):
+        """A5: prompt/completion tokens and cost_usd are inserted alongside the event."""
+        payload = {
+            "query_id": "q-cost", "tenant_id": "alpha", "user_id": "u1",
+            "latency_ms": 500, "model_used": "qwen3.5:4b",
+            "cache_hit": False, "source_count": 3,
+            "prompt_tokens": 120, "completion_tokens": 45, "cost_usd": 0.0021,
+        }
+        resp = client.post("/events/query", json=payload)
+        assert resp.status_code == 202
+        call_kwargs = mock_clickhouse.insert.call_args
+        row = call_kwargs[0][1][0]
+        columns = call_kwargs[1].get("column_names") or call_kwargs[0][2]
+        assert row[columns.index("prompt_tokens")] == 120
+        assert row[columns.index("completion_tokens")] == 45
+        assert row[columns.index("cost_usd")] == pytest.approx(0.0021)
+
+    def test_ingest_query_event_defaults_tokens_and_cost_to_zero(self, client, mock_clickhouse):
+        """Older callers that don't send token fields still insert cleanly with defaults."""
+        payload = {
+            "query_id": "q-notokens", "tenant_id": "alpha", "user_id": "u1",
+            "latency_ms": 100, "model_used": "qwen3.5:4b",
+            "cache_hit": False, "source_count": 1,
+        }
+        resp = client.post("/events/query", json=payload)
+        assert resp.status_code == 202
+        call_kwargs = mock_clickhouse.insert.call_args
+        row = call_kwargs[0][1][0]
+        columns = call_kwargs[1].get("column_names") or call_kwargs[0][2]
+        assert row[columns.index("prompt_tokens")] == 0
+        assert row[columns.index("completion_tokens")] == 0
+        assert row[columns.index("cost_usd")] == 0.0
 
     def test_ingest_query_event_ch_failure_returns_500(self, client, mock_clickhouse):
         mock_clickhouse.insert.side_effect = RuntimeError("CH down")
