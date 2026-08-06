@@ -20,10 +20,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from .config import Settings, get_settings
 from .db import ensure_schema, get_client
 from .models import FeedbackEvent, QueryEvent
+from .stream_consumer import AnalyticsStreamConsumer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,7 +40,22 @@ async def lifespan(app: FastAPI):
         logger.info("Analytics Service ready (clickhouse=%s)", settings.clickhouse_host)
     except Exception as e:
         logger.error("ClickHouse schema bootstrap failed: %s", e)
+
+    # A7: background consumer for analytics.query (Redis Streams) — batches
+    # rag-service's query telemetry into ClickHouse. POST /events/query stays
+    # available as a secondary/manual ingestion path (e.g. curl, tests).
+    consumer = AnalyticsStreamConsumer(settings)
+    app.state.stream_consumer = consumer
+    consumer_task = asyncio.create_task(consumer.run())
+    app.state.stream_consumer_task = consumer_task
+
     yield
+
+    consumer_task.cancel()
+    try:
+        await consumer_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
@@ -58,6 +75,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+Instrumentator(
+    should_group_status_codes=True,
+    excluded_handlers=["/health", "/metrics"],
+).instrument(app).expose(app, endpoint="/metrics")
+
 
 def _settings() -> Settings:
     return get_settings()
@@ -69,11 +91,14 @@ def _settings() -> Settings:
 
 @app.post("/events/query", status_code=202)
 async def ingest_query_event(event: QueryEvent):
-    """Called by rag-service (fire-and-forget) after each query.
+    """Secondary/manual query-event ingestion path (curl, tests, other producers).
 
-    202 Accepted: this is fire-and-forget telemetry, not a durable write
-    acknowledgement. (A7 replaces this direct insert with a Redis Streams
-    producer/consumer — this handler stays as the pre-A7 direct-insert path.)
+    rag-service's production path publishes to the analytics.query Redis
+    stream instead (see stream_consumer.py) — batched inserts, survives
+    analytics-service downtime. This endpoint does a direct single-row
+    insert and stays available for anything that isn't on the stream.
+
+    202 Accepted: fire-and-forget telemetry, not a durable write acknowledgement.
     """
     settings = _settings()
     db = settings.clickhouse_database
@@ -372,7 +397,7 @@ async def feedback_timeseries(
 # =============================================================================
 
 @app.get("/health")
-async def health():
+async def health(request: Request):
     settings = _settings()
 
     def _ping():
@@ -384,8 +409,21 @@ async def health():
         ch_status = "connected"
     except Exception as e:
         ch_status = f"error: {str(e)[:60]}"
+
+    consumer_task = getattr(request.app.state, "stream_consumer_task", None)
+    consumer = getattr(request.app.state, "stream_consumer", None)
+    if consumer_task is not None:
+        consumer_status = "running" if not consumer_task.done() else "stopped"
+    else:
+        consumer_status = "not_started"
+
     return {
         "status": "healthy" if ch_status == "connected" else "degraded",
         "clickhouse": ch_status,
         "version": settings.service_version,
+        "analytics_stream_consumer": {
+            "status": consumer_status,
+            "batches_flushed": consumer.batches_flushed if consumer else 0,
+            "events_flushed": consumer.events_flushed if consumer else 0,
+        },
     }

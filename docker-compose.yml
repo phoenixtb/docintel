@@ -149,7 +149,11 @@ services:
       - RAG_DOMAIN_ROUTER_MODEL=${DEFAULT_DOMAIN_CLASSIFIER_MODEL:-MoritzLaurer/deberta-v3-base-zeroshot-v1.1-all-33}
       # Document Service (for sample dataset record creation)
       - DOCUMENT_SERVICE_URL=http://document-service:8081
-      - ANALYTICS_SERVICE_URL=http://analytics-service:8001
+      # A7: query telemetry publishes to analytics.query (Redis Streams) —
+      # analytics-service consumes it directly, no HTTP call from rag-service.
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       # Observability (matches Langfuse auto-provisioned keys)
       - LANGFUSE_HOST=http://langfuse-web:3000
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
@@ -163,6 +167,8 @@ services:
       qdrant:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - docintel-network
@@ -287,7 +293,9 @@ services:
           memory: 4G
 
   analytics-service:
-    build: ./services/analytics-service-py
+    build:
+      context: .
+      dockerfile: services/analytics-service-py/Dockerfile
     environment:
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=8123
@@ -295,8 +303,14 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
       - CLICKHOUSE_DATABASE=docintel_analytics
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001}
+      # A7: background consumer batches analytics.query (Redis Streams) into ClickHouse
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
     depends_on:
       clickhouse:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - docintel-network

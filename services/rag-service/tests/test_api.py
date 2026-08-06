@@ -30,6 +30,7 @@ def client() -> Generator[TestClient, None, None]:
     app.state.model_profile_resolver = MagicMock()
     app.state.summarizer = MagicMock()
     app.state.http = MagicMock()
+    app.state.analytics_bus = MagicMock()
     # model_resolver.resolve is async — use AsyncMock so await works
     mock_resolver = MagicMock()
     mock_resolver.resolve = AsyncMock(
@@ -157,5 +158,51 @@ class TestErrorHandling:
         )
         
         assert response.status_code == 422
+
+
+@pytest.mark.unit
+class TestPublishQueryEvent:
+    """A7: query telemetry publishes to the analytics.query Redis stream
+    instead of an HTTP POST to analytics-service."""
+
+    async def _run(self, bus, **overrides):
+        from src.api.main import _publish_query_event
+
+        kwargs = dict(
+            query_id="q1",
+            tenant_id="tenant-1",
+            user_id="user-1",
+            latency_ms=100,
+            model_used="test-model",
+            cache_hit=False,
+            source_count=3,
+        )
+        kwargs.update(overrides)
+        await _publish_query_event(bus, **kwargs)
+
+    def test_publishes_to_analytics_query_topic_with_maxlen(self):
+        from unittest.mock import AsyncMock
+        from docintel_common.messaging import TOPIC_ANALYTICS_QUERY
+
+        bus = AsyncMock()
+        asyncio.run(self._run(bus, prompt_tokens=10, completion_tokens=5, cost_usd=0.001))
+
+        bus.publish.assert_awaited_once()
+        topic, payload = bus.publish.call_args.args
+        assert topic == TOPIC_ANALYTICS_QUERY
+        assert payload["query_id"] == "q1"
+        assert payload["prompt_tokens"] == 10
+        assert payload["completion_tokens"] == 5
+        assert payload["cost_usd"] == 0.001
+        assert bus.publish.call_args.kwargs["maxlen"] == 100_000
+
+    def test_publish_failure_is_swallowed_not_raised(self):
+        """Fire-and-forget: a Redis outage must never surface to the caller."""
+        from unittest.mock import AsyncMock
+
+        bus = AsyncMock()
+        bus.publish.side_effect = RuntimeError("redis down")
+
+        asyncio.run(self._run(bus))  # must not raise
 
 

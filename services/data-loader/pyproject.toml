@@ -7,6 +7,10 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 
 dependencies = [
+    # Shared DocIntel library — only internal_auth (HMAC service tokens) and
+    # tracing are used; no [ml]/[db] extras needed.
+    "docintel-common",
+
     # Web Framework
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
@@ -37,6 +41,9 @@ dev = [
     "ruff>=0.8.0",
     "fakeredis>=2.0.0",
 ]
+
+[tool.uv.sources]
+docintel-common = { path = "../../lib/docintel-common" }
 
 [build-system]
 requires = ["hatchling"]

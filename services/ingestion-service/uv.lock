@@ -432,9 +432,15 @@ name = "docintel-common"
 version = "0.1.0"
 source = { directory = "../../lib/docintel-common" }
 dependencies = [
-    { name = "psycopg2-binary" },
     { name = "pydantic" },
     { name = "redis" },
+]
+
+[package.optional-dependencies]
+db = [
+    { name = "psycopg2-binary" },
+]
+ml = [
     { name = "torch" },
     { name = "transformers" },
 ]
@@ -442,15 +448,15 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.0.0" },
-    { name = "psycopg2-binary", specifier = ">=2.9.0" },
+    { name = "psycopg2-binary", marker = "extra == 'db'", specifier = ">=2.9.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "redis", specifier = ">=5.0.0" },
-    { name = "torch", specifier = ">=2.0.0" },
-    { name = "transformers", specifier = ">=4.40.0" },
+    { name = "torch", marker = "extra == 'ml'", specifier = ">=2.0.0" },
+    { name = "transformers", marker = "extra == 'ml'", specifier = ">=4.40.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["ml", "db", "dev"]
 
 [[package]]
 name = "doclang"
@@ -1149,7 +1155,7 @@ source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
     { name = "cachetools" },
-    { name = "docintel-common" },
+    { name = "docintel-common", extra = ["db", "ml"] },
     { name = "docling-haystack" },
     { name = "fastapi" },
     { name = "fastembed" },
@@ -1191,7 +1197,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", specifier = ">=0.26.0" },
     { name = "cachetools", specifier = ">=5.3.0" },
-    { name = "docintel-common", directory = "../../lib/docintel-common" },
+    { name = "docintel-common", extras = ["ml", "db"], directory = "../../lib/docintel-common" },
     { name = "docling-haystack", specifier = ">=0.1.1" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "fastembed", specifier = ">=0.4.0" },

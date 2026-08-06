@@ -9,7 +9,6 @@
 services/api-gateway
 services/document-service
 services/admin-service
-services/analytics-service-py
 services/web-ui
 
 # Test artifacts

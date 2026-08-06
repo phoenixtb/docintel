@@ -14,6 +14,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
+from docintel_common.messaging import RedisStreamBus, TOPIC_ANALYTICS_QUERY
 from docintel_common.tracing import TraceContext, configure_trace_logging
 
 import httpx
@@ -44,8 +45,17 @@ from .schemas import QueryRequest, QueryResponse
 
 logger = logging.getLogger(__name__)
 
+# A7: query telemetry rides the shared Redis Streams bus instead of an HTTP
+# POST to analytics-service — events survive analytics-service downtime
+# (stream retention) instead of being dropped by the old fire-and-forget
+# HTTP call. Trimmed to bound memory; analytics-service's consumer only
+# needs to keep up within this window.
+_ANALYTICS_STREAM_MAXLEN = 100_000
 
-async def _emit_query_event(
+
+async def _publish_query_event(
+    bus: RedisStreamBus,
+    *,
     query_id: str,
     tenant_id: str,
     user_id: str,
@@ -53,40 +63,32 @@ async def _emit_query_event(
     model_used: str,
     cache_hit: bool,
     source_count: int,
-    analytics_url: str,
     thinking_truncated: bool = False,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     cost_usd: float = 0.0,
-    http_client: Optional[httpx.AsyncClient] = None,
 ) -> None:
-    """Fire-and-forget: POST query telemetry to analytics-service."""
+    """Fire-and-forget: publish query telemetry to the analytics.query stream."""
     try:
-        client = http_client or httpx.AsyncClient(timeout=3.0)
-        close_after = http_client is None
-        try:
-            await client.post(
-                f"{analytics_url}/events/query",
-                json={
-                    "query_id": query_id,
-                    "tenant_id": tenant_id,
-                    "user_id": user_id,
-                    "latency_ms": latency_ms,
-                    "model_used": model_used,
-                    "cache_hit": cache_hit,
-                    "source_count": source_count,
-                    "thinking_truncated": thinking_truncated,
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "cost_usd": cost_usd,
-                },
-                timeout=3.0,
-            )
-        finally:
-            if close_after:
-                await client.aclose()
+        await bus.publish(
+            TOPIC_ANALYTICS_QUERY,
+            {
+                "query_id": query_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "latency_ms": latency_ms,
+                "model_used": model_used,
+                "cache_hit": cache_hit,
+                "source_count": source_count,
+                "thinking_truncated": thinking_truncated,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost_usd": cost_usd,
+            },
+            maxlen=_ANALYTICS_STREAM_MAXLEN,
+        )
     except Exception as e:
-        logger.debug("Query telemetry emit failed (non-fatal): %s", e)
+        logger.debug("Query telemetry publish failed (non-fatal): %s", e)
 
 
 def _fire_and_forget(coro) -> asyncio.Task:
@@ -172,11 +174,19 @@ async def lifespan(app: FastAPI):
     logger.info("LLM concurrency limit: %d", settings.llm_concurrency_limit)
 
     # Shared HTTP client — connection pool reused across requests (healthcheck,
-    # model list, analytics telemetry). Avoids opening a new TCP connection per
-    # call. The probe / pre-warm helpers use their own short-lived clients since
-    # they fire only at startup before the pool is needed.
+    # model list). Avoids opening a new TCP connection per call. The probe /
+    # pre-warm helpers use their own short-lived clients since they fire only
+    # at startup before the pool is needed.
     app.state.http = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+    )
+
+    # A7: query telemetry producer — publishes to analytics.query instead of
+    # an HTTP POST to analytics-service (see _publish_query_event).
+    app.state.analytics_bus = RedisStreamBus(
+        host=settings.redis_host,
+        port=settings.redis_port,
+        password=settings.redis_password,
     )
 
     yield
@@ -184,6 +194,7 @@ async def lifespan(app: FastAPI):
     logger.info("RAG Service shutting down")
     tracer.shutdown()
     await app.state.http.aclose()
+    await app.state.analytics_bus.close()
 
 
 def _selftest_thinking_adapter() -> None:
@@ -778,7 +789,8 @@ async def query_documents(
                 ).inc(tokens_used["completion"])
             if cost_usd:
                 RAG_LLM_COST_USD.labels(tenant=tenant_label, model=model_used).inc(cost_usd)
-        _fire_and_forget(_emit_query_event(
+        _fire_and_forget(_publish_query_event(
+            http_request.app.state.analytics_bus,
             query_id=request_id,
             tenant_id=user_ctx.tenant_id,
             user_id=user_ctx.user_id or "",
@@ -786,12 +798,10 @@ async def query_documents(
             model_used=model_used,
             cache_hit=result["cache_hit"],
             source_count=len(result["sources"]),
-            analytics_url=settings.analytics_service_url,
             thinking_truncated=result.get("thinking_truncated", False),
             prompt_tokens=tokens_used.get("prompt", 0),
             completion_tokens=tokens_used.get("completion", 0),
             cost_usd=cost_usd,
-            http_client=http_request.app.state.http,
         ))
         return QueryResponse(
             answer=result["answer"],
@@ -880,7 +890,8 @@ async def query_documents_stream(
             if cost_usd:
                 RAG_LLM_COST_USD.labels(tenant=tenant_label, model=effective_model).inc(cost_usd)
 
-        _fire_and_forget(_emit_query_event(
+        _fire_and_forget(_publish_query_event(
+            http_request.app.state.analytics_bus,
             query_id=request_id,
             tenant_id=user_ctx.tenant_id,
             user_id=user_ctx.user_id or "",
@@ -888,12 +899,10 @@ async def query_documents_stream(
             model_used=effective_model,
             cache_hit=cache_hit,
             source_count=source_count,
-            analytics_url=settings.analytics_service_url,
             thinking_truncated=getattr(rag_service, "_last_thinking_truncated", False),
             prompt_tokens=tokens_used.get("prompt", 0),
             completion_tokens=tokens_used.get("completion", 0),
             cost_usd=cost_usd,
-            http_client=http_request.app.state.http,
         ))
 
     return StreamingResponse(

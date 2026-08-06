@@ -7,8 +7,11 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 
 dependencies = [
-    # Shared DocIntel library (domain classifier, device detection)
-    "docintel-common",
+    # Shared DocIntel library. [db]: model_profile_resolver.py needs psycopg2.
+    # transformers/torch for the domain router come from this project's own
+    # deps below, not docintel-common[ml] — rag-service only reads
+    # docintel_common.domain's plain DOMAIN_LABELS/DOMAIN_DESCRIPTIONS constants.
+    "docintel-common[db]",
 
     # Web Framework
     "fastapi>=0.115.0",

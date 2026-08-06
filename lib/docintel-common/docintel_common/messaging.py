@@ -31,14 +31,21 @@ TOPIC_FILES_AVAILABLE    = "files.available"
 TOPIC_DOCUMENTS_READY    = "documents.ready"
 TOPIC_INGESTION_COMPLETE = "ingestion.complete"
 TOPIC_DOCUMENTS_PROGRESS = "documents.progress"   # per-shard SSE progress events
+TOPIC_ANALYTICS_QUERY    = "analytics.query"      # rag-service query telemetry (A7)
 
 
 class MessageBus(ABC):
     """Transport-agnostic async message bus interface."""
 
     @abstractmethod
-    async def publish(self, topic: str, message: dict) -> str:
-        """Publish a message to a topic. Returns the message ID."""
+    async def publish(self, topic: str, message: dict, *, maxlen: int | None = None) -> str:
+        """
+        Publish a message to a topic. Returns the message ID.
+
+        maxlen: if given, approximately trims the stream to this many entries
+        (bounds memory for high-volume topics with no durability requirement
+        beyond "survives a brief consumer outage").
+        """
         ...
 
     @abstractmethod
@@ -107,8 +114,11 @@ class RedisStreamBus(MessageBus):
         password = os.environ.get("REDIS_PASSWORD") or None
         return cls(host=host, port=port, password=password)
 
-    async def publish(self, topic: str, message: dict) -> str:
-        msg_id: str = await self._redis.xadd(topic, {"payload": json.dumps(message)})
+    async def publish(self, topic: str, message: dict, *, maxlen: int | None = None) -> str:
+        kwargs = {}
+        if maxlen is not None:
+            kwargs = {"maxlen": maxlen, "approximate": True}
+        msg_id: str = await self._redis.xadd(topic, {"payload": json.dumps(message)}, **kwargs)
         logger.debug("Published to %s: %s", topic, msg_id)
         return msg_id
 
@@ -217,6 +227,21 @@ class RedisStreamBus(MessageBus):
         except Exception as e:
             logger.warning("XAUTOCLAIM failed on %s/%s: %s", topic, group, e)
             return []
+
+    async def group_lag(self, topic: str, group: str) -> int:
+        """
+        Number of stream entries not yet delivered to this consumer group
+        (XINFO GROUPS' `lag` field — Redis >=7.0). Returns 0 if the group/
+        stream doesn't exist yet or the server doesn't report lag.
+        """
+        try:
+            groups = await self._redis.xinfo_groups(topic)
+            for g in groups:
+                if g.get("name") == group:
+                    return int(g.get("lag") or 0)
+        except Exception as e:
+            logger.debug("XINFO GROUPS failed on %s/%s: %s", topic, group, e)
+        return 0
 
     async def delivery_count(self, topic: str, group: str, message_id: str) -> int:
         """Return how many times a message has been delivered (from XPENDING)."""

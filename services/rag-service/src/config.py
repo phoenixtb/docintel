@@ -145,11 +145,16 @@ class Settings(BaseSettings):
 
     # ── External services ─────────────────────────────────────────────────────
     document_service_url: str = "http://document-service:8081"
-    analytics_service_url: str = "http://analytics-service:8001"
     postgres_url: str = "postgresql://docintel:docintel_secret@postgres:5432/docintel"
 
     # ── OPA ───────────────────────────────────────────────────────────────────
     opa_url: str = "http://opa:8181"
+
+    # ── Redis Streams (A7 — query telemetry producer, replaces HTTP POST to
+    # analytics-service; see docintel_common.messaging.TOPIC_ANALYTICS_QUERY) ──
+    redis_host: str = "redis"
+    redis_port: int = 6379
+    redis_password: str | None = None
 
     # ── Inter-service auth ────────────────────────────────────────────────────
     # HMAC key shared with the API Gateway. Set by setup.sh, injected via docker-compose.

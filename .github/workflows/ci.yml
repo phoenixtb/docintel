@@ -159,23 +159,32 @@ jobs:
     strategy:
       matrix:
         include:
+          # rag-service and analytics-service-py depend on the local
+          # docintel-common path package (lib/docintel-common) — their
+          # Dockerfiles COPY it in, so the build context must be repo root.
           - service: rag-service
-            context: services/rag-service
+            context: .
+            file: services/rag-service/Dockerfile
             tag: docintel/rag-service:ci
           - service: analytics-service-py
-            context: services/analytics-service-py
+            context: .
+            file: services/analytics-service-py/Dockerfile
             tag: docintel/analytics-service:ci
           - service: api-gateway
             context: services/api-gateway
+            file: services/api-gateway/Dockerfile
             tag: docintel/api-gateway:ci
           - service: admin-service
             context: services/admin-service
+            file: services/admin-service/Dockerfile
             tag: docintel/admin-service:ci
           - service: document-service
             context: services/document-service
+            file: services/document-service/Dockerfile
             tag: docintel/document-service:ci
           - service: web-ui
             context: services/web-ui
+            file: services/web-ui/Dockerfile
             tag: docintel/web-ui:ci
 
     steps:
@@ -188,6 +197,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: false
           tags: ${{ matrix.tag }}
           cache-from: type=gha,scope=${{ matrix.service }}

@@ -6,21 +6,30 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 
 dependencies = [
-    # Domain classifier (DeBERTa zero-shot, used by ingestion-service + rag-service)
-    "transformers>=4.40.0",
-    # Device detection (MPS / CUDA / CPU)
-    "torch>=2.0.0",
-    # Security models (DocumentACL, UserContext, etc.)
+    # Security models (DocumentACL, UserContext, etc.), all Settings classes
     "pydantic>=2.0",
-    # Redis Streams message bus (optional — only loaded if messaging module is imported)
+    # Redis Streams message bus (docintel_common.messaging)
     "redis>=5.0.0",
-    # model_profile_resolver imports psycopg2 at module load, so it is a hard
-    # dependency of this package — every consumer needs it (not just the ones
-    # that happen to declare it themselves).
-    "psycopg2-binary>=2.9.0",
 ]
 
 [project.optional-dependencies]
+# Domain classifier (DeBERTa zero-shot) + device detection — only needed by
+# consumers of docintel_common.domain.get_domain_classifier/DomainClassifier
+# (ingestion-service). Lightweight consumers (analytics-service-py, and
+# rag-service/data-loader for the submodules they actually use) must not pay
+# ~2GB of torch/transformers just to install the package — see __init__.py's
+# lazy attribute loading, which this split complements at the dependency
+# level (lazy imports alone don't stop `uv sync` installing declared deps).
+ml = [
+    "transformers>=4.40.0",
+    "torch>=2.0.0",
+]
+# model_profile_resolver.py imports psycopg2 at module load — needed by any
+# consumer of docintel_common.model_profile_resolver (rag-service,
+# ingestion-service).
+db = [
+    "psycopg2-binary>=2.9.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",

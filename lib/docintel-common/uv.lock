@@ -149,32 +149,36 @@ name = "docintel-common"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "psycopg2-binary" },
     { name = "pydantic" },
     { name = "redis" },
-    { name = "torch" },
-    { name = "transformers" },
 ]
 
 [package.optional-dependencies]
+db = [
+    { name = "psycopg2-binary" },
+]
 dev = [
     { name = "fakeredis" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
+ml = [
+    { name = "torch" },
+    { name = "transformers" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.0.0" },
-    { name = "psycopg2-binary", specifier = ">=2.9.0" },
+    { name = "psycopg2-binary", marker = "extra == 'db'", specifier = ">=2.9.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "redis", specifier = ">=5.0.0" },
-    { name = "torch", specifier = ">=2.0.0" },
-    { name = "transformers", specifier = ">=4.40.0" },
+    { name = "torch", marker = "extra == 'ml'", specifier = ">=2.0.0" },
+    { name = "transformers", marker = "extra == 'ml'", specifier = ">=4.40.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["ml", "db", "dev"]
 
 [[package]]
 name = "fakeredis"
