@@ -8,10 +8,12 @@ Retrieval metrics (computed from sources[], no network calls):
   mrr            — 1/rank of first relevant source (0.0 if none)
   context_recall — fraction of relevant_docs patterns matched by >=1 source
 
-Generation metrics (LLM-judge, requires a running LMForge / OpenAI-compatible endpoint):
+Generation metrics (LLM-judge — ragas faithfulness + answer_relevancy, G4 —
+requires a running LMForge / OpenAI-compatible endpoint):
   faithfulness        — answer claims grounded in provided sources (0.0–1.0)
   answer_relevancy    — answer addresses the question (0.0–1.0)
   abstention_correct  — True iff LLM correctly abstained/answered per expect_abstention
+                         (heuristic, no LLM — unchanged by the G4 ragas adoption)
 
 Health:
   reranker_health     — reranker endpoint is alive and returns HTTP 200
@@ -20,9 +22,8 @@ Usage:
   from metrics import retrieval_metrics, generation_judge, reranker_health, abstention_correct
 """
 
-import re
+import asyncio
 import time
-from typing import Optional
 
 import httpx
 
@@ -118,64 +119,55 @@ def abstention_correct(answer: str, expect_abstention: bool) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# LLM-judge prompts
+# LLM judge — ragas faithfulness + answer_relevancy (G4)
 # ---------------------------------------------------------------------------
+# Replaces the old hand-rolled "score: N" prompts with ragas's tuned metrics:
+#   - Faithfulness: decomposes the answer into claims, verifies each against
+#     retrieved_contexts (structured-output extraction via `instructor` — no
+#     regex score-parsing).
+#   - AnswerRelevancy: generates hypothetical questions from the answer and
+#     compares their embedding similarity to the original question.
+# Both wired to the LMForge judge (OpenAI-compatible /v1) — chat model for
+# the LLM, qwen3-embed:0.6b:8bit for AnswerRelevancy's embedding step.
+# Non-thinking mode forced via chat_template_kwargs so structured-output
+# extraction stays clean (LMForge/vLLM qwen3 models honor this field).
+#
+# Live-verified against qwen3.5:4b:6bit on canned samples (faithful answer →
+# 1.0, unsupported claim → 0.0, on-topic → 0.85, off-topic → 0.33, abstention
+# → 0.0) — see tasks/05-2026-gaps-plan.md G4. Required pinning
+# langchain-community<0.3.20 in tests/integration/pyproject.toml (ragas 0.4.3
+# imports a langchain_community.chat_models.vertexai path removed in newer
+# langchain-community releases).
+_JUDGE_EMBED_MODEL = "qwen3-embed:0.6b:8bit"
 
-_FAITHFULNESS_PROMPT = """\
-You are a strict RAG evaluation judge. Rate the faithfulness of the answer.
-
-Faithfulness: Does the answer ONLY make claims supported by the retrieved chunks?
-Do NOT penalize for what is missing — only penalize unsupported claims.
-If the answer says "I don't have information / no relevant documents", score 5.
-
-Score 1: Major unsupported claims.
-Score 2: Several unsupported claims.
-Score 3: Mostly grounded, minor unsupported claims.
-Score 4: Nearly all grounded.
-Score 5: Fully grounded or a correct abstention.
-
-QUESTION: {question}
-
-RETRIEVED CHUNKS:
-{chunks}
-
-ANSWER: {answer}
-
-Respond with ONLY: score: <1-5>
-One-sentence justification."""
-
-_RELEVANCY_PROMPT = """\
-You are a strict RAG evaluation judge. Rate the answer relevancy.
-
-Answer Relevancy: Does the answer address what was asked?
-If the question cannot be answered from context and the answer correctly says so, score 5.
-
-Score 1: Completely off-topic.
-Score 2: Tangentially addresses the question.
-Score 3: Partially addresses the question.
-Score 4: Mostly addresses the question.
-Score 5: Directly and completely addresses the question.
-
-QUESTION: {question}
-
-ANSWER: {answer}
-
-Respond with ONLY: score: <1-5>
-One-sentence justification."""
+# Cache built (llm, embeddings)-backed metric instances per (judge_url,
+# judge_model) — constructing the OpenAI clients + instructor adapter per
+# query would be wasteful across a whole suite run.
+_JUDGE_METRICS_CACHE: dict[tuple[str, str], tuple] = {}
 
 
-def _extract_score(text: str) -> Optional[float]:
-    """Extract 'score: N' and normalize to [0, 1]."""
-    m = re.search(r"score\s*:\s*([1-5](?:\.\d+)?)", text, re.IGNORECASE)
-    if m:
-        raw = float(m.group(1))
-        return round((raw - 1.0) / 4.0, 3)  # [1,5] → [0,1]
-    return None
+def _get_judge_metrics(judge_url: str, judge_model: str):
+    key = (judge_url, judge_model)
+    if key not in _JUDGE_METRICS_CACHE:
+        from openai import AsyncOpenAI
+        from ragas.embeddings.base import embedding_factory
+        from ragas.llms import llm_factory
+        from ragas.metrics.collections import AnswerRelevancy, Faithfulness
 
+        chat_client = AsyncOpenAI(base_url=judge_url, api_key="none")
+        embed_client = AsyncOpenAI(base_url=judge_url, api_key="none")
+        llm = llm_factory(
+            judge_model,
+            client=chat_client,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        embeddings = embedding_factory("openai", _JUDGE_EMBED_MODEL, client=embed_client)
+        _JUDGE_METRICS_CACHE[key] = (
+            Faithfulness(llm=llm),
+            AnswerRelevancy(llm=llm, embeddings=embeddings),
+        )
+    return _JUDGE_METRICS_CACHE[key]
 
-# ---------------------------------------------------------------------------
-# LLM judge (requires LMForge or any OpenAI-compatible /chat/completions)
-# ---------------------------------------------------------------------------
 
 def generation_judge(
     question: str,
@@ -187,84 +179,62 @@ def generation_judge(
     timeout: float = 45.0,
 ) -> dict:
     """
-    Call an LLM judge for faithfulness, answer_relevancy, and abstention_correct.
+    Score faithfulness + answer_relevancy via ragas, pointed at the LMForge judge.
 
     judge_url: base URL of the judge endpoint (e.g. http://localhost:11430/v1).
-    judge_model: model ID to use (e.g. qwen3.5:4b).
+    judge_model: model ID to use (e.g. qwen3.5:4b:6bit).
 
     Returns faithfulness (float|None), answer_relevancy (float|None),
-    abstention_correct (bool), judge_error (str|None).
-    abstention_correct is always computed heuristically (no LLM required).
-    """
-    chunks_text = "\n\n".join(
-        f"[{i+1}] {s.get('content', '')[:400]}" for i, s in enumerate(sources[:5])
-    ) or "(no retrieved chunks)"
+    abstention_correct (bool), judge_error (str|None) — same shape as before
+    the G4 ragas adoption, so callers (run_tests.py) are unaffected.
 
+    abstention_correct is always computed heuristically (no LLM required —
+    unchanged by G4). When the model correctly abstained, faithfulness/
+    answer_relevancy are left None rather than judged: a generic claim-
+    verification metric has nothing to check in a "no relevant documents"
+    response, and ragas scores it 0.0 (verified live) — which would wrongly
+    drag down the average for behaving correctly. This mirrors how
+    retrieval_metrics() already returns None fields when not applicable.
+    """
+    correct_abstention = abstention_correct(answer, expect_abstention)
     result: dict = {
         "faithfulness": None,
         "answer_relevancy": None,
-        "abstention_correct": abstention_correct(answer, expect_abstention),
+        "abstention_correct": correct_abstention,
         "judge_error": None,
     }
 
+    if expect_abstention and correct_abstention:
+        return result
+
+    if not answer.strip():
+        result["judge_error"] = "empty answer — skipped judge"
+        return result
+
+    contexts = [s.get("content", "") for s in sources[:5] if s.get("content")] or [
+        "(no retrieved chunks)"
+    ]
+
+    async def _score() -> tuple[float | None, float | None]:
+        faith_metric, rel_metric = _get_judge_metrics(judge_url, judge_model)
+        faith_result = await asyncio.wait_for(
+            faith_metric.ascore(
+                user_input=question, response=answer, retrieved_contexts=contexts
+            ),
+            timeout=timeout,
+        )
+        rel_result = await asyncio.wait_for(
+            rel_metric.ascore(user_input=question, response=answer),
+            timeout=timeout,
+        )
+        return faith_result.value, rel_result.value
+
     try:
-        chat_url = judge_url.rstrip("/") + "/chat/completions"
-        # Disable chain-of-thought thinking to get compact "score: N" responses.
-        # LMForge / vLLM qwen3 models support chat_template_kwargs.enable_thinking.
-        _extra = {"chat_template_kwargs": {"enable_thinking": False}}
-
-        with httpx.Client(timeout=timeout) as client:
-            # Faithfulness
-            resp = client.post(
-                chat_url,
-                json={
-                    "model": judge_model,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": _FAITHFULNESS_PROMPT.format(
-                                question=question,
-                                chunks=chunks_text,
-                                answer=answer,
-                            ),
-                        }
-                    ],
-                    "max_tokens": 150,
-                    "temperature": 0.0,
-                    **_extra,
-                },
-            )
-            resp.raise_for_status()
-            text = resp.json()["choices"][0]["message"]["content"]
-            result["faithfulness"] = _extract_score(text)
-
-            # Answer relevancy
-            resp2 = client.post(
-                chat_url,
-                json={
-                    "model": judge_model,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": _RELEVANCY_PROMPT.format(
-                                question=question,
-                                answer=answer,
-                            ),
-                        }
-                    ],
-                    "max_tokens": 150,
-                    "temperature": 0.0,
-                    **_extra,
-                },
-            )
-            resp2.raise_for_status()
-            text2 = resp2.json()["choices"][0]["message"]["content"]
-            result["answer_relevancy"] = _extract_score(text2)
-
-    except httpx.HTTPError as e:
-        result["judge_error"] = f"HTTP {e}"
+        faithfulness_val, relevancy_val = asyncio.run(_score())
+        result["faithfulness"] = round(faithfulness_val, 3) if faithfulness_val is not None else None
+        result["answer_relevancy"] = round(relevancy_val, 3) if relevancy_val is not None else None
     except Exception as e:
-        result["judge_error"] = str(e)
+        result["judge_error"] = f"ragas judge failed: {e}"
 
     return result
 

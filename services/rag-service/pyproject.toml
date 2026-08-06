@@ -47,8 +47,10 @@ dependencies = [
     "jinja2>=3.1.0",
     
     # Evaluation
+    # G4: ragas moved to tests/integration/pyproject.toml — it's a harness
+    # (LLM-judge) dependency, not a rag-service runtime one. It was declared
+    # here unused (never imported by src/).
     "datasets>=3.2.0",
-    "ragas>=0.2.0",
     
     # Database
     "psycopg2-binary>=2.9.0",
