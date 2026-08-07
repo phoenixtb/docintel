@@ -199,6 +199,10 @@ def _get_judge_metrics(judge_url: str, judge_model: str):
         llm = llm_factory(
             judge_model,
             client=chat_client,
+            # ragas defaults max_tokens=1024 — too small for Faithfulness'
+            # claim decomposition on long answers (contract queries hit "output
+            # is incomplete due to a max_tokens length limit" at 1024).
+            max_tokens=4096,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         embeddings = embedding_factory("openai", _JUDGE_EMBED_MODEL, client=embed_client)
@@ -216,7 +220,11 @@ def generation_judge(
     expect_abstention: bool,
     judge_url: str,
     judge_model: str,
-    timeout: float = 45.0,
+    # Faithfulness decomposes the answer into claims and verifies each — several
+    # sequential LLM calls. On-device judges need minutes, not seconds, for long
+    # contract-style answers (45s produced blank TimeoutError failures on every
+    # CUAD query in the Aug 2026 full-gate run).
+    timeout: float = 240.0,
 ) -> dict:
     """
     Score faithfulness + answer_relevancy via ragas, pointed at the LMForge judge.
@@ -274,7 +282,9 @@ def generation_judge(
         result["faithfulness"] = round(faithfulness_val, 3) if faithfulness_val is not None else None
         result["answer_relevancy"] = round(relevancy_val, 3) if relevancy_val is not None else None
     except Exception as e:
-        result["judge_error"] = f"ragas judge failed: {e}"
+        # Always include the exception type: TimeoutError stringifies to "",
+        # which produced undebuggable blank "ragas judge failed:" reports.
+        result["judge_error"] = f"ragas judge failed: {type(e).__name__}: {e}"
 
     return result
 

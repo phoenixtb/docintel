@@ -113,6 +113,10 @@ class DocumentService(
                 }
                 ProcessingStatus.FAILED, ProcessingStatus.DELETING -> {
                     // DELETING: a prior delete is in progress; treat as gone and allow re-upload.
+                    // CRITICAL: void the queued DeletionTask first — the id is deterministic
+                    // (content hash), so the re-saved document reuses it, and a stale task
+                    // executing later would destroy the new document's vectors and rows.
+                    cancelQueuedDeletion(existing.status, documentId, tenantId)
                     logger.info("Re-processing {} document: document_id={} tenant={}", existing.status, documentId, tenantId)
                     // Fall through to re-upload and re-save below.
                 }
@@ -148,6 +152,21 @@ class DocumentService(
     }
 
     /**
+     * Void any queued deletion for [documentId] before a re-upload resurrects it.
+     * Only relevant when the existing row is DELETING (FAILED rows never queued one).
+     */
+    private fun cancelQueuedDeletion(status: ProcessingStatus, documentId: UUID, tenantId: String) {
+        if (status != ProcessingStatus.DELETING) return
+        val cancelled = deletionTaskRepository.cancelPendingForDocument(documentId, tenantId)
+        if (cancelled > 0) {
+            logger.info(
+                "Cancelled {} queued deletion task(s) for re-uploaded document {} (tenant={})",
+                cancelled, documentId, tenantId
+            )
+        }
+    }
+
+    /**
      * Register a document that already exists in MinIO at the content-addressable path.
      *
      * Called internally by data-loader after it has uploaded file bytes. The document_id
@@ -170,6 +189,8 @@ class DocumentService(
                     return Pair(existing.toResponse(), true)
                 }
                 ProcessingStatus.FAILED, ProcessingStatus.DELETING -> {
+                    // Same stale-DeletionTask hazard as uploadDocument — void it first.
+                    cancelQueuedDeletion(existing.status, documentId, tenantId)
                     logger.info("Re-processing {} document from-path: document_id={} tenant={}", existing.status, documentId, tenantId)
                 }
             }
