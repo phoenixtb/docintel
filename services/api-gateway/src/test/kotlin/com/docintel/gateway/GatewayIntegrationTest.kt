@@ -23,8 +23,11 @@ import kotlin.test.assertTrue
  * Integration tests for API Gateway routing.
  * Uses WireMock to mock downstream services.
  */
+// "dev" is layered on top of "test" to activate SecurityConfig's permit-all
+// securityWebFilterChainDev (@Profile("dev")) instead of the JWT-verifying
+// chain (@Profile("!dev")) — these tests don't carry real bearer tokens.
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@ActiveProfiles("test")
+@ActiveProfiles("test", "dev")
 class GatewayIntegrationTest {
 
     @LocalServerPort

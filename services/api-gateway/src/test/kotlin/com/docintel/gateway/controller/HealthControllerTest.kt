@@ -10,9 +10,11 @@ import org.springframework.test.web.reactive.server.WebTestClient
 /**
  * Tests for HealthController.
  */
+// "dev" activates the permit-all security chain — /health isn't on the
+// JWT-chain's permitAll list, only /actuator/health and /api/v1/health are.
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureWebTestClient
-@ActiveProfiles("test")
+@ActiveProfiles("test", "dev")
 class HealthControllerTest {
 
     @Autowired

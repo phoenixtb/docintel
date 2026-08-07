@@ -16,12 +16,16 @@ spring:
           filters:
             - RewritePath=/api/v1/query(?<segment>/?.*), /query${segment}
 
-  # Disable security for tests
+  # Disable security for tests. jwk-set-uri is required (not just issuer-uri) —
+  # both SecurityConfig.reactiveJwtDecoder and JwtDecoderConfig.jwtDecoder are
+  # @Profile("!dev") and read it directly via @Value, so it must resolve even
+  # though nothing in this suite exercises real JWT verification.
   security:
     oauth2:
       resourceserver:
         jwt:
           issuer-uri: http://localhost:9999
+          jwk-set-uri: http://localhost:9999/oauth/v2/keys
 
   data:
     redis:
