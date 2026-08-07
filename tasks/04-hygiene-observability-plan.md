@@ -1,6 +1,8 @@
 # Plan 04 — Hygiene Fixes + User-Facing Observability
 
-Status: DRAFT — review before implementation.
+Status: IMPLEMENTED (Aug 7, 2026) — Part A in commits A1–A7, Part B in B1–B3
+(B4 folded into B3). Open for a live-stack pass: A2 double-harness run,
+A3 Grafana visibility.
 Executor: Sonnet 5 subagent(s), one phase per agent, reviewed before merge.
 Branch: `functional-optimization` (or split per phase).
 

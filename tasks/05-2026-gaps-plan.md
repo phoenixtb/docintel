@@ -1,6 +1,10 @@
 # Plan 05 — Closing the 2026-Baseline Gaps
 
-Status: DRAFT — review before implementation.
+Status: IMPLEMENTED (Aug 7, 2026) — commits G1–G7 on `functional-optimization`.
+Outcomes of note: tau recalibrated and unchanged at 0.55; G2 query expansion and
+G5 conditional rerank shipped implemented-but-disabled with A/B evidence (see
+their commit messages); G6 items 1–2 pre-existed, only the citation-coverage
+metric was added; G7 P2 items remain deferred.
 Executor: Sonnet 5 subagent(s), one phase per agent, reviewed before merge.
 Deferred-by-design items (GraphRAG, agentic retrieval): see `docs/future_features/graphrag-agentic-rag.md`.
 
