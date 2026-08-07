@@ -57,6 +57,7 @@ class SecurityConfig {
                     .pathMatchers("/actuator/health").permitAll()
                     .pathMatchers("/actuator/info").permitAll()
                     .pathMatchers("/api/v1/health").permitAll()
+                    .pathMatchers("/openapi.json").permitAll()
                     .anyExchange().authenticated()
             }
             .build()
