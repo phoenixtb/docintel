@@ -74,6 +74,7 @@ async def _publish_query_event(
     reranker_degraded: bool = False,
     trace_id: str = "",
     query_expanded: bool = False,
+    rerank_skipped: bool = False,
 ) -> None:
     """Fire-and-forget: publish query telemetry to the analytics.query stream."""
     try:
@@ -100,6 +101,7 @@ async def _publish_query_event(
                 "reranker_degraded": reranker_degraded,
                 "trace_id": trace_id,
                 "query_expanded": query_expanded,
+                "rerank_skipped": rerank_skipped,
             },
             maxlen=_ANALYTICS_STREAM_MAXLEN,
         )
@@ -363,6 +365,11 @@ try:
     RAG_RERANKER_DEGRADED = Counter(
         "rag_reranker_degraded_total",
         "Reranker fallback activations (model unreachable or error)",
+        ["tenant"],
+    )
+    RAG_RERANK_SKIPPED = Counter(
+        "rag_rerank_skipped_total",
+        "G5 — rerank round-trips skipped because the top fused hybrid score cleared rag_rerank_skip_min_score",
         ["tenant"],
     )
     RAG_LLM_TOKENS = Counter(
@@ -706,7 +713,7 @@ def _serialize_sse(event: PipelineEvent, tenant_id: str = "") -> str:
         case MetadataEvent(
             query_id=qid, cache_hit=ch, context_state=cs, reranker_degraded=rd,
             retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout,
-            query_expanded=qe,
+            query_expanded=qe, rerank_skipped=rs,
         ):
             payload: dict = {"metadata": {"query_id": qid, "cache_hit": ch}}
             if cs:
@@ -723,6 +730,10 @@ def _serialize_sse(event: PipelineEvent, tenant_id: str = "") -> str:
                 payload["metadata"]["rerank_candidates_out"] = cout
             if qe is not None:
                 payload["metadata"]["query_expanded"] = qe
+            if rs is not None:
+                payload["metadata"]["rerank_skipped"] = rs
+                if rs and _METRICS_ENABLED:
+                    RAG_RERANK_SKIPPED.labels(tenant=tenant_id or "unknown").inc()
         case RoutingEvent(domain=d, explicit=e):
             payload = {"routing": {"domain": d, "explicit": e}}
         case QueuedEvent(message=m):
@@ -840,6 +851,7 @@ async def query_documents(
             reranker_degraded=result.get("reranker_degraded", False),
             trace_id=result.get("trace_id", ""),
             query_expanded=result.get("query_expanded", False),
+            rerank_skipped=result.get("rerank_skipped", False),
         ))
         return QueryResponse(
             answer=result["answer"],
@@ -886,6 +898,7 @@ async def query_documents_stream(
         rerank_candidates_out = 0
         reranker_degraded = False
         query_expanded = False
+        rerank_skipped = False
         try:
             async for event in rag_service.stream(
                 question=request.question,
@@ -923,6 +936,8 @@ async def query_documents_stream(
                         reranker_degraded = event.reranker_degraded
                     if event.query_expanded is not None:
                         query_expanded = event.query_expanded
+                    if event.rerank_skipped is not None:
+                        rerank_skipped = event.rerank_skipped
                 elif isinstance(event, SourcesEvent):
                     source_count = len(event.sources)
                 yield _serialize_sse(event, tenant_id=user_ctx.tenant_id)
@@ -966,6 +981,7 @@ async def query_documents_stream(
             reranker_degraded=reranker_degraded,
             trace_id=getattr(rag_service, "_last_trace_id", ""),
             query_expanded=query_expanded,
+            rerank_skipped=rerank_skipped,
         ))
 
     return StreamingResponse(

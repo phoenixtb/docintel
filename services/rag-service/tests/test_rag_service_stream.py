@@ -725,3 +725,124 @@ async def test_stream_expansion_fails_open_on_timeout():
     assert svc._last_query_expanded is False
     assert svc._retriever.run.call_count == 1
     assert any(isinstance(e, SourcesEvent) for e in events)
+
+
+# ---------------------------------------------------------------------------
+# G5 — conditional reranking (skip-decision logic)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_skip_disabled_by_default_always_reranks():
+    """rag_rerank_skip_enabled=False (default) — reranker always runs, even
+    when the top fused score would clear the (unused) skip threshold."""
+    svc = _make_service()
+    assert svc._settings.rag_rerank_skip_enabled is False
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.99)], "retrieval_mode": "hybrid",
+    }
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    svc._reranker.run.assert_called_once()
+    assert svc._last_rerank_skipped is False
+    skipped_meta = [e for e in events if isinstance(e, MetadataEvent) and e.rerank_skipped is not None]
+    assert skipped_meta and skipped_meta[0].rerank_skipped is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_skipped_when_fused_score_clears_gate():
+    """Enabled + hybrid mode + top fused score >= threshold → reranker is
+    never called; fused order/top-k is used as-is; rerank_skipped=True."""
+    settings = _make_settings(rag_rerank_skip_enabled=True, rag_rerank_skip_min_score=0.8)
+    svc = _make_service(settings)
+    docs = [_make_doc_id(f"chunk-{i}", score=0.9 - i * 0.01) for i in range(3)]
+    svc._retriever.run.return_value = {"documents": docs, "retrieval_mode": "hybrid"}
+    svc._opa_validator.run.side_effect = lambda documents, **kw: {"documents": documents}
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    svc._reranker.run.assert_not_called()
+    assert svc._last_rerank_skipped is True
+    skipped_meta = [e for e in events if isinstance(e, MetadataEvent) and e.rerank_skipped is not None]
+    assert skipped_meta and skipped_meta[0].rerank_skipped is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_not_skipped_below_threshold():
+    """Enabled + top fused score below threshold → full rerank still runs."""
+    settings = _make_settings(rag_rerank_skip_enabled=True, rag_rerank_skip_min_score=0.8)
+    svc = _make_service(settings)
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.6)], "retrieval_mode": "hybrid",
+    }
+    svc._opa_validator.run.side_effect = lambda documents, **kw: {"documents": documents}
+
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    svc._reranker.run.assert_called_once()
+    assert svc._last_rerank_skipped is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_never_skipped_outside_hybrid_mode():
+    """Fused-score skip gate only applies to hybrid retrieval — dense-only
+    scores are a different scale and must always go through full rerank,
+    regardless of how high the raw score is."""
+    settings = _make_settings(rag_rerank_skip_enabled=True, rag_rerank_skip_min_score=0.8)
+    svc = _make_service(settings)
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.99)], "retrieval_mode": "dense",
+    }
+
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    svc._reranker.run.assert_called_once()
+    assert svc._last_rerank_skipped is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_skip_bypasses_tau_relevance_gate():
+    """CRITICAL guard: rag_min_relevance_score (tau) is calibrated on reranker
+    scores and must NEVER be evaluated against fused scores. A fused score
+    that clears the (fused-scale) skip gate but sits below tau's numeric
+    value must still pass through — tau is not re-applied when skipped."""
+    settings = _make_settings(
+        rag_rerank_skip_enabled=True,
+        rag_rerank_skip_min_score=0.8,
+        rag_min_relevance_score=0.95,  # deliberately higher than the fused score below
+    )
+    svc = _make_service(settings)
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.85)], "retrieval_mode": "hybrid",
+    }
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._last_rerank_skipped is True
+    svc._reranker.run.assert_not_called()
+    sources_events = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources_events and sources_events[0].sources  # not abstained/filtered by tau
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_query_result_includes_rerank_skipped_field():
+    """query() dict surfaces rerank_skipped for the non-streaming /query path."""
+    settings = _make_settings(rag_rerank_skip_enabled=True, rag_rerank_skip_min_score=0.8)
+    svc = _make_service(settings)
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.9)], "retrieval_mode": "hybrid",
+    }
+    with _patch_llm(svc, ["answer"]):
+        result = await svc.query(**_make_stream_kwargs(svc, settings=settings))
+
+    assert result["rerank_skipped"] is True

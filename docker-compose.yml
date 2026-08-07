@@ -112,6 +112,10 @@ services:
       - LLM_EXPANSION_MODEL=${LLM_EXPANSION_MODEL:-qwen3:1.7b:4bit}
       # G2 — query rewriting before retrieval. Off by default pending A/B verification.
       - USE_QUERY_EXPANSION=${USE_QUERY_EXPANSION:-false}
+      # G5 — skip reranking when the top fused hybrid score clears this margin.
+      # Off by default — no safe margin found in golden-set calibration.
+      - RAG_RERANK_SKIP_ENABLED=${RAG_RERANK_SKIP_ENABLED:-false}
+      - RAG_RERANK_SKIP_MIN_SCORE=${RAG_RERANK_SKIP_MIN_SCORE:-1.01}
       # Embeddings — same engine as chat by default; override LLM_EMBED_URL to switch
       #   LMForge (macOS/Apple Silicon): http://host.docker.internal:11430/v1  [default]
       #   Ollama   (any platform):       http://host.docker.internal:11434/v1

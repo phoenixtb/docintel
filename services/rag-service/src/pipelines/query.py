@@ -499,6 +499,7 @@ class RAGService:
         self._last_rerank_candidates_out = 0
         self._last_reranker_degraded = False
         self._last_query_expanded = False
+        self._last_rerank_skipped = False
 
         # B4 — create a Langfuse trace with an explicit id equal to request_id
         # (== query_id) so ClickHouse can store a single id that both
@@ -688,22 +689,66 @@ class RAGService:
         else:
             documents = []
 
-        # ── 7. Rerank ─────────────────────────────────────────────────────────
+        # ── 7. Rerank (or skip — G5) ──────────────────────────────────────────
         if use_reranking and documents:
             candidates_in = len(documents)
-            try:
-                rerank_result = await loop.run_in_executor(
-                    None,
-                    lambda: self._reranker.run(  # type: ignore[union-attr]
-                        query=question,
-                        documents=documents,
-                    ),
-                )
-                documents = rerank_result["documents"]
-                self._last_reranker_degraded = bool(rerank_result.get("reranker_degraded"))
-            except Exception as e:
-                logger.warning("Reranker failed, falling back to retrieval order: %s", e)
-                self._last_reranker_degraded = True
+            top_fused_score = documents[0].score or 0.0
+
+            # G5 — after RRF fusion, a top candidate whose fused score clears a
+            # calibrated confidence margin already reflects strong dense+sparse
+            # consensus (that's what a high RRF score means): skip the reranker
+            # round-trip entirely for these queries.
+            #
+            # GUARD — tau/skip interaction (see plan G5): rag_min_relevance_score
+            # (tau, step 8 below) was calibrated on RERANKER scores. Fused RRF
+            # scores live on a different, much smaller numeric scale, so tau must
+            # NEVER be evaluated against un-reranked documents — that would either
+            # gate everything out or nothing, depending on which side of the scale
+            # gap it lands on. rag_rerank_skip_min_score is a SEPARATE threshold,
+            # calibrated directly on the fused-score distribution (same
+            # methodology as calibrate_threshold.py, see docstring in config.py)
+            # to sit comfortably above the abstention/near-miss region. Clearing
+            # it is only possible for queries that would unambiguously pass tau
+            # anyway, so the skip decision itself doubles as this query's
+            # relevance gate — step 8 does not re-apply tau when rerank was
+            # skipped. Any query whose top fused score falls at or below that
+            # bar (including every near-miss/abstain case observed during
+            # calibration) always takes the full rerank + tau path unchanged —
+            # the gate is either decisive-and-skipped or reranked, never both
+            # skipped and ambiguous.
+            can_skip_rerank = (
+                cfg.rag_rerank_skip_enabled
+                and self._last_retrieval_mode == "hybrid"
+                and top_fused_score >= cfg.rag_rerank_skip_min_score
+            )
+
+            if can_skip_rerank:
+                # Fused order from Qdrant's RRF is already the correct ranking —
+                # just cap to the same candidate count the reranker would have
+                # returned, so downstream top_k/prompt sizing is unaffected.
+                documents = documents[: cfg.rag_reranker_top_k]
+                self._last_reranker_degraded = False
+                self._last_rerank_skipped = True
+            else:
+                try:
+                    rerank_result = await loop.run_in_executor(
+                        None,
+                        lambda: self._reranker.run(  # type: ignore[union-attr]
+                            query=question,
+                            documents=documents,
+                        ),
+                    )
+                    documents = rerank_result["documents"]
+                    self._last_reranker_degraded = bool(rerank_result.get("reranker_degraded"))
+                except Exception as e:
+                    logger.warning("Reranker failed, falling back to retrieval order: %s", e)
+                    self._last_reranker_degraded = True
+
+            logger.info(
+                "rerank_gate mode=%s skipped=%s top_fused=%.4f n_in=%d n_out=%d",
+                self._last_retrieval_mode, self._last_rerank_skipped,
+                top_fused_score, candidates_in, len(documents),
+            )
 
             self._last_rerank_candidates_in = candidates_in
             self._last_rerank_candidates_out = len(documents)
@@ -713,10 +758,15 @@ class RAGService:
                 reranker_degraded=self._last_reranker_degraded,
                 rerank_candidates_in=self._last_rerank_candidates_in,
                 rerank_candidates_out=self._last_rerank_candidates_out,
+                rerank_skipped=self._last_rerank_skipped,
             )
 
         # ── 8. Min-score / top-k filter ───────────────────────────────────────
-        if effective_min_score > 0.0:
+        # G5 guard: tau (effective_min_score) is calibrated on RERANKER scores —
+        # never evaluate it against fused-score documents from a skipped rerank
+        # (see step 7). rag_rerank_skip_min_score already served as this
+        # query's relevance gate.
+        if effective_min_score > 0.0 and not self._last_rerank_skipped:
             above = [d for d in documents if (d.score or 0.0) >= effective_min_score]
             if not above and cfg.rag_min_score_fallback_topk > 0:
                 above = documents[:cfg.rag_min_score_fallback_topk]
@@ -1039,6 +1089,7 @@ class RAGService:
         rerank_candidates_out: int | None = None
         reranker_degraded: bool | None = None
         query_expanded: bool | None = None
+        rerank_skipped: bool | None = None
 
         async for event in self.stream(
             question=question,
@@ -1065,7 +1116,7 @@ class RAGService:
             retrieve_only=retrieve_only,
         ):
             match event:
-                case MetadataEvent(cache_hit=ch, retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout, reranker_degraded=rd, query_expanded=qe):
+                case MetadataEvent(cache_hit=ch, retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout, reranker_degraded=rd, query_expanded=qe, rerank_skipped=rs):
                     cache_hit = ch
                     if rm is not None:
                         retrieval_mode = rm
@@ -1077,6 +1128,8 @@ class RAGService:
                         reranker_degraded = rd
                     if qe is not None:
                         query_expanded = qe
+                    if rs is not None:
+                        rerank_skipped = rs
                 case RoutingEvent(domain=d):
                     detected_domain = d
                 case ThinkingTokenEvent(text=t):
@@ -1108,5 +1161,6 @@ class RAGService:
             "rerank_candidates_out": rerank_candidates_out or 0,
             "reranker_degraded": bool(reranker_degraded),
             "query_expanded": bool(query_expanded),
+            "rerank_skipped": bool(rerank_skipped),
             "trace_id": getattr(self, "_last_trace_id", ""),
         }

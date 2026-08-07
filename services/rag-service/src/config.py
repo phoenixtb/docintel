@@ -113,6 +113,30 @@ class Settings(BaseSettings):
     # 0 = strict (return empty → NO_RELEVANT_DOCUMENTS_RESPONSE).
     # Set to 1 to always return at least one result regardless of score.
     rag_min_score_fallback_topk: int = 0
+
+    # G5 — conditional reranking: skip the LMForge rerank round-trip when the
+    # top RRF-fused hybrid score already clears a calibrated confidence margin.
+    # rag_rerank_skip_min_score is on the FUSED-SCORE scale, NOT the reranker
+    # scale that rag_min_relevance_score above is calibrated on — the two
+    # thresholds must never be swapped or compared directly (see the guard
+    # comment in pipelines/query.py step 7).
+    #
+    # OFF BY DEFAULT — calibration evidence (golden-set fused-score sample via
+    # the rerank_gate log line, n=29): legitimate abstain-worthy queries reach
+    # fused scores up to 0.83, and several genuinely-answerable queries sit as
+    # low as 0.50 — the two distributions fully overlap across [0.50, 0.83].
+    # No threshold in that band separates them; skipping there measurably
+    # regressed abstention-correct (28/31 -> 25/31 at 0.75) by returning
+    # unfiltered fused-order docs for queries that should have abstained. Only
+    # a narrow band above 0.83 (e.g. >=0.9) showed separation in this small
+    # 31-query sample, but with too few queries clearing it (~7%) to justify
+    # the risk on unproven statistics. rag_rerank_skip_min_score defaults above
+    # the observed max (1.0) so an accidental enable is a no-op until this is
+    # recalibrated on a larger production sample. Calibration evidence in the
+    # G5 commit message (git log --grep G5); methodology per plan 05 G5.
+    rag_rerank_skip_enabled: bool = False
+    rag_rerank_skip_min_score: float = 1.01
+
     rag_cache_similarity_threshold: float = 0.92
     # Typewriter replay for cache hits: chunk the cached response into small
     # TokenEvents to preserve the streaming UX. Set delay_ms=0 for instant replay.

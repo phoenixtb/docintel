@@ -50,6 +50,9 @@ class MetadataEvent:
     # G2 — true when the expanded-query candidates were unioned in before rerank
     # (expansion succeeded and produced a distinct query); None/False otherwise.
     query_expanded: Optional[bool] = None
+    # G5 — true when the reranker round-trip was skipped because the top fused
+    # (RRF) hybrid-retrieval score cleared rag_rerank_skip_min_score.
+    rerank_skipped: Optional[bool] = None
 
 
 @dataclass(frozen=True)
