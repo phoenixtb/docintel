@@ -54,15 +54,24 @@ class GatewayIntegrationTest {
         fun configureProperties(registry: DynamicPropertyRegistry) {
             registry.add("wiremock.server.port") { wireMockServer.port() }
             
-            // Configure gateway routes to use WireMock
+            // Configure gateway routes to use WireMock.
+            //
+            // Spring's relaxed list binding merges these indexed properties with
+            // whatever application.yml defines at the SAME index — any predicate
+            // slot we don't explicitly set here (e.g. predicates[1]) leaks through
+            // from application.yml's real route list. We pin predicates[1] to an
+            // any-method predicate on both synthetic routes so the test is not
+            // coupled to which real route currently happens to sit at index 0/1.
             registry.add("spring.cloud.gateway.routes[0].id") { "document-service" }
             registry.add("spring.cloud.gateway.routes[0].uri") { "http://localhost:${wireMockServer.port()}" }
             registry.add("spring.cloud.gateway.routes[0].predicates[0]") { "Path=/api/v1/documents, /api/v1/documents/**" }
+            registry.add("spring.cloud.gateway.routes[0].predicates[1]") { "Method=GET,POST,PATCH,PUT,DELETE" }
             registry.add("spring.cloud.gateway.routes[0].filters[0]") { "RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents\${segment}" }
             
             registry.add("spring.cloud.gateway.routes[1].id") { "rag-service" }
             registry.add("spring.cloud.gateway.routes[1].uri") { "http://localhost:${wireMockServer.port()}" }
             registry.add("spring.cloud.gateway.routes[1].predicates[0]") { "Path=/api/v1/query/**" }
+            registry.add("spring.cloud.gateway.routes[1].predicates[1]") { "Method=GET,POST,PATCH,PUT,DELETE" }
             registry.add("spring.cloud.gateway.routes[1].filters[0]") { "RewritePath=/api/v1/query(?<segment>/?.*), /query\${segment}" }
             
             // Disable security for tests
