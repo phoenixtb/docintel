@@ -367,6 +367,74 @@ def setup_e2e_environment(
             user_id=user_id,
         )
 
+    # The data-loader's "done" event means documents were handed to the
+    # pipeline, NOT that embeddings are in Qdrant (status flips to COMPLETED
+    # only after the vector upsert). Querying before that races the tail of
+    # ingestion — observed live: the first query of a run returned 0 sources
+    # and wrongly abstained, while the same corpus served 5 sources seconds
+    # later (reports/full-gate-final-20260808-0438).
+    _wait_for_processing_complete(base_url, tenant_id, bearer_token)
+
+
+def _wait_for_processing_complete(
+    base_url: str,
+    tenant_id: str,
+    bearer_token: str | None,
+    timeout_s: float = 180.0,
+    poll_s: float = 3.0,
+) -> None:
+    """Block until no document in the tenant is PENDING/PROCESSING (or timeout)."""
+    headers: dict[str, str] = {"X-Tenant-Id": tenant_id}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    base = base_url.rstrip("/")
+    deadline = time.time() + timeout_s
+
+    while time.time() < deadline:
+        in_flight = 0
+        total = 0
+        page = 0
+        while True:
+            resp = httpx.get(
+                f"{base}/api/v1/documents",
+                headers=headers,
+                params={"page": page, "size": 200},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                print(
+                    f"  ⚠  Embedding-wait: GET /api/v1/documents HTTP {resp.status_code} — proceeding without wait.",
+                    file=sys.stderr,
+                )
+                return
+            data = resp.json()
+            docs = data.get("content", data if isinstance(data, list) else [])
+            if not docs:
+                break
+            total += len(docs)
+            in_flight += sum(
+                1 for d in docs if d.get("status") in ("PENDING", "PROCESSING")
+            )
+            if data.get("last", True):
+                break
+            page += 1
+
+        if total and in_flight == 0:
+            print(f"  ✓ All {total} documents COMPLETED (embeddings in Qdrant)")
+            return
+        print(
+            f"\r  Waiting for embeddings … {total - in_flight}/{total} completed",
+            end="",
+            flush=True,
+        )
+        time.sleep(poll_s)
+
+    print(
+        f"\n  ⚠  Embedding-wait timed out after {timeout_s:.0f}s — proceeding; "
+        "early queries may under-retrieve.",
+        file=sys.stderr,
+    )
+
 
 def teardown_e2e_environment(
     base_url: str,
@@ -1140,7 +1208,9 @@ def main() -> int:
     if not no_setup:
         setup_e2e_environment(
             tenant_id=tenant_id,
+            base_url=base_url,
             data_loader_url=data_loader_url,
+            bearer_token=bearer_token,
             seed_samples=run_cfg.get("seed_samples"),
         )
         print()
