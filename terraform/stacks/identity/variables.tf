@@ -24,3 +24,15 @@ variable "dev_mode" {
   type        = bool
   default     = true
 }
+
+variable "native_redirect_uris" {
+  description = "OIDC redirect URIs for the native (mobile) app: custom scheme + HTTPS app-link"
+  type        = list(string)
+  default     = ["com.docintel.app:/callback", "https://app.docintel.dev/callback"]
+}
+
+variable "native_post_logout_redirect_uris" {
+  description = "OIDC post-logout redirect URIs for the native (mobile) app"
+  type        = list(string)
+  default     = ["com.docintel.app:/logout"]
+}

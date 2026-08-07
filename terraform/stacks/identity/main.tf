@@ -35,6 +35,8 @@ module "project" {
   e2e_org_id      = module.orgs.e2e_org_id
   redirect_uris   = var.redirect_uris
   dev_mode        = var.dev_mode
+  native_redirect_uris             = var.native_redirect_uris
+  native_post_logout_redirect_uris = var.native_post_logout_redirect_uris
 }
 
 module "users" {

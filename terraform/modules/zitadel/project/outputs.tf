@@ -6,6 +6,10 @@ output "client_id" {
   value = zitadel_application_oidc.web_ui.client_id
 }
 
+output "mobile_client_id" {
+  value = zitadel_application_oidc.mobile.client_id
+}
+
 output "alpha_grant_id" {
   value = zitadel_project_grant.alpha.id
 }

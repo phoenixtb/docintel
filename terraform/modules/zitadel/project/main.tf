@@ -59,6 +59,33 @@ resource "zitadel_application_oidc" "web_ui" {
   id_token_userinfo_assertion = false
 }
 
+# Native (mobile/desktop) app — PKCE, no client secret, refresh tokens for
+# offline session renewal. Public-client PKCE is enforced by Zitadel whenever
+# auth_method_type = NONE, so no separate pkce flag exists on this resource.
+# Redirects are pinned to the exact custom-scheme + HTTPS app-link URIs; outside
+# dev, dev_mode=false makes Zitadel reject any redirect not in this exact list.
+resource "zitadel_application_oidc" "mobile" {
+  org_id     = var.platform_org_id
+  project_id = zitadel_project.docintel.id
+  name       = "DocIntel Mobile"
+
+  redirect_uris             = var.native_redirect_uris
+  response_types            = ["OIDC_RESPONSE_TYPE_CODE"]
+  grant_types                = ["OIDC_GRANT_TYPE_AUTHORIZATION_CODE", "OIDC_GRANT_TYPE_REFRESH_TOKEN"]
+  post_logout_redirect_uris = var.native_post_logout_redirect_uris
+
+  app_type         = "OIDC_APP_TYPE_NATIVE"
+  auth_method_type = "OIDC_AUTH_METHOD_TYPE_NONE"
+  version          = "OIDC_VERSION_1_0"
+  dev_mode         = var.dev_mode
+
+  access_token_type            = "OIDC_TOKEN_TYPE_JWT"
+  id_token_role_assertion      = true
+  access_token_role_assertion  = true
+  id_token_userinfo_assertion  = false
+  skip_native_app_success_page = true
+}
+
 # Grant project to tenant orgs (cross-org access)
 resource "zitadel_project_grant" "alpha" {
   org_id         = var.platform_org_id
