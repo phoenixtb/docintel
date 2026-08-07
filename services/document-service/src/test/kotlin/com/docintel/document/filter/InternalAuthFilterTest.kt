@@ -1,5 +1,6 @@
 package com.docintel.document.filter
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import org.springframework.mock.web.MockFilterChain
@@ -9,7 +10,7 @@ import org.springframework.mock.web.MockHttpServletResponse
 class InternalAuthFilterTest {
 
     private val secret = "test-secret"
-    private val filter = InternalAuthFilter(secret)
+    private val filter = InternalAuthFilter(secret, ObjectMapper())
 
     @Test
     fun `service-only from-path is rejected with only X-User-Id`() {

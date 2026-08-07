@@ -1,5 +1,6 @@
 package com.docintel.gateway.filter
 
+import com.docintel.gateway.error.writeErrorEnvelope
 import com.github.benmanes.caffeine.cache.Cache
 import com.github.benmanes.caffeine.cache.Caffeine
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry
@@ -126,10 +127,8 @@ class OpaAuthorizationFilter(
         }
     }
 
-    private fun forbidden(exchange: ServerWebExchange): Mono<Void> {
-        exchange.response.statusCode = HttpStatus.FORBIDDEN
-        return exchange.response.setComplete()
-    }
+    private fun forbidden(exchange: ServerWebExchange): Mono<Void> =
+        writeErrorEnvelope(exchange, HttpStatus.FORBIDDEN, "FORBIDDEN", "Access denied by policy.")
 
     override fun getOrder(): Int = -98
 

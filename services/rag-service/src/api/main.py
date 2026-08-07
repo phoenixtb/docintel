@@ -16,6 +16,7 @@ from typing import Optional
 
 from docintel_common.messaging import RedisStreamBus, TOPIC_ANALYTICS_QUERY
 from docintel_common.tracing import TraceContext, configure_trace_logging
+from docintel_common.errors import install_error_handlers
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -354,6 +355,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+install_error_handlers(app)
 
 
 @app.middleware("http")

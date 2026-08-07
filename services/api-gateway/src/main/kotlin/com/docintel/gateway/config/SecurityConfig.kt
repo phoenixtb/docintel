@@ -1,9 +1,11 @@
 package com.docintel.gateway.config
 
+import com.docintel.gateway.error.writeErrorEnvelope
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Profile
+import org.springframework.http.HttpStatus
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity
 import org.springframework.security.config.web.server.ServerHttpSecurity
 import org.springframework.security.oauth2.jwt.NimbusReactiveJwtDecoder
@@ -35,6 +37,20 @@ class SecurityConfig {
         return http
             .csrf { it.disable() }
             .cors { it.configurationSource(corsSource) }
+            .exceptionHandling { handling ->
+                handling
+                    .authenticationEntryPoint { exchange, _ ->
+                        writeErrorEnvelope(
+                            exchange, HttpStatus.UNAUTHORIZED, "UNAUTHORIZED",
+                            "Missing or invalid access token."
+                        )
+                    }
+                    .accessDeniedHandler { exchange, _ ->
+                        writeErrorEnvelope(
+                            exchange, HttpStatus.FORBIDDEN, "FORBIDDEN", "Access denied."
+                        )
+                    }
+            }
             .oauth2ResourceServer { oauth2 -> oauth2.jwt { it.jwtDecoder(jwtDecoder) } }
             .authorizeExchange { auth ->
                 auth

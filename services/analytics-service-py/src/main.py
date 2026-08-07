@@ -22,6 +22,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 
+from docintel_common.errors import install_error_handlers
+
 from .config import Settings, get_settings
 from .db import ensure_schema, get_client
 from .models import FeedbackEvent, QueryEvent
@@ -63,6 +65,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+install_error_handlers(app)
 
 _ALLOWED_ORIGINS = [
     o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()

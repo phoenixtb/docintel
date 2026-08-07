@@ -1,5 +1,7 @@
 package com.docintel.document.filter
 
+import com.docintel.document.error.writeErrorEnvelope
+import com.fasterxml.jackson.databind.ObjectMapper
 import jakarta.servlet.FilterChain
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
@@ -31,6 +33,7 @@ import org.springframework.web.filter.OncePerRequestFilter
 @Order(1)
 class InternalAuthFilter(
     @Value("\${internal.gateway.secret:}") private val secret: String,
+    private val objectMapper: ObjectMapper,
 ) : OncePerRequestFilter() {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -103,8 +106,6 @@ class InternalAuthFilter(
     }
 
     private fun forbidden(response: HttpServletResponse, message: String) {
-        response.status = HttpServletResponse.SC_FORBIDDEN
-        response.contentType = "application/json"
-        response.writer.write("""{"error":"Forbidden","message":"$message"}""")
+        writeErrorEnvelope(response, HttpServletResponse.SC_FORBIDDEN, "FORBIDDEN", message, objectMapper)
     }
 }

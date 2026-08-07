@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         verify_internal_token,
     )
     from .tracing import TraceContext, TraceLogFilter, configure_trace_logging
+    from .errors import error_envelope, install_error_handlers
     from .messaging import (
         MessageBus,
         RedisStreamBus,
@@ -73,6 +74,9 @@ __all__ = [
     "TraceContext",
     "TraceLogFilter",
     "configure_trace_logging",
+    # error envelope
+    "error_envelope",
+    "install_error_handlers",
     # messaging
     "MessageBus",
     "RedisStreamBus",
@@ -108,6 +112,8 @@ _ATTR_TO_SUBMODULE = {
     "TraceContext": "tracing",
     "TraceLogFilter": "tracing",
     "configure_trace_logging": "tracing",
+    "error_envelope": "errors",
+    "install_error_handlers": "errors",
     "MessageBus": "messaging",
     "RedisStreamBus": "messaging",
     "TOPIC_FILES_AVAILABLE": "messaging",

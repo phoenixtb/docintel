@@ -518,7 +518,7 @@
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error ?? `${res.status}`);
+        throw new Error(err.error?.message ?? `${res.status}`);
       }
       const job = await res.json();
       cleanupJob = { jobId: job.jobId, tenantId: job.tenantId, status: job.status, total: job.matchCount, processed: 0, succeeded: 0, failed: 0 };
