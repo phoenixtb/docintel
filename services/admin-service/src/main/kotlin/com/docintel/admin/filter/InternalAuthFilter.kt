@@ -38,7 +38,7 @@ class InternalAuthFilter(
     ) {
         val path = request.requestURI
 
-        if (path.startsWith("/actuator")) {
+        if (path.startsWith("/actuator") || path.startsWith("/v3/api-docs") || path.startsWith("/swagger-ui")) {
             filterChain.doFilter(request, response)
             return
         }

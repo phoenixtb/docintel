@@ -65,6 +65,14 @@ internal:
   gateway:
     secret: ${INTERNAL_GATEWAY_SECRET:}
 
+# OpenAPI export — /v3/api-docs is scraped by scripts/generate-openapi.sh and
+# merged into docs/api/openapi.json. Swagger UI kept for local dev convenience.
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
 # Logging
 logging:
   level:
