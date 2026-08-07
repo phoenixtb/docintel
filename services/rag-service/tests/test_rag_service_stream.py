@@ -600,3 +600,128 @@ async def test_query_result_includes_retrieval_and_rerank_fields():
     assert result["rerank_candidates_out"] == 1
     assert result["reranker_degraded"] is False
     assert result["trace_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# G2 — query expansion wiring
+# ---------------------------------------------------------------------------
+
+def _make_doc_id(doc_id: str, score: float = 0.8) -> MagicMock:
+    doc = _make_doc(score=score)
+    doc.id = doc_id
+    return doc
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_disabled_by_default_skips_expander():
+    """use_query_expansion=False (default) — expander never instantiated/called,
+    retriever.run is called exactly once (no union retrieval)."""
+    svc = _make_service()
+    svc._query_expander = MagicMock()  # present but must not be consulted
+    assert svc._settings.use_query_expansion is False
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc)))
+    svc._query_expander.run.assert_not_called()
+    svc._retriever.run.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_unions_candidates_before_rerank():
+    """Enabled + distinct expanded query → expander called, dense embedder
+    called twice (original + expanded), retriever called twice, and the
+    union (deduped by id) is what reaches the reranker."""
+    settings = _make_settings(use_query_expansion=True)
+    svc = _make_service(settings)
+    svc._query_expander = MagicMock()
+    svc._query_expander.run.return_value = {
+        "original_query": "remote work",
+        "expanded_query": "remote work WFH telecommute",
+        "search_terms": ["remote work", "WFH", "telecommute"],
+    }
+    original_doc = _make_doc_id("chunk-original")
+    expanded_only_doc = _make_doc_id("chunk-expanded-only")
+    svc._retriever.run.side_effect = [
+        {"documents": [original_doc], "retrieval_mode": "hybrid"},
+        {"documents": [original_doc, expanded_only_doc]},  # expanded-query retrieval
+    ]
+    svc._opa_validator.run.side_effect = lambda documents, **kw: {"documents": documents}
+    svc._reranker.run.side_effect = lambda query, documents: {"documents": documents, "reranker_degraded": False}
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._dense_embedder.run.call_count == 2
+    assert svc._retriever.run.call_count == 2
+    rerank_call_docs = svc._reranker.run.call_args.kwargs["documents"]
+    assert {d.id for d in rerank_call_docs} == {"chunk-original", "chunk-expanded-only"}
+
+    meta_events = [e for e in events if isinstance(e, MetadataEvent) and e.query_expanded is not None]
+    assert meta_events and meta_events[0].query_expanded is True
+    assert svc._last_query_expanded is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_noop_when_rewrite_equals_original():
+    """Expander returns the same text back (no useful rewrite) — no second
+    embed/retrieve call, query_expanded stays False."""
+    settings = _make_settings(use_query_expansion=True)
+    svc = _make_service(settings)
+    svc._query_expander = MagicMock()
+    svc._query_expander.run.return_value = {
+        "original_query": "What is the termination clause?",
+        "expanded_query": "What is the termination clause?",
+        "search_terms": ["What is the termination clause?"],
+    }
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._dense_embedder.run.call_count == 1
+    assert svc._retriever.run.call_count == 1
+    assert svc._last_query_expanded is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_fails_open_on_expander_exception():
+    """Expander raises (e.g. LLM unreachable) — stream() falls back to the
+    original query only; no crash, query_expanded=False."""
+    settings = _make_settings(use_query_expansion=True)
+    svc = _make_service(settings)
+    svc._query_expander = MagicMock()
+    svc._query_expander.run.side_effect = RuntimeError("LMForge unreachable")
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._dense_embedder.run.call_count == 1
+    assert svc._retriever.run.call_count == 1
+    assert svc._last_query_expanded is False
+    sources_events = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources_events  # stream completed normally despite expander failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_fails_open_on_timeout():
+    """Expander call exceeds rag_query_expansion_timeout_s — asyncio.wait_for
+    raises TimeoutError, caught and treated identically to any other failure."""
+    settings = _make_settings(use_query_expansion=True, rag_query_expansion_timeout_s=0.01)
+    svc = _make_service(settings)
+
+    def _slow_run(query):
+        import time
+        time.sleep(0.2)
+        return {"expanded_query": query + " slow"}
+
+    svc._query_expander = MagicMock()
+    svc._query_expander.run.side_effect = _slow_run
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._last_query_expanded is False
+    assert svc._retriever.run.call_count == 1
+    assert any(isinstance(e, SourcesEvent) for e in events)

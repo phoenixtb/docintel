@@ -158,11 +158,15 @@ Your question: "{query}\""""
 # Query Expansion Prompt
 # =============================================================================
 
-QUERY_EXPANSION_PROMPT = """Given this user question, generate 2-3 alternative phrasings or related search terms that would help find relevant documents. Return only the terms, one per line, without numbering.
 
-Question: {query}
+# G2 — strict few-token rewrite: 2-3 comma-separated terms, no preamble/explanation.
+# Kept short deliberately — this runs on a small fast model under a ~2s hard
+# timeout (see rag_query_expansion_timeout_s); verbose output risks the timeout
+# firing and wastes tokens on a query-expansion step that must stay cheap.
+QUERY_EXPANSION_PROMPT = """Add 2-3 alternative terms or synonyms that might appear in documents answering this query. Reply with ONLY the terms, comma-separated. No explanation, no preamble, no numbering.
 
-Alternative search terms:"""
+Query: {query}
+Terms:"""
 
 # =============================================================================
 # Domain Classification Labels

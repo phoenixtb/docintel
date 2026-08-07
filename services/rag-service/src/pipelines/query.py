@@ -47,6 +47,7 @@ from ..components.model_profile_resolver import ModelProfileResolver
 from ..components.observability import CostTracker
 from ..components.opa import OpaChunkValidator
 from ..components.prompt import PromptBuilder
+from ..components.query_transform import QueryExpander
 from ..components.reranker import LmforgeReranker
 from ..components.retrieval import SecureRetriever
 from ..events import (
@@ -186,6 +187,9 @@ class RAGService:
         self._reranker: Optional[LmforgeReranker] = None
         self._prompt_builder: Optional[PromptBuilder] = None
 
+        # G2 — query expansion (optional, disabled by default)
+        self._query_expander: Optional[QueryExpander] = None
+
         # Cost/token accounting — per-tenant in-memory accumulator
         self._cost_tracker = CostTracker()
 
@@ -243,6 +247,9 @@ class RAGService:
                 top_k=cfg.rag_reranker_top_k,
             )
             self._prompt_builder = PromptBuilder()
+
+            if cfg.use_query_expansion:
+                self._query_expander = QueryExpander(llm_model=cfg.llm_expansion_model)
 
             self._ready = True
             logger.info(
@@ -491,6 +498,7 @@ class RAGService:
         self._last_rerank_candidates_in = 0
         self._last_rerank_candidates_out = 0
         self._last_reranker_degraded = False
+        self._last_query_expanded = False
 
         # B4 — create a Langfuse trace with an explicit id equal to request_id
         # (== query_id) so ClickHouse can store a single id that both
@@ -561,6 +569,42 @@ class RAGService:
             except Exception as e:
                 logger.warning("Cache check failed (continuing without cache): %s", e)
 
+        # ── 3b. Query expansion (G2 — optional, off by default) ─────────────────
+        # Rewrites the query with a small fast model to bridge vocabulary gaps
+        # (e.g. "WFH" vs "remote work"). Bounded by a hard wall-clock timeout and
+        # fails open to the original query on any error/timeout/no-op rewrite —
+        # expansion must never block or degrade retrieval. The expanded query is
+        # embedded separately and its candidates are unioned in at retrieval time
+        # (step 5); the reranker (step 7) is what handles precision on the wider
+        # candidate set, so widening recall here is safe.
+        expanded_embedding: list[float] | None = None
+        expanded_sparse_embedding = None
+        if cfg.use_query_expansion and self._query_expander is not None:
+            expanded_query = question
+            try:
+                expand_result = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: self._query_expander.run(query=question)),  # type: ignore[union-attr]
+                    timeout=cfg.rag_query_expansion_timeout_s,
+                )
+                expanded_query = expand_result.get("expanded_query", question)
+            except Exception as e:
+                logger.warning("Query expansion failed/timed out, using original query only: %s", e)
+
+            if expanded_query and expanded_query.strip() != question.strip():
+                try:
+                    exp_embed_result = await loop.run_in_executor(
+                        None, lambda: self._dense_embedder.run(text=expanded_query)  # type: ignore[union-attr]
+                    )
+                    exp_sparse_result = await loop.run_in_executor(
+                        None, lambda: self._sparse_embedder.run(text=expanded_query)  # type: ignore[union-attr]
+                    )
+                    expanded_embedding = exp_embed_result["embedding"]
+                    expanded_sparse_embedding = exp_sparse_result.get("sparse_embedding")
+                    self._last_query_expanded = True
+                except Exception as e:
+                    logger.warning("Embedding expanded query failed, using original candidates only: %s", e)
+                    expanded_embedding = None
+
         # ── 4. Route ──────────────────────────────────────────────────────────
         try:
             detected_domain, domain_filter = await loop.run_in_executor(
@@ -589,15 +633,41 @@ class RAGService:
             )
             retrieved_docs = retrieval_result["documents"]
             self._last_retrieval_mode = retrieval_result.get("retrieval_mode", "dense")
-            yield MetadataEvent(
-                query_id=request_id,
-                cache_hit=False,
-                retrieval_mode=self._last_retrieval_mode,
-            )
         except Exception as e:
             logger.error("Retrieval failed: %s", e)
             yield ErrorEvent(message=f"Retrieval failed: {e}")
             return
+
+        # G2 — union in candidates retrieved via the expanded query, deduped by
+        # chunk id. Failure here is non-fatal: fall back to the original-query
+        # candidates already retrieved above.
+        if expanded_embedding is not None:
+            try:
+                expanded_retrieval = await loop.run_in_executor(
+                    None,
+                    lambda: self._retriever.run(  # type: ignore[union-attr]
+                        query_embedding=expanded_embedding,
+                        query_sparse_embedding=expanded_sparse_embedding,
+                        tenant_id=tenant_id,
+                        user_roles=user_roles or None,
+                        user_id=user_id,
+                        domain_filter=domain_filter,
+                    ),
+                )
+                seen_ids = {d.id for d in retrieved_docs}
+                for d in expanded_retrieval["documents"]:
+                    if d.id not in seen_ids:
+                        retrieved_docs.append(d)
+                        seen_ids.add(d.id)
+            except Exception as e:
+                logger.warning("Expanded-query retrieval failed, continuing with original candidates: %s", e)
+
+        yield MetadataEvent(
+            query_id=request_id,
+            cache_hit=False,
+            retrieval_mode=self._last_retrieval_mode,
+            query_expanded=self._last_query_expanded,
+        )
 
         # ── 6. OPA validate (A6/A7) ───────────────────────────────────────────
         if retrieved_docs:
@@ -968,6 +1038,7 @@ class RAGService:
         rerank_candidates_in: int | None = None
         rerank_candidates_out: int | None = None
         reranker_degraded: bool | None = None
+        query_expanded: bool | None = None
 
         async for event in self.stream(
             question=question,
@@ -994,7 +1065,7 @@ class RAGService:
             retrieve_only=retrieve_only,
         ):
             match event:
-                case MetadataEvent(cache_hit=ch, retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout, reranker_degraded=rd):
+                case MetadataEvent(cache_hit=ch, retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout, reranker_degraded=rd, query_expanded=qe):
                     cache_hit = ch
                     if rm is not None:
                         retrieval_mode = rm
@@ -1004,6 +1075,8 @@ class RAGService:
                         rerank_candidates_out = cout
                     if rd is not None:
                         reranker_degraded = rd
+                    if qe is not None:
+                        query_expanded = qe
                 case RoutingEvent(domain=d):
                     detected_domain = d
                 case ThinkingTokenEvent(text=t):
@@ -1034,5 +1107,6 @@ class RAGService:
             "rerank_candidates_in": rerank_candidates_in or 0,
             "rerank_candidates_out": rerank_candidates_out or 0,
             "reranker_degraded": bool(reranker_degraded),
+            "query_expanded": bool(query_expanded),
             "trace_id": getattr(self, "_last_trace_id", ""),
         }

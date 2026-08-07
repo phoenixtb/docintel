@@ -83,8 +83,10 @@ class Settings(BaseSettings):
     llm_thinking_stream_timeout_s: float = 360.0 # thinking mode (6 min for complex reasoning)
     llm_stream_max_retries: int = 1              # retries for normal mode
     llm_thinking_stream_max_retries: int = 0     # no retry for thinking — already waited long
-    # Fast model used only for async conversation summarization (not main queries).
-    llm_expansion_model: str = "qwen3:1.7b"
+    # Fast model used for async conversation summarization AND query expansion
+    # (G2). Must be a chat model actually served by the engine — "qwen3:1.7b"
+    # (no quant suffix) 404s against LMForge, which serves "qwen3:1.7b:4bit".
+    llm_expansion_model: str = "qwen3:1.7b:4bit"
 
     # ── Conversation context compression ──────────────────────────────────────
     # Anchored iterative summarization — compresses evicted turns into a rolling
@@ -135,8 +137,11 @@ class Settings(BaseSettings):
     rag_domain_router_model: str = "MoritzLaurer/deberta-v3-base-zeroshot-v1.1-all-33"
     rag_domain_routing_confidence: float = 0.6
 
-    # ── Query expansion (optional, disabled by default) ───────────────────────
+    # ── Query expansion (G2, optional, disabled by default pending A/B) ──────
     use_query_expansion: bool = False
+    # Hard wall-clock budget for the expansion LLM call. Expansion fails open
+    # (falls back to the original query) on timeout — never blocks retrieval.
+    rag_query_expansion_timeout_s: float = 2.0
 
     # ── Langfuse tracing ──────────────────────────────────────────────────────
     langfuse_public_key: str = ""

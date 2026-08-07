@@ -47,6 +47,9 @@ class MetadataEvent:
     retrieval_mode: Optional[str] = None
     rerank_candidates_in: Optional[int] = None
     rerank_candidates_out: Optional[int] = None
+    # G2 — true when the expanded-query candidates were unioned in before rerank
+    # (expansion succeeded and produced a distinct query); None/False otherwise.
+    query_expanded: Optional[bool] = None
 
 
 @dataclass(frozen=True)
