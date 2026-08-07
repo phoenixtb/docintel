@@ -830,6 +830,7 @@ def write_markdown(report: dict, path: Path) -> None:
             f"|--------|-------|",
             f"| Faithfulness (avg) | {qs.get('faithfulness_avg', 'N/A')} |",
             f"| Answer Relevancy (avg) | {qs.get('answer_relevancy_avg', 'N/A')} |",
+            f"| Citation Coverage (avg) | {qs.get('citation_coverage_avg', 'N/A')} |",
             f"| Abstention Correct | {qs.get('abstention_correct_rate', 'N/A')} |",
             f"| hit@{qs.get('k', 5)} (avg) | {qs.get('hit_at_k_avg', 'N/A')} |",
             f"| MRR (avg) | {qs.get('mrr_avg', 'N/A')} |",
@@ -1151,6 +1152,7 @@ def main() -> int:
     # Accumulators for quality summary
     faithfulness_vals: list[float] = []
     relevancy_vals: list[float] = []
+    citation_vals: list[float] = []
     abstention_correct_count = 0
     abstention_total = 0
     hit_at_k_vals: list[float] = []
@@ -1276,12 +1278,21 @@ def main() -> int:
                             judge_url=judge_url,
                             judge_model=judge_model,
                         )
+                        # G6 — citation coverage: fraction of answer sentences
+                        # carrying a valid [n] marker (None on abstentions /
+                        # no sources). Heuristic, no LLM.
+                        gen_m["citation_coverage"] = _metrics_mod.citation_coverage(
+                            answer=result["answer"],
+                            num_sources=result["source_count"],
+                        )
                     quality_metrics = {"retrieval": ret_m, "generation": gen_m}
                     # Accumulate for summary
                     if gen_m.get("faithfulness") is not None:
                         faithfulness_vals.append(gen_m["faithfulness"])
                     if gen_m.get("answer_relevancy") is not None:
                         relevancy_vals.append(gen_m["answer_relevancy"])
+                    if gen_m.get("citation_coverage") is not None:
+                        citation_vals.append(gen_m["citation_coverage"])
                     if expect_abstention is not None:
                         abstention_total += 1
                         if gen_m.get("abstention_correct"):
@@ -1361,6 +1372,7 @@ def main() -> int:
             "k": 5,
             "faithfulness_avg": _avg(faithfulness_vals),
             "answer_relevancy_avg": _avg(relevancy_vals),
+            "citation_coverage_avg": _avg(citation_vals),
             "abstention_correct_rate": (
                 f"{abstention_correct_count}/{abstention_total}"
                 if abstention_total else None

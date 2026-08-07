@@ -23,6 +23,7 @@ Usage:
 """
 
 import asyncio
+import re
 import time
 
 import httpx
@@ -116,6 +117,45 @@ def is_abstention(answer: str) -> bool:
 def abstention_correct(answer: str, expect_abstention: bool) -> bool:
     """Did the model correctly abstain/answer relative to the expectation?"""
     return is_abstention(answer) == expect_abstention
+
+
+# ---------------------------------------------------------------------------
+# Citation coverage (G6 — heuristic, no LLM needed)
+# ---------------------------------------------------------------------------
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+_CITATION_MARKER = re.compile(r"\[(\d+)\]")
+
+
+def citation_coverage(answer: str, num_sources: int) -> float | None:
+    """
+    Fraction of answer sentences carrying at least one valid [n] citation
+    marker (1 <= n <= num_sources, matching the numbered context chunks the
+    prompt instructs the model to cite).
+
+    Returns None when the metric is not applicable: empty answer, no sources
+    (nothing to cite), or an abstention (abstaining answers must NOT cite).
+
+    Heuristic sentence split (punctuation or newline boundaries); fragments
+    shorter than 3 words are ignored so headings, list bullets like "1." and
+    stray markers don't distort the denominator. Markers pointing outside the
+    source range ([7] with 3 sources) don't count as citations.
+    """
+    if not answer or num_sources <= 0 or is_abstention(answer):
+        return None
+
+    sentences = [
+        s.strip() for s in _SENTENCE_SPLIT.split(answer)
+        if len(s.split()) >= 3
+    ]
+    if not sentences:
+        return None
+
+    cited = sum(
+        1 for s in sentences
+        if any(1 <= int(n) <= num_sources for n in _CITATION_MARKER.findall(s))
+    )
+    return round(cited / len(sentences), 3)
 
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,60 @@ def test_incorrect_abstention_fails_even_with_keyword_hit():
     assert ev["passed"] is False
 
 
+# ---------------------------------------------------------------------------
+# citation_coverage() — G6
+# ---------------------------------------------------------------------------
+
+def test_citation_coverage_full():
+    answer = "Employees get 25 days of annual leave [1]. Carry-over is capped at 5 days [2]."
+    assert metrics.citation_coverage(answer, num_sources=2) == 1.0
+
+
+def test_citation_coverage_partial():
+    answer = (
+        "The notice period is one month [1]. "
+        "Managers may extend it in writing. "
+        "Extensions are capped at three months [2]. "
+        "This applies to all permanent staff."
+    )
+    assert metrics.citation_coverage(answer, num_sources=2) == 0.5
+
+
+def test_citation_coverage_out_of_range_marker_not_counted():
+    """[7] with 3 sources is a hallucinated reference, not a citation."""
+    answer = "The policy allows remote work [7]. Approval is required first [1]."
+    assert metrics.citation_coverage(answer, num_sources=3) == 0.5
+
+
+def test_citation_coverage_none_on_abstention():
+    """Abstentions must not be scored — a correct abstention carries no markers
+    and would otherwise drag the average to zero."""
+    answer = "I don't have that information in the available documents."
+    assert metrics.citation_coverage(answer, num_sources=3) is None
+
+
+def test_citation_coverage_none_without_sources():
+    assert metrics.citation_coverage("Some answer text here.", num_sources=0) is None
+    assert metrics.citation_coverage("", num_sources=3) is None
+
+
+def test_citation_coverage_ignores_short_fragments():
+    """Headings / bullets shorter than 3 words don't enter the denominator."""
+    answer = "Summary:\nEmployees receive stock options after one year [1]."
+    assert metrics.citation_coverage(answer, num_sources=1) == 1.0
+
+
+def test_citation_coverage_newline_separated_bullets():
+    answer = (
+        "Key points from the policy:\n"
+        "- Annual leave is 25 days [1]\n"
+        "- Sick leave requires a certificate [2]\n"
+        "- Unpaid leave needs director approval"
+    )
+    # 4 segments >=3 words: intro (no marker), two cited bullets, one uncited.
+    assert metrics.citation_coverage(answer, num_sources=2) == 0.5
+
+
 def test_answerable_query_without_sources_fails():
     result = _result(answer="Here is a real answer with content.", source_count=0)
     ev = evaluate(result, expect_keywords=[], expect_abstention=False)
