@@ -121,6 +121,42 @@ def _fire_and_forget(coro) -> asyncio.Task:
     return task
 
 
+_SSE_HEARTBEAT_SENTINEL = object()
+_SSE_HEARTBEAT_INTERVAL_S = 20.0
+
+
+async def _with_heartbeat(source, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S):
+    """
+    Wrap an async generator, yielding _SSE_HEARTBEAT_SENTINEL if no item arrives
+    within `interval_s`. Idle mobile/corporate proxies drop silent SSE connections
+    (see docs/api/sse-contracts.md) — this keeps bytes flowing during slow LLM
+    generation (retrieval, rerank, first-token latency) without changing the
+    event schema clients parse.
+
+    Deliberately does NOT use `asyncio.wait_for(it.__anext__(), ...)` per loop
+    iteration: wait_for cancels the awaited coroutine on timeout, and cancelling
+    an in-flight `anext()` call permanently corrupts the underlying async
+    generator (it raises StopAsyncIteration on the next call even though more
+    items remain). Instead, a single `anext()` task is kept alive across
+    timeout cycles and only cancelled once, on early exit (e.g. client abort).
+    """
+    it = source.__aiter__()
+    pending = asyncio.ensure_future(it.__anext__())
+    try:
+        while True:
+            done, _pending_set = await asyncio.wait({pending}, timeout=interval_s)
+            if not done:
+                yield _SSE_HEARTBEAT_SENTINEL
+                continue
+            try:
+                item = pending.result()
+            except StopAsyncIteration:
+                return
+            pending = asyncio.ensure_future(it.__anext__())
+            yield item
+    finally:
+        pending.cancel()
+
 
 # =============================================================================
 # Lifespan
@@ -900,7 +936,7 @@ async def query_documents_stream(
         query_expanded = False
         rerank_skipped = False
         try:
-            async for event in rag_service.stream(
+            async for event in _with_heartbeat(rag_service.stream(
                 question=request.question,
                 tenant_id=user_ctx.tenant_id,
                 user_context=user_ctx,
@@ -923,7 +959,10 @@ async def query_documents_stream(
                 summarizer=http_request.app.state.summarizer,
                 tracer=tracer,
                 retrieve_only=request.retrieve_only,
-            ):
+            )):
+                if event is _SSE_HEARTBEAT_SENTINEL:
+                    yield ": keepalive\n\n"
+                    continue
                 if isinstance(event, MetadataEvent):
                     cache_hit = event.cache_hit
                     if event.retrieval_mode is not None:
