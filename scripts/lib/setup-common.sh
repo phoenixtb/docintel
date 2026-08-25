@@ -7,7 +7,7 @@
 #   source "$SCRIPT_DIR/lib/setup-common.sh"
 #
 # Then call the functions you need:
-#   setup_common_prereqs        — check docker, compose, tofu, jq, openssl
+#   setup_common_prereqs        — check docker, compose, tofu, jq, openssl, curl
 #   setup_common_zitadel_keys   — generate RSA key pair for Zitadel System API
 #   setup_common_env            — create .env, INTERNAL_GATEWAY_SECRET, generated.env stub
 #   setup_common_docker_pull    — docker compose pull
@@ -42,7 +42,7 @@ check_cmd() {
 }
 
 # ── setup_common_prereqs ───────────────────────────────────────────────────────
-# Checks Docker, Docker Compose, tofu, jq, openssl.
+# Checks Docker, Docker Compose, tofu, jq, openssl, curl.
 # Engine-specific checks (ollama/lmforge) are left to each setup script.
 
 setup_common_prereqs() {
@@ -53,13 +53,22 @@ setup_common_prereqs() {
 
     prereq_ok=true
 
-    check_cmd docker  "https://www.docker.com/products/docker-desktop/"
+    if [ "$(uname -s)" = "Linux" ]; then
+        check_cmd docker "https://docs.docker.com/engine/install/ubuntu/ (Docker Engine + compose plugin)"
+    else
+        check_cmd docker "https://www.docker.com/products/docker-desktop/ or OrbStack"
+    fi
     check_cmd tofu    "macOS: brew install opentofu | Linux: https://opentofu.org/docs/intro/install/"
     check_cmd jq      "macOS: brew install jq | Linux: apt install jq / yum install jq"
     check_cmd openssl "macOS: brew install openssl | Linux: apt install openssl"
+    check_cmd curl    "macOS: brew install curl | Ubuntu: sudo apt install curl"
 
     if ! docker compose version &>/dev/null; then
-        echo "  ✗ docker compose — plugin not available. Update Docker Desktop."
+        if [ "$(uname -s)" = "Linux" ]; then
+            echo "  ✗ docker compose — plugin not available. Install: sudo apt install docker-compose-plugin"
+        else
+            echo "  ✗ docker compose — plugin not available. Update Docker Desktop."
+        fi
         prereq_ok=false
     else
         ok "docker compose"
@@ -108,7 +117,9 @@ setup_common_zitadel_keys() {
 }
 
 # ── setup_common_env ──────────────────────────────────────────────────────────
-# 1. Creates .env from .env.example if missing.
+# 1. Creates .env from .env.example if missing; if .env already exists,
+#    backfills any KEY= present in .env.example but missing from .env
+#    (never overwrites existing values).
 # 2. Generates INTERNAL_GATEWAY_SECRET if not set.
 # 3. Creates stub generated.env so `docker compose` can load the full project
 #    config before start.sh writes the real Terraform values on first boot.
@@ -134,7 +145,31 @@ setup_common_env() {
         echo ""
     else
         echo ""
-        ok ".env already exists — skipping."
+        local example_file="$PROJECT_DIR/.env.example"
+        local backfilled=0
+        local backfilled_keys=""
+        local line key
+        if [ -f "$example_file" ]; then
+            # Process substitution (not a pipe) so increments survive; bash 3.2 OK.
+            while IFS= read -r line || [ -n "$line" ]; do
+                key="${line%%=*}"
+                if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+                    echo "$line" >> "$env_file"
+                    backfilled=$((backfilled + 1))
+                    if [ -n "$backfilled_keys" ]; then
+                        backfilled_keys="${backfilled_keys}, ${key}"
+                    else
+                        backfilled_keys="$key"
+                    fi
+                fi
+            done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$example_file" || true)
+        fi
+        if [ "$backfilled" -gt 0 ]; then
+            ok "Backfilled $backfilled missing key(s) from .env.example into .env"
+            warn "Backfilled: $backfilled_keys"
+        else
+            ok ".env already exists — skipping."
+        fi
     fi
 
     # INTERNAL_GATEWAY_SECRET ----------------------------------------------------

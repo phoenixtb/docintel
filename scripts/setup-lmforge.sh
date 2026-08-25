@@ -20,9 +20,11 @@ ENV_FILE="$PROJECT_DIR/.env"
 source "$PROJECT_DIR/config/defaults.env"
 _DEFAULT_CHAT_MODEL="$LLM_MODEL"
 _DEFAULT_EMBED_MODEL="$LLM_EMBED_MODEL"
+_DEFAULT_RERANK_MODEL="$LLM_RERANK_MODEL"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
 LLM_MODEL="$_DEFAULT_CHAT_MODEL"
 LLM_EMBED_MODEL="$_DEFAULT_EMBED_MODEL"
+LLM_RERANK_MODEL="$_DEFAULT_RERANK_MODEL"
 
 # Load engine-agnostic setup functions
 # shellcheck source=lib/setup-common.sh
@@ -71,12 +73,46 @@ echo "Running lmforge init (hardware probe + runtime install)..."
 lmforge init
 ok "lmforge init complete"
 
+# Linux: bind 0.0.0.0 so docker containers can reach the daemon via host-gateway.
+# macOS (Darwin) is a no-op — host.docker.internal already reaches loopback there.
+if [ "$(uname -s)" = "Linux" ]; then
+    _lf_cfg="$HOME/.lmforge/config.toml"
+    _lf_bind_changed=0
+    if [ -f "$_lf_cfg" ] && grep -qE '^[[:space:]]*bind_address[[:space:]]*=[[:space:]]*"0\.0\.0\.0"' "$_lf_cfg"; then
+        ok "LMForge already binds 0.0.0.0"
+    elif [ -f "$_lf_cfg" ] && grep -qE '^[[:space:]]*bind_address[[:space:]]*=[[:space:]]*"127\.0\.0\.1"' "$_lf_cfg"; then
+        sed -i.bak 's/^\([[:space:]]*bind_address[[:space:]]*=[[:space:]]*\)"127\.0\.0\.1"/\1"0.0.0.0"/' "$_lf_cfg" \
+            && rm -f "${_lf_cfg}.bak"
+        ok "LMForge bind_address set to 0.0.0.0 (was 127.0.0.1)"
+        _lf_bind_changed=1
+    elif [ -f "$_lf_cfg" ] && grep -qE '^[[:space:]]*bind_address[[:space:]]*=' "$_lf_cfg"; then
+        warn "LMForge bind_address is a custom value — leaving it unchanged"
+    else
+        mkdir -p "$(dirname "$_lf_cfg")"
+        {
+            echo '# DocIntel: bind on all interfaces so docker containers reach the daemon via host-gateway'
+            echo 'bind_address = "0.0.0.0"'
+        } >> "$_lf_cfg"
+        ok "LMForge bind_address appended: 0.0.0.0"
+        _lf_bind_changed=1
+    fi
+    if [ "$_lf_bind_changed" = "1" ]; then
+        if systemctl --user is-active --quiet lmforge 2>/dev/null; then
+            systemctl --user restart lmforge
+            ok "Restarted LMForge user service to apply bind_address"
+        elif curl -sm2 http://127.0.0.1:11430/health >/dev/null 2>&1; then
+            warn "LMForge is running with the old bind — restart it (lmforge stop / start.sh will restart it) to apply"
+        fi
+    fi
+fi
+
 # =============================================================================
 # Resolve and pull models
 # =============================================================================
 
 CHAT_MODEL="$LLM_MODEL"
 EMBED_MODEL="$LLM_EMBED_MODEL"
+RERANK_MODEL="$LLM_RERANK_MODEL"
 
 # Select chat model based on hardware.
 # Apple Silicon (arm64 macOS) → LLM_MODEL (4B 4-bit by default).
@@ -93,8 +129,9 @@ echo "================================================"
 echo "Pulling LMForge Models"
 echo "================================================"
 echo ""
-echo "  Chat model : $CHAT_MODEL"
-echo "  Embed model: $EMBED_MODEL"
+echo "  Chat model  : $CHAT_MODEL"
+echo "  Embed model : $EMBED_MODEL"
+echo "  Rerank model: $RERANK_MODEL"
 echo ""
 
 echo "Installed models:"
@@ -115,6 +152,14 @@ else
     echo "Pulling '$EMBED_MODEL'..."
     lmforge pull "$EMBED_MODEL"
     ok "Pulled: $EMBED_MODEL"
+fi
+
+if lmforge models list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$RERANK_MODEL"; then
+    ok "Rerank model '$RERANK_MODEL' already installed."
+else
+    echo "Pulling '$RERANK_MODEL'..."
+    lmforge pull "$RERANK_MODEL"
+    ok "Pulled: $RERANK_MODEL"
 fi
 
 # =============================================================================
