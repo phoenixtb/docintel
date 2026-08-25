@@ -1,285 +1,117 @@
-# Anchored Iterative Summarization — Holistic Plan
+# Fix: start.sh phase-failure handling (pre-merge, before Ubuntu retest)
 
-## Design Decisions
+Prior batch (fresh-Ubuntu install-path fixes) done + reviewed — see git diff and
+tasks/lessons.md. This plan covers the remaining blocker: phase/terraform
+failure handling in scripts/start.sh.
 
-### How the UI knows about compression — two moments:
+Ground truth (audited): set -e only, no ERR trap, no phase context on death.
+Infra stack (Phase 2) has zero stale-state recovery; identity (Phase 4) has a
+narrow admin.pat-mtime heuristic only. Phase 5 feature-flag PUT is `curl -s`
+without -f (false ok on HTTP error). Phase 6 writes generated.env without
+validating tofu outputs (empty/null values written silently). cleanup.sh
+--data already resets both tfstates (audit claim outdated).
 
-1. **On conversation load** — `context_summary` message in the messages array (role="context_summary")
-   renders a persistent visual divider in the chat thread. Survives page refresh, session restore.
+Design: crash-only convergence — recovery is always "re-run ./scripts/start.sh".
+No checkpoint/resume machinery. Every failure must print: phase, cause, log
+path, exact next command.
 
-2. **Live during streaming** — the initial SSE metadata event includes `context_state`
-   so the UI can show a live context budget indicator without a round-trip.
+## Tasks
 
-### Single source of truth for the summary
-A `context_summary` role message written to `messages` table is both the notification mechanism
-AND the stored summary — no duplication. The `session_summary` column on `conversations` is
-the working copy the backend uses for LLM prompting (avoids re-querying all messages).
+- [x] 1. ERR trap + phase context (start.sh): `CURRENT_PHASE` set by a
+      `phase N "title"` helper at each phase boundary; `trap on_error ERR`
+      prints a banner — failed phase, exit code, `$BASH_COMMAND`, log path if
+      any, per-phase remediation hint (map phase → hint text), and note that
+      containers are left running for inspection (`docker compose ps/logs`).
+      Add `set -o pipefail` (audit pipelines first; keep `set -e`; skip -u).
+- [x] 2. Shared `run_tofu` helper for both stacks: init+apply with output
+      tee'd to `logs/bootstrap/tofu-<stack>-<timestamp>.log` (mkdir -p;
+      gitignore `logs/`); on failure print `tail -30` of log + full path.
+      Auto-handle stale state lock: if apply fails matching "state lock" /
+      "lock.info", force-unlock (or rm .terraform.tfstate.lock.info for local
+      backend) once with a warning, retry apply once. No blanket retries.
+- [x] 3. Infra stack stale-state recovery (parity with identity):
+      volume-fingerprint heuristic — after successful infra apply, record
+      `docker volume inspect -f '{{.CreatedAt}}'` of the minio + qdrant
+      volumes to `terraform/stacks/infra/.volume-fingerprint` (gitignored);
+      before apply, if tfstate exists and fingerprint mismatches (volumes
+      recreated) → rm infra tfstate (+backup) + fingerprint, log why, apply
+      creates fresh. Covers wiped-volumes-with-kept-state incl. the Qdrant
+      terraform_data blind spot.
+- [x] 4. Infra apply conflict auto-heal: on apply failure matching MinIO
+      "already own it"/"already exists" → auto `tofu import` the 3 known
+      bucket addresses (documents-raw, documents-processed, models), retry
+      apply once; if still failing → actionable fail (exact import/cleanup
+      commands printed). Covers lost-state-with-live-buckets.
+- [x] 5. Qdrant drift pre-check (belt-and-braces for partial wipes): before
+      infra apply, if tfstate lists the qdrant terraform_data resources but
+      `GET /collections/{documents,response_cache}` returns 404 →
+      `tofu state rm` those addresses so apply re-runs the local-exec PUTs.
+- [x] 6. Identity conflict guidance (no auto-destroy — orgs/users are not
+      safe to auto-heal): on identity apply failure matching already-exists /
+      conflict errors, print actionable block: cause (Zitadel has resources
+      not in state), options (./scripts/cleanup.sh --data for fresh local dev
+      — destructive, wipes data; or manual tofu import), log path. Keep the
+      existing admin.pat-mtime stale-state clear as-is.
+- [x] 7. Phase 5 fix: feature-flag PUT → `curl -sf` + explicit failure check
+      with actionable fail (check zitadel-api logs / PAT validity). Validate
+      actions-signing-key file non-empty before use (currently
+      `cat ... || echo ""` silently proceeds).
+- [x] 8. Phase 6 validation + atomic write: assert CLIENT_ID, PROJECT_ID,
+      SA_PAT are non-empty and != "null" before writing; write generated.env
+      to a temp file then `mv` (never leave a partial file); on validation
+      failure → actionable fail pointing at Phase 4 outputs + log. Also
+      restart-check: after Phase 6 restart, verify docintel-actions left
+      key-pending mode (its /health or /claims endpoint) — warn if not.
+- [x] 9. .gitignore: `logs/`, `terraform/stacks/infra/.volume-fingerprint`.
 
----
+Out of scope: remote state backends, phase checkpoint files, auto-destroy of
+identity resources, changing qdrant.tf provider (terraform_data stays; drift
+handled in start.sh), retry loops beyond the single lock/import retry.
 
-## Data Model
+Verification plan: bash -n + shellcheck; dry simulations on macOS where
+possible (fingerprint mismatch → state rm path; Phase 6 validation with
+mocked empty outputs; ERR trap banner via forced failure in a sandboxed copy);
+full end-to-end validation deferred to the Ubuntu machine run.
 
-### `conversations` table additions
-```sql
-ALTER TABLE conversations
-  ADD COLUMN IF NOT EXISTS session_summary   TEXT,
-  ADD COLUMN IF NOT EXISTS summary_upto_count INTEGER NOT NULL DEFAULT 0;
--- summary_upto_count = total messages (user+assistant) absorbed into last summary
-```
+## Review
 
-### New message role: `"context_summary"`
-```json
-{
-  "role": "context_summary",
-  "content": "<the summary text itself>",
-  "metadata": {
-    "type": "context_compression",
-    "compressed_turns": 3,
-    "summary_upto_count": 6
-  }
-}
-```
-Written to `messages` table when compression runs.
-UI renders this as a visual divider, NOT a chat bubble.
-Excluded from history passed to LLM.
+Implemented crash-only bootstrap failure handling without running start.sh /
+tofu apply / docker compose on this machine.
 
----
+- Helpers live in `scripts/lib/start_helpers.sh` (sourced by `scripts/start.sh`).
+- `set -eE -o pipefail` + `phase` + ERR banner; `fail()` stays targeted (phase
+  prefix only, no banner). Identity admin.pat-mtime heuristic unchanged.
+- `run_tofu` tees init+apply to `logs/bootstrap/`, lock-rm retry once, MinIO
+  import heal, identity conflict guidance (no auto-heal).
+- Infra fingerprint + Qdrant drift pre-check before apply; fingerprint written
+  after successful apply. Compose project: `COMPOSE_PROJECT_NAME` or
+  `basename $PROJECT_DIR` (volumes `<project>_minio-data` / `_qdrant-data`).
+- Phase 5: feature-flag `curl -sf`; empty signing key fails. Phase 6: validate
+  outputs, atomic `generated.env` write, /claims probe via compose exec
+  (actions has no host port) — warn on lingering 503.
+- Verified: `bash -n` both files (shellcheck not installed); 45 isolated
+  helper tests (success/fail/lock/MinIO import, Phase 6 empty+null, ERR
+  banner); fingerprint match/mismatch/first-run with mocked docker. /tmp
+  sandboxes cleaned. E2E deferred to Ubuntu.
 
-## SSE Stream Changes
+Post-implementation review — 2 bugs found and fixed (supersedes two lines
+above):
+1. pipefail regression: profile_config.sh/detect_hardware.sh use
+   VAR=$(grep … | cut …) where grep misses are expected (e.g. no
+   DETECT_DRIVER on non-NVIDIA); a global `set -o pipefail` made those fatal
+   during pre-flight. Now: `set -eE` at top, pipefail enabled only after
+   ensure_docker_context (all lib call sites are pre-flight; verified).
+   Regression demonstrated in a sandbox before fixing.
+2. Feature-flag idempotency regression: plain `curl -sf` fails on Zitadel's
+   documented 400 "No changes" re-run response, breaking crash-only
+   convergence. Now: capture http_code, accept 2xx|400, fail otherwise with
+   the code in the message.
+Also verified: no log/ok/fail redefinition by sourced libs; volume names
+minio-data/qdrant-data correct in compose; docintel-actions image ships wget
+(its own healthcheck uses it) so the compose-exec /claims probe works;
+`cd "$PROJECT_DIR"` precedes all relative paths; ERR-trap banner re-tested
+in a sandbox after the set-flag change (phase, command, hint, exit 1 all
+correct).
 
-### Metadata event (already emitted at stream start — extend it)
-```json
-{
-  "metadata": {
-    "query_id": "...",
-    "context_state": {
-      "has_summary": true,
-      "summarized_turns": 3,
-      "verbatim_turns": 2
-    }
-  }
-}
-```
-When `has_summary: false`, `context_state` is omitted entirely (no noise for fresh conversations).
-
----
-
-## Files to Change
-
-### 1. `config/postgres/init.sql`
-- Add `session_summary TEXT` and `summary_upto_count INTEGER DEFAULT 0` to `conversations` CREATE TABLE
-- Live DB: run `ALTER TABLE` (in implementation step)
-
-### 2. `services/rag-service/src/config.py`
-```python
-conversation_summary_threshold: int = 8   # messages before first compression
-conversation_verbatim_recent:   int = 4   # always kept verbatim
-```
-
-### 3. `services/rag-service/src/db.py`
-- Add `session_summary` + `summary_upto_count` to `Conversation` ORM model
-- Add `get_conversation_summary_state(conversation_id, tenant_id) -> dict`:
-    returns `{session_summary, summary_upto_count, total_message_count}`
-    lightweight — no eager load of all messages
-- Add `update_conversation_summary(conversation_id, tenant_id, summary, upto_count)`
-- `_conv_to_dict()` includes `summary_upto_count` in the output
-- `_load_conversation_history()` excludes `context_summary` role messages from history
-
-### 4. `services/rag-service/src/components/summarizer.py` (NEW)
-```python
-class AnchoredSummarizer:
-    """
-    Anchored iterative summarizer using a small/fast Ollama model.
-    Extends (never replaces) an existing summary with a new span of messages.
-    """
-    async def compress(
-        self,
-        existing_summary: str | None,
-        new_span: list[dict],          # [{"role": "user"|"assistant", "content": "..."}]
-        ollama_url: str,
-        model: str,
-    ) -> str: ...
-```
-
-Prompt (anchored — merges, never rewrites):
-```
-You are a conversation memory assistant.
-
-Current summary (may be empty):
-{existing_summary or "No summary yet."}
-
-New conversation exchanges to incorporate:
-{formatted_new_span}
-
-Extend the summary to include these exchanges. Preserve concisely (≤300 words):
-- The user's main questions and intent
-- Key facts, conclusions, and answers provided
-- Documents, topics, or domains referenced
-- Important decisions or findings
-
-Return only the updated summary. No preamble or explanation.
-```
-
-### 5. `services/rag-service/src/pipelines/query.py`
-
-**`_load_conversation_history()` rewrite:**
-```
-1. get_conversation_summary_state(conversation_id, tenant_id)
-   → {session_summary, summary_upto_count, total_message_count}
-2. Load only last VERBATIM_RECENT messages (not all — efficient)
-3. Build history:
-   - If session_summary: prepend {"role": "system", "content": f"Earlier conversation:\n{session_summary}"}
-   - Append last VERBATIM_RECENT user+assistant messages
-4. Also return context_state = {has_summary: bool, summarized_turns: int, verbatim_turns: int}
-   (returned alongside history for the stream metadata event)
-```
-
-**`_persist_conversation()` + new `_maybe_compress_history()` coroutine:**
-```
-_persist_conversation():
-  1. add_message(user) + add_message(assistant)
-  2. asyncio.ensure_future(_maybe_compress_history(...))  ← fire-and-forget
-
-_maybe_compress_history(conversation_id, tenant_id, summarizer, settings):
-  1. get_conversation_summary_state()
-  2. if total_messages <= settings.conversation_summary_threshold: return
-  3. evictable_count = total_messages - VERBATIM_RECENT - summary_upto_count
-  4. if evictable_count < 2: return   ← nothing meaningful to compress yet
-  5. Load messages[summary_upto_count : total - VERBATIM_RECENT]
-  6. new_summary = await summarizer.compress(existing_summary, evicted_span)
-  7. update_conversation_summary(new_summary, new_upto_count)
-  8. Insert context_summary message into messages table
-     (role="context_summary", content=new_summary, metadata={...})
-```
-
-**`_load_conversation_history()` signature change:**
-Returns `tuple[list[dict], dict]` — (history, context_state)
-Callers updated accordingly.
-
-### 6. `services/rag-service/src/api/main.py`
-
-**`/query/stream` endpoint:**
-- `_load_conversation_history()` now returns `(history, context_state)`
-- The initial metadata SSE event is extended:
-  ```python
-  metadata_event = {"metadata": {"query_id": query_id}}
-  if context_state.get("has_summary"):
-      metadata_event["metadata"]["context_state"] = context_state
-  yield f"data: {json.dumps(metadata_event)}\n\n"
-  ```
-- `AnchoredSummarizer` instantiated once at startup (app.state), injected into query
-
-**`GET /conversations/{id}` endpoint:**
-- Response already returns messages array — `context_summary` role messages included
-- Also add `summary_upto_count` to the conversation object in response
-- UI uses this on load to know if a divider should appear
-
-### 7. `services/web-ui/src/lib/components/ContextSummaryDivider.svelte` (NEW)
-```
-Visual: horizontal rule with a pill label "Earlier context summarized"
-State: collapsed (default) / expanded (shows summary text)
-Props: summary: string, compressedTurns: number
-```
-Design:
-```
-────────────── ↕ Earlier context summarized (3 turns) ──────────────
-              [click to expand/collapse]
-              <summary text when expanded>
-```
-
-### 8. `services/web-ui/src/routes/chat/+page.svelte`
-
-**Message type extension:**
-```typescript
-interface Message {
-  id: string;
-  role: 'user' | 'assistant' | 'context_summary';   // NEW
-  content: string;
-  thinking?: string;
-  sources?: Source[];
-  liked?: boolean | null;
-  queryId?: string;
-  routedDomain?: string;
-  metadata?: { type: string; compressed_turns: number; };  // for context_summary
-}
-```
-
-**Message rendering:**
-```svelte
-{#each messages as message (message.id)}
-  {#if message.role === 'context_summary'}
-    <ContextSummaryDivider
-      summary={message.content}
-      compressedTurns={message.metadata?.compressed_turns ?? 0}
-    />
-  {:else if message.role === 'user'}
-    <!-- existing user bubble -->
-  {:else}
-    <MessageBubble ... />
-  {/if}
-{/each}
-```
-
-**Context state indicator (in input area):**
-```
-When contextState.has_summary:
-  Shows below textarea: "Context: {verbatim} turns active · {summarized} summarized"
-  Subtle, slate-colored, tooltip explains what this means
-```
-
-```typescript
-let contextState = $state<{ has_summary: boolean; summarized_turns: number; verbatim_turns: number } | null>(null);
-```
-
-Updated in:
-- Stream parse: `if (data.metadata?.context_state) contextState = data.metadata.context_state`
-- Conversation load: derive from `summary_upto_count` in API response
-- Reset to `null` on `startNewChat()`
-
-**`loadConversation()` update:**
-- Map `context_summary` messages from API response to `Message` objects with `role: "context_summary"`
-- Set `contextState` from `summary_upto_count` in response
-
----
-
-## Compression Trigger Logic (summary)
-
-```
-threshold = 8 messages   (4 full turns)
-verbatim  = 4 messages   (2 full turns always kept raw)
-
-Example with 10 total messages:
-  summary covers: messages[0..5]  (3 turns = compressed_turns: 3)
-  verbatim keeps: messages[6..9]  (2 turns)
-
-On load:
-  LLM receives: [system: "Earlier: <summary>"] + messages[6..9]
-```
-
----
-
-## Compression Ratio Target
-- Input span:  ~3 turns × ~300 tokens each = ~900 tokens
-- Summary output: ≤300 words ≈ 400 tokens
-- Net saving per compression: ~500 tokens recovered
-- Model: qwen3:1.7b (fast, cheap, no impact on main query latency — async)
-
----
-
-## Graceful Degradation
-- Existing conversations: `summary_upto_count = 0`, `session_summary = NULL`
-  → behaviour identical to current (no summary, load last 4 messages)
-- If summarizer fails: log warning, skip compression, conversation continues normally
-- `context_summary` messages filtered out of LLM history — no bleeding
-
----
-
-## Implementation Order
-1. DB migration (ALTER TABLE + init.sql)
-2. `db.py` model + functions
-3. `config.py` + `summarizer.py`
-4. `query.py` — history load + compress trigger
-5. `main.py` — metadata event + startup wiring
-6. `ContextSummaryDivider.svelte` (new component)
-7. `chat/+page.svelte` — type, rendering, context indicator
-8. Build + test: create conversation → ask 6+ questions → verify divider appears → verify LLM uses context from summary
+Remaining validation: full end-to-end on the Ubuntu machine (fresh install +
+interrupt/re-run drills) — test plan to be discussed.

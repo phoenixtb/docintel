@@ -34,6 +34,7 @@ bin/
 
 # Docker
 *.log
+logs/
 
 # Zitadel bootstrap PAT files (contain secrets — never commit)
 config/zitadel/bootstrap/*.pat
@@ -55,6 +56,7 @@ terraform/stacks/*/terraform.tfstate
 terraform/stacks/*/terraform.tfstate.backup
 terraform/stacks/*/.terraform/
 terraform/stacks/*/.terraform.lock.hcl
+terraform/stacks/infra/.volume-fingerprint
 
 # Data (don't commit local data)
 data/

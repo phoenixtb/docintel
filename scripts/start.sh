@@ -5,10 +5,19 @@
 #   ./scripts/start.sh          # Start all services (runs Terraform provisioning if needed)
 #   ./scripts/start.sh --build  # Rebuild images before starting
 
-set -e
+# pipefail is enabled AFTER the pre-flight lib section below — profile_config/
+# detect_hardware use VAR=$(grep … | cut …) where a grep miss is expected and
+# relies on cut's exit status; pipefail would turn those into fatal errors.
+set -eE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+CURRENT_PHASE="pre-flight"
+LAST_TOFU_LOG=""
+
+# shellcheck source=lib/start_helpers.sh
+source "${SCRIPT_DIR}/lib/start_helpers.sh"
+trap on_error ERR
 
 # `set -a` exports every sourced var (incl. DOCKER_DEFAULT_PLATFORM) so
 # `docker compose` sees them — plain KEY=val assignments aren't exported otherwise.
@@ -50,10 +59,6 @@ compose_file_chain "$PROJECT_DIR"
 echo "  [hardware] profile=${PROFILE} source=${PROFILE_SOURCE}"
 echo "  [platform] ${DOCKER_PLATFORM_LABEL} (${DOCKER_PLATFORM_SOURCE})"
 
-log()  { echo "  $*"; }
-ok()   { echo "  ✓ $*"; }
-fail() { echo "  ✗ $*" >&2; exit 1; }
-
 echo "================================================"
 echo "  Starting DocIntel"
 echo "================================================"
@@ -68,6 +73,9 @@ echo ""
 # shellcheck source=lib/docker_context.sh
 source "${SCRIPT_DIR}/lib/docker_context.sh"
 ensure_docker_context
+
+# Pre-flight libs are done — from here on, pipeline failures are real errors.
+set -o pipefail
 
 if ! command -v tofu &> /dev/null; then
     fail "tofu (OpenTofu) is not installed. macOS: brew install opentofu | Linux: https://opentofu.org/docs/intro/install/"
@@ -132,6 +140,21 @@ lmforge)
     else
         ok "LMForge already running at :11430"
     fi
+    # Non-fatal: /v1/rerank is 501 on sglang/vllm/tabby — warn so tau gating isn't a surprise.
+    # /lf/status returns engine as {"id":..,"version":..}; tolerate a plain string too.
+    _lf_engine=$(curl -sm3 http://localhost:11430/lf/status 2>/dev/null | jq -r '(.engine.id? // .engine) | tostring' 2>/dev/null || true)
+    if [ -n "$_lf_engine" ] && [ "$_lf_engine" != "null" ] \
+        && printf '%s' "$_lf_engine" | grep -qiE 'sglang|vllm|tabby'; then
+        echo ""
+        echo "  ════════════════════════════════════════════════════════════════"
+        echo "  ⚠  LMForge engine '${_lf_engine}' does not support /v1/rerank"
+        echo "     (returns 501). The reranker degrades to fused-score ordering,"
+        echo "     and the tau=0.55 abstention gating (RAG_MIN_RELEVANCE_SCORE)"
+        echo "     is calibrated on reranker scores — abstention quality is"
+        echo "     degraded. Pin llamacpp via ~/.lmforge/engines.toml to restore."
+        echo "  ════════════════════════════════════════════════════════════════"
+        echo ""
+    fi
     # Verify the configured LLM_MODEL is known to LMForge
     _LLM_MODEL="${LLM_MODEL:-}"
     if [ -n "$_LLM_MODEL" ]; then
@@ -185,7 +208,7 @@ fi
 # Phase 1: Start backing infrastructure services
 # =============================================================================
 
-echo "Starting backing infrastructure services..."
+phase "1/7" "Starting backing infrastructure services..."
 # shellcheck disable=SC2086
 docker compose $COMPOSE_FILES up -d postgres redis minio qdrant clickhouse langfuse-web langfuse-worker
 
@@ -220,11 +243,11 @@ done
 # Phase 2: Terraform infra stack (MinIO buckets + Qdrant collections)
 # =============================================================================
 
-echo ""
-echo "Provisioning infrastructure (MinIO + Qdrant)..."
-tofu -chdir=terraform/stacks/infra init -input=false > /dev/null
-tofu -chdir=terraform/stacks/infra apply -auto-approve -input=false \
-    -var-file="../../environments/dev.infra.tfvars"
+phase "2/7" "Provisioning infrastructure (MinIO + Qdrant)..."
+check_volume_fingerprint
+qdrant_drift_precheck
+run_tofu infra -var-file="$INFRA_VAR_FILE"
+write_volume_fingerprint
 ok "Infrastructure provisioned."
 
 # =============================================================================
@@ -237,8 +260,7 @@ ok "Infrastructure provisioned."
 # restarted with the real key in Phase 6.
 # =============================================================================
 
-echo ""
-echo "Starting Zitadel services..."
+phase "3/7" "Starting Zitadel services..."
 # shellcheck disable=SC2086
 docker compose $COMPOSE_FILES up -d zitadel-api zitadel-login zitadel-proxy docintel-actions
 
@@ -267,8 +289,7 @@ done
 # Phase 4: Terraform identity stack (Zitadel orgs, project, users, app)
 # =============================================================================
 
-echo ""
-echo "Provisioning Zitadel identity resources..."
+phase "4/7" "Provisioning Zitadel identity resources..."
 ADMIN_PAT_FILE="config/zitadel/bootstrap/admin.pat"
 log "Waiting for bootstrap admin PAT..."
 for i in $(seq 1 30); do
@@ -294,9 +315,8 @@ if [ -f "$IDENTITY_STATE" ] && [ "$ADMIN_PAT_FILE" -nt "$IDENTITY_STATE" ]; then
 fi
 
 ZITADEL_BOOTSTRAP_PAT=$(cat "$ADMIN_PAT_FILE")
-tofu -chdir=terraform/stacks/identity init -input=false > /dev/null
-tofu -chdir=terraform/stacks/identity apply -auto-approve -input=false \
-    -var-file="../../environments/dev.identity.tfvars" \
+run_tofu identity \
+    -var-file="$IDENTITY_VAR_FILE" \
     -var="zitadel_admin_token=$ZITADEL_BOOTSTRAP_PAT"
 ok "Identity resources provisioned."
 
@@ -305,6 +325,8 @@ ok "Identity resources provisioned."
 # Requires instance-admin scope — use the bootstrap admin PAT written by
 # zitadel-api first-instance init (ZITADEL_FIRSTINSTANCE_PATPATH).
 # =============================================================================
+
+phase "5/7" "Setting up Zitadel Actions v2..."
 
 ADMIN_PAT_FILE="config/zitadel/bootstrap/admin.pat"
 ACTIONS_TARGET_ID_FILE="config/zitadel/actions-target-id"
@@ -322,15 +344,19 @@ done
 ADMIN_PAT=$(cat "$ADMIN_PAT_FILE")
 ok "Admin PAT loaded."
 
-echo ""
-echo "Setting up Zitadel Actions v2..."
-
 # Enable Actions v2 feature flag (idempotent — 400 "No changes" is acceptable)
-curl -s -X PUT "$ZITADEL_URL/v2/features/instance" \
+_ff_code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$ZITADEL_URL/v2/features/instance" \
     -H "Authorization: Bearer $ADMIN_PAT" \
     -H "Content-Type: application/json" \
-    -d '{"actions": true}' > /dev/null
-ok "Actions v2 feature enabled."
+    -d '{"actions": true}' || echo "000")
+case "$_ff_code" in
+    2??|400)
+        ok "Actions v2 feature enabled (HTTP $_ff_code)."
+        ;;
+    *)
+        fail "Could not enable Actions v2 feature flag (HTTP $_ff_code) — check docker compose logs zitadel-api and that the admin PAT is valid (config/zitadel/bootstrap/admin.pat)"
+        ;;
+esac
 
 ACTIONS_TARGET_ID=""
 ACTIONS_SIGNING_KEY=""
@@ -342,6 +368,9 @@ if [ -f "$ACTIONS_TARGET_ID_FILE" ]; then
         -H "Authorization: Bearer $ADMIN_PAT" | grep -q '"target"' 2>/dev/null; then
         ACTIONS_TARGET_ID="$stored_id"
         ACTIONS_SIGNING_KEY=$(cat "$ACTIONS_SIGNING_KEY_FILE" 2>/dev/null || echo "")
+        if [ -z "$ACTIONS_SIGNING_KEY" ]; then
+            fail "actions-signing-key is missing or empty at $ACTIONS_SIGNING_KEY_FILE. Re-run ./scripts/start.sh — the identity stack regenerates it (the stale-state clear removes it deliberately)."
+        fi
         ok "Actions target already exists: $ACTIONS_TARGET_ID"
     fi
 fi
@@ -360,6 +389,7 @@ if [ -z "$ACTIONS_TARGET_ID" ]; then
     ACTIONS_TARGET_ID=$(echo "$RESP" | jq -r '.id // empty')
     ACTIONS_SIGNING_KEY=$(echo "$RESP" | jq -r '.signingKey // empty')
     [ -n "$ACTIONS_TARGET_ID" ] || fail "Failed to register Actions v2 target. Response: $RESP"
+    [ -n "$ACTIONS_SIGNING_KEY" ] || fail "Actions v2 target registered but signingKey was empty. Response: $RESP"
     echo "$ACTIONS_TARGET_ID" > "$ACTIONS_TARGET_ID_FILE"
     echo "$ACTIONS_SIGNING_KEY" > "$ACTIONS_SIGNING_KEY_FILE"
     ok "Actions target registered: $ACTIONS_TARGET_ID"
@@ -377,24 +407,12 @@ done
 # Phase 6: Write generated.env from Terraform outputs + actions signing key
 # =============================================================================
 
-echo ""
-echo "Writing config/zitadel/generated.env..."
+phase "6/7" "Writing config/zitadel/generated.env..."
 
 TF_OUTPUTS=$(tofu -chdir=terraform/stacks/identity output -json)
-CLIENT_ID=$(echo "$TF_OUTPUTS" | jq -r '.client_id.value')
-PROJECT_ID=$(echo "$TF_OUTPUTS" | jq -r '.project_id.value')
-SA_PAT=$(echo "$TF_OUTPUTS" | jq -r '.service_account_pat.value')
-E2E_SA_KEY=$(echo "$TF_OUTPUTS" | jq -r '.e2e_sa_key_json.value')
-
-cat > config/zitadel/generated.env <<EOF
-# Auto-generated by start.sh — do not edit manually.
-ZITADEL_CLIENT_ID=${CLIENT_ID}
-ZITADEL_PROJECT_ID=${PROJECT_ID}
-ZITADEL_SERVICE_ACCOUNT_PAT=${SA_PAT}
-ZITADEL_ACTIONS_SIGNING_KEY=${ACTIONS_SIGNING_KEY}
-E2E_SA_KEY_FILE=config/zitadel/e2e-sa-key.json
-E2E_TENANT_ID=e2e
-EOF
+extract_identity_outputs
+validate_identity_outputs
+write_generated_env
 ok "generated.env written."
 
 # Write E2E service account key (JSON) — used by run_tests.py for JWT Bearer auth
@@ -415,12 +433,34 @@ for i in $(seq 1 20); do
     sleep 3
 done
 
+# docintel-actions publishes no host port (internal :8090 only). Probe /claims
+# via compose exec — 503 means it is still in key-pending mode.
+log "Verifying docintel-actions left key-pending mode..."
+_claims_pending=true
+for i in $(seq 1 5); do
+    _claims_out=$(
+        # shellcheck disable=SC2086
+        docker compose $COMPOSE_FILES exec -T docintel-actions \
+            wget -qS -O /dev/null http://127.0.0.1:8090/claims 2>&1 || true
+    )
+    _claims_code=$(printf '%s\n' "$_claims_out" | grep -oE 'HTTP/[0-9.]+ [0-9]{3}' | tail -1 | awk '{print $2}' || true)
+    if [ -n "$_claims_code" ] && [ "$_claims_code" != "503" ]; then
+        _claims_pending=false
+        break
+    fi
+    sleep 3
+done
+if [ "$_claims_pending" = true ]; then
+    warn "docintel-actions is still key-pending (/claims returns 503). Requests via the gateway will lack claims until it picks up the signing key."
+else
+    ok "docintel-actions /claims is live (left key-pending mode)"
+fi
+
 # =============================================================================
 # Phase 7: Start remaining application services
 # =============================================================================
 
-echo ""
-echo "Starting application services..."
+phase "7/7" "Starting application services..."
 # shellcheck disable=SC2086
 docker compose $COMPOSE_FILES up -d
 
