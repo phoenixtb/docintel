@@ -2,6 +2,18 @@
 
 Patterns from corrections — review at session start.
 
+## 2026-08-29 — Recommended a workaround before verifying the claimed cause
+- **What happened:** Diagnosed CPU-fallback inference as "cuda12 variant lacks
+  sm_120 support" and told the user to install cuda13 + env override. The
+  build config (variants.conf) shows cuda12 IS built with sm_120 kernels —
+  the real defect is LMForge's silent VRAM-probe degradation (ngl=0). User
+  called it out as a temporary patch, not a root cause.
+- **Rule:** Before recommending a fix that routes around component X, verify
+  the claim about X against its build/source artifacts (arch lists, configs,
+  manifests) — especially when X is the user's own project and the source is
+  a sibling repo. Distinguish "unblock now" workarounds from root-cause fixes
+  explicitly, and label them as such when both are offered.
+
 ## 2026-08-15 — Wrong assumption: "LMForge is Apple-Silicon-only"
 - **What happened:** Audited the fresh-Ubuntu bootstrap assuming LMForge = MLX
   = macOS-only and recommended defaulting to Ollama on Linux. LMForge is

@@ -419,3 +419,88 @@ Recommended: option 1 first (validate it all works), then option 2 once the desi
 ---
 
 Done with Doc 2. Doc 3 covers the corresponding DocIntel changes to consume this stack.
+
+---
+
+## Incident note — 2026-08-25: llama-server ran on CPU RAM, host OOM (aist1-ubuntu)
+
+Take this to the LMForge repo. All paths relative to LMForge root.
+
+### What happened
+During DocIntel bulk indexing on aist1-ubuntu (RTX 5060 Ti 16 GB, sm_120,
+driver 595.84, 15 GB RAM), `llama-server` served embeddings from **CPU RAM**
+(~7 GB anon RSS, ~1.6 s/batch), not VRAM. Memory pressure killed Chrome/Cursor
+(systemd-oomd), then the kernel OOM-killed llama-server twice
+(21:59:58 / 22:00:42; systemd restarted lmforge each time). `nvidia-smi`
+showed no llama-server on the GPU. All DocIntel containers stayed healthy.
+
+### Attribution
+Not DocIntel (its setup delegates engine/hardware selection to `lmforge init`
+by design, and that's correct). Not the variant choice either: cuda12 variant
+b9351 is built with CUDA 12.8.1 and archs `86;89;90;120-real;120-virtual`
+(`scripts/llamacpp-cuda/variants.conf:6`) — sm_120 kernels are present.
+The defect is in LMForge's runtime GPU planning / its silent degradation.
+
+### Prime suspects (triage on the box first)
+The spawn log line (`src/engine/adapters/llamacpp.rs:189`) records `ngl=`:
+- If `ngl=0` → planning bug: `plan_runtime` (llamacpp.rs:670) sets ngl=0 when
+  `free_vram_gb - 1.0 <= 0`, and `resolve_profile_with_vram` (llamacpp.rs:755)
+  **silently** falls back to a No-GPU profile when the live probe fails.
+  Likely env asymmetry: the systemd user unit sets only `Environment=PATH=…`
+  (`src/cli/service.rs:227-247`) — nvidia-smi/NVML may be unavailable in the
+  service env while `lmforge doctor` (interactive shell) sees the GPU fine.
+- If `ngl=99` + `ggml_cuda_init` failure in engine logs → spawn-env bug
+  (bundled libcudart/cublas not on the child's LD_LIBRARY_PATH).
+
+Triage commands: engine logs under `~/.lmforge/` for `ngl=` and
+`ggml_cuda_init`; while a model is loaded, `readlink /proc/$(pgrep -f
+llama-server)/exe` (confirm it's `engines/llamacpp/variants/cuda12/…`);
+compare `systemd-run --user --pty nvidia-smi` vs interactive.
+
+### Defects to fix (ranked)
+1. **Silent CPU degradation.** Probe failure → No-GPU profile → ngl=0 with no
+   surfacing. Must WARN in logs, flag in `/lf/status` + `doctor`
+   (e.g. `gpu_offload: none (probe failed)`), ideally refuse/confirm when
+   model_size > share of free host RAM.
+2. **Probe robustness under systemd.** Prefer cached `hardware.json`
+   (written by init, correct) over live-probe-failure degradation; make the
+   unit env sufficient for NVML/nvidia-smi.
+3. **No RAM admission control on the CPU path.** A ~7 GB CPU load was
+   admitted on a 15 GB box running a full docker stack → host-wide OOM. The
+   VRAM-aware admission (adapter.rs plan) should gate host RAM too.
+4. **Version skew (minor).** Registry pins llamacpp b9861 (engines.toml:116,
+   bumped for Windows Blackwell fixes) but Linux variant tarballs are still
+   b9351; doctor prints "version=b9861" while executing the b9351 variant —
+   misleading, and the Blackwell runtime fixes may be relevant on Linux too.
+   Rebuild Linux variants at b9861 or document the skew.
+5. **Optional:** on sm_120, consider defaulting init to cuda13 once it's no
+   longer `opt_in_only` (torch backend already has `compute_cap_needs_cu130`).
+
+### Correction to earlier advice
+The 2026-08-25 suggestion to install the cuda13 variant + env override was a
+workaround guess, not the root cause — cuda12 has sm_120 kernels. Harmless if
+already applied, but the fixes above are the real ones.
+
+### RESOLVED — 2026-09-04: true root cause found via on-box triage (supersedes "Prime suspects" above)
+Both prime suspects were wrong. On-box log triage + live test proved GPU
+planning and execution were always fine: every run planned ngl=99, spawned the
+cuda12 binary, llama-server detected CUDA0 (~14 GB free, sm_120 kernels
+present), and a live embed request today sits at 4.7 GB VRAM / 0.6 GB RSS.
+
+Actual root cause: upstream llama.cpp (bundled b9351) enables a **host-RAM
+prompt cache by default at 8192 MiB** (ggml-org/llama.cpp PR #16391), and its
+idle-slot save path has no task-type guard, so an embed server writes ~56 MiB
+of KV state per prompt into host RAM — write-only, never read back (upstream
+issue #26293); the cap isn't even enforced on Linux due to overcommit
+(#22629). LMForge passed `--cache-ram` only for chat, assuming the default was
+off. During bulk indexing the cache grew until the kernel OOM-killed
+llama-server (spawn 16:29:07 UTC → kill 16:29:58 = 21:59:58 IST; respawn →
+kill again; third spawn survived once Chrome/Cursor were already dead).
+
+Fixed in LMForge (2026-09-04): embed/rerank now always pass `--cache-ram 0`;
+plus hardening — cached hardware-identity owner (no more scattered live
+probes), free-VRAM probes return Option with ledger fallback instead of silent
+CPU degradation, host-RAM admission gate for partial-ngl loads, ngl surfaced
+in /lf/status, doctor probe-failure check, and engine list/status now report
+the installed variant's real build tag (b9351) instead of the registry pin
+(b9861). The systemd unit env and cuda13 items were disproven/unnecessary.

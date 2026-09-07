@@ -1,3 +1,46 @@
+# Plan: DocIntel-side changes for LMForge v0.2.x (awaiting go)
+
+Context: LMForge v0.2.x (new README + tarballs being tested on the Linux box).
+Client audit result: openai-SDK paths (embed/chat) already retry 503 with
+Retry-After; VLM httpx client handles 503/400/413 correctly; rerank 501
+degrades gracefully. No changes needed for concurrency or image errors.
+
+## P1 tasks (user approved; engine-agnostic revision)
+
+Revisions after user review: SGLang is NEVER auto-selected (engines.toml L67,
+tier=experimental) — engine pinning dropped as moot. /metrics scrape dropped
+(LMForge-native surface; keep DocIntel engine-agnostic). Warm-up switched from
+/lf/model/switch (LMForge-native) to standard OpenAI-endpoint dummy requests.
+
+- [x] 1. start.sh LMForge branch — engine-agnostic warm-up after health
+      check: tiny real requests to /v1/embeddings (LLM_EMBED_MODEL),
+      /v1/chat/completions max_tokens=1 (LLM_MODEL), /v1/rerank one-doc
+      (LLM_RERANK_MODEL). Non-fatal (warn on failure). Skip VLM (ingestion
+      background path, load-on-demand acceptable). Also extend the
+      /v1/models presence check (chat-only today) to embed + rerank.
+- [x] 2. setup-lmforge.sh — upsert `keep_alive = "30m"` into
+      ~/.lmforge/config.toml when unset (same idempotent pattern as
+      bind_address); avoids 5m idle-unload vs 30s query-embed timeout race.
+      No service-code changes (VLM already sends per-request keep_alive).
+
+Review fix (post-subagent): keep_alive belongs under [orchestrator] in
+LMForge's config schema (src/config/mod.rs OrchestratorConfig) — bare
+top-level append would be silently ignored. Rewrote upsert to be
+section-aware (insert after existing [orchestrator], else append the
+section). Also changed the bind_address append to a PREPEND so a top-level
+key can never land inside a section appended at EOF. Verified all shapes
+parse via python tomllib; bash -n both scripts OK.
+
+Dropped: llamacpp pinning via engines.toml (SGLang never auto-selected);
+Prometheus lmforge scrape (engine coupling). Deferred as before: LiteLLM
+expansion 503 handling; min-version check.
+
+Upstream (LMForge repo, user's list): README stale text says SGLang is
+default/auto-installed on Linux NVIDIA ≥8GB (README L61, L85-86, L286-295)
+— contradicts engines.toml "NEVER auto-selected".
+
+---
+
 # Fix: start.sh phase-failure handling (pre-merge, before Ubuntu retest)
 
 Prior batch (fresh-Ubuntu install-path fixes) done + reviewed — see git diff and

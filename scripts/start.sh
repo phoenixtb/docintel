@@ -155,18 +155,84 @@ lmforge)
         echo "  ════════════════════════════════════════════════════════════════"
         echo ""
     fi
-    # Verify the configured LLM_MODEL is known to LMForge
-    _LLM_MODEL="${LLM_MODEL:-}"
-    if [ -n "$_LLM_MODEL" ]; then
-        if curl -s http://localhost:11430/v1/models 2>/dev/null | grep -q "$_LLM_MODEL"; then
-            ok "Model '$_LLM_MODEL' available in LMForge"
+    # Verify configured models are known to LMForge (skip unset/empty).
+    # curl/grep are failure-tolerant — a catalog miss must not abort bootstrap.
+    _lf_models_json=$(curl -s http://localhost:11430/v1/models 2>/dev/null || true)
+    _lf_missing=()
+    _lf_found_chat=""
+    _lf_found_embed=""
+    _lf_found_rerank=""
+    if [ -n "${LLM_MODEL:-}" ]; then
+        if printf '%s' "$_lf_models_json" | grep -qF -- "$LLM_MODEL"; then
+            ok "Model '$LLM_MODEL' available in LMForge"
+            _lf_found_chat=1
         else
-            echo ""
-            echo "  ⚠  Model '$_LLM_MODEL' not found in LMForge."
-            echo "     Run ./scripts/setup-lmforge.sh to pull it."
-            echo ""
-            read -p "  Press Enter to continue anyway, or Ctrl+C to abort..."
+            _lf_missing+=("$LLM_MODEL")
         fi
+    fi
+    if [ -n "${LLM_EMBED_MODEL:-}" ]; then
+        if printf '%s' "$_lf_models_json" | grep -qF -- "$LLM_EMBED_MODEL"; then
+            ok "Model '$LLM_EMBED_MODEL' available in LMForge"
+            _lf_found_embed=1
+        else
+            _lf_missing+=("$LLM_EMBED_MODEL")
+        fi
+    fi
+    if [ -n "${LLM_RERANK_MODEL:-}" ]; then
+        if printf '%s' "$_lf_models_json" | grep -qF -- "$LLM_RERANK_MODEL"; then
+            ok "Model '$LLM_RERANK_MODEL' available in LMForge"
+            _lf_found_rerank=1
+        else
+            _lf_missing+=("$LLM_RERANK_MODEL")
+        fi
+    fi
+    if [ ${#_lf_missing[@]} -gt 0 ]; then
+        echo ""
+        echo "  ⚠  Model(s) not found in LMForge: ${_lf_missing[*]}"
+        echo "     Run ./scripts/setup-lmforge.sh to pull them."
+        echo ""
+        read -p "  Press Enter to continue anyway, or Ctrl+C to abort..."
+    fi
+
+    # Engine-agnostic warm-up via standard OpenAI endpoints (not /lf/*).
+    # Only models that are set AND present in /v1/models. Do not warm the VLM.
+    # Failures are non-fatal — first real request will cold-load.
+    if [ -n "${_lf_found_embed:-}" ]; then
+        log "Warming $LLM_EMBED_MODEL (cold load can take up to a few minutes)..."
+        _lf_body=$(jq -n --arg model "$LLM_EMBED_MODEL" '{model: $model, input: "warmup"}')
+        if curl -sm 180 -X POST http://localhost:11430/v1/embeddings \
+            -H 'Content-Type: application/json' \
+            -d "$_lf_body" >/dev/null 2>&1; then
+            ok "Warmed '$LLM_EMBED_MODEL'"
+        else
+            warn "Warm-up for $LLM_EMBED_MODEL failed (non-fatal) — first real request will cold-load"
+        fi
+    fi
+    if [ -n "${_lf_found_chat:-}" ]; then
+        log "Warming $LLM_MODEL (cold load can take up to a few minutes)..."
+        _lf_body=$(jq -n --arg model "$LLM_MODEL" \
+            '{model: $model, messages: [{role: "user", content: "hi"}], max_tokens: 1}')
+        if curl -sm 180 -X POST http://localhost:11430/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d "$_lf_body" >/dev/null 2>&1; then
+            ok "Warmed '$LLM_MODEL'"
+        else
+            warn "Warm-up for $LLM_MODEL failed (non-fatal) — first real request will cold-load"
+        fi
+    fi
+    if [ -n "${_lf_found_rerank:-}" ]; then
+        log "Warming $LLM_RERANK_MODEL (cold load can take up to a few minutes)..."
+        _lf_body=$(jq -n --arg model "$LLM_RERANK_MODEL" \
+            '{model: $model, query: "warmup", documents: ["warmup"]}')
+        _lf_rerank_code=$(curl -sm 180 -o /dev/null -w '%{http_code}' \
+            -X POST http://localhost:11430/v1/rerank \
+            -H 'Content-Type: application/json' \
+            -d "$_lf_body" 2>/dev/null || true)
+        case "$_lf_rerank_code" in
+            501) ;; # engine warning above already covers /v1/rerank 501
+            2??) ok "Warmed '$LLM_RERANK_MODEL'" ;;
+            *) warn "Warm-up for $LLM_RERANK_MODEL failed (non-fatal) — first real request will cold-load" ;;
+        esac
     fi
     ;;
 
