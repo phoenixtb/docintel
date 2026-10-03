@@ -17,6 +17,8 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.extension.ExtendWith
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -71,13 +73,21 @@ class CleanupJobServiceTest {
 
     @Test
     fun `cancelJob sets cancelRequested flag`() {
+        // Hold the job inside its snapshot step so it is still active when cancel arrives;
+        // with nothing to delete it would otherwise finish first on a slow machine.
+        val release = CountDownLatch(1)
         every { documentService.previewCleanup(tenant, noopFilters) } returns 0
-        every { documentService.snapshotMatchingIds(tenant, noopFilters) } returns emptyList()
+        every { documentService.snapshotMatchingIds(tenant, noopFilters) } answers {
+            release.await(5, TimeUnit.SECONDS)
+            emptyList()
+        }
 
         val response = service.startJob(tenant, noopFilters)
-        val cancelled = service.cancelJob(response.jobId, tenant)
-
-        assertTrue(cancelled)
+        try {
+            assertTrue(service.cancelJob(response.jobId, tenant))
+        } finally {
+            release.countDown()
+        }
     }
 
     @Test

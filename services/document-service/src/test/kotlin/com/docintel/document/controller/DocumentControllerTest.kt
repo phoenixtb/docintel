@@ -1,6 +1,7 @@
 package com.docintel.document.controller
 
 import com.docintel.document.BaseIntegrationTest
+import com.docintel.document.entity.Document
 import com.docintel.document.entity.ProcessingStatus
 import com.docintel.document.repository.ChunkRepository
 import com.docintel.document.repository.DataSourceRepository
@@ -50,6 +51,9 @@ class DocumentControllerTest : BaseIntegrationTest() {
 
     @MockkBean private lateinit var vectorStoreClient: VectorStoreClient
     @MockkBean(relaxed = true) private lateinit var documentStreamPublisher: com.docintel.document.messaging.DocumentStreamPublisher
+    // Scheduled cleanup would race assertions on queued deletion tasks; its own behaviour is
+    // covered by StorageServiceTest (object deletion) and the live end-to-end run.
+    @MockkBean(relaxed = true) private lateinit var deletionTaskWorker: com.docintel.document.scheduler.DeletionTaskWorker
 
     private val testTenantId = "integration-test-tenant"
 
@@ -192,7 +196,18 @@ class DocumentControllerTest : BaseIntegrationTest() {
 
     @Test
     fun `DELETE queues deletion, returns 202 and marks the document DELETING`() {
-        val docId = uploadTestDocument()
+        // A settled document: an upload would still be running processDocument in the
+        // background, whose PROCESSING update can land after the DELETE (see BACKLOG).
+        val docId = UUID.randomUUID()
+        documentRepository.save(
+            Document(
+                id = docId,
+                tenantId = testTenantId,
+                filename = "settled.txt",
+                filePath = "docs/${"9".repeat(64)}/original.txt",
+                status = ProcessingStatus.COMPLETED,
+            )
+        )
 
         mockMvc.perform(
             delete("/internal/documents/$docId")

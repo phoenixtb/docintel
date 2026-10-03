@@ -257,6 +257,10 @@ Open decisions:
 - **Tenant deletion leaks buckets.** `deleteTenantBucket` runs before asynchronous document
   deletion finishes, so the bucket is usually non-empty and is kept. The options are a final
   sweep, a prefix purge, or a deletion task per tenant.
+- **Delete racing a fresh upload.** Upload launches `processDocument` in a background coroutine.
+  Its `markDocumentProcessing` can overwrite a `DELETING` set by an immediate DELETE with
+  `PROCESSING`. `DeletionTaskWorker` then treats the document as resurrected and cancels the task,
+  so the document survives. A guarded status transition (only `PENDING → PROCESSING`) would fix it.
 - **Shared Kotlin config.** `ObjectStoreProperties`/`ObjectStoreConfig` are duplicated in
   document-service and admin-service because there is no shared Kotlin module yet.
 
