@@ -24,8 +24,20 @@ spring:
             key-resolver: "#{@tenantRateLimitKeyResolver}"
 
       routes:
-        # document-service SSE stream — must be before the generic document-service route.
-        # response-timeout=-1 prevents the gateway from closing the long-lived SSE connection.
+        # ---------------------------------------------------------------
+        # document-service — explicit public allowlist (G7.6a).
+        #
+        # Deny-by-default: only the endpoints actually used by web-ui are
+        # routed here. Everything else under /internal/documents/** (from-path,
+        # chunks/bulk, chunks/append, data-sources — see InternalAuthFilter and
+        # docintel.rego for the other two defense-in-depth layers) is simply
+        # not reachable through the gateway. Order matters: single-segment
+        # literal paths (events, stats, all) must precede the generic by-id
+        # route below, or Path=/api/v1/documents/* would swallow them first.
+        # ---------------------------------------------------------------
+
+        # SSE — document lifecycle events. response-timeout=-1 prevents the
+        # gateway from closing the long-lived connection.
         - id: document-service-events
           uri: http://document-service:8081
           predicates:
@@ -37,15 +49,8 @@ spring:
             response-timeout: -1
             connect-timeout: 5000
 
-        - id: document-service
-          uri: http://document-service:8081
-          predicates:
-            - Path=/api/v1/documents, /api/v1/documents/**
-          filters:
-            - RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents${segment}
-
-        # Cleanup job SSE stream — long-lived; must be before the generic document-service route.
-        - id: document-service-cleanup-events
+        # SSE — cleanup job progress.
+        - id: document-service-cleanup-jobs-events
           uri: http://document-service:8081
           predicates:
             - Path=/api/v1/documents/cleanup/jobs/*/events
@@ -56,12 +61,37 @@ spring:
             response-timeout: -1
             connect-timeout: 5000
 
-        - id: document-service-cleanup
+        - id: document-service-cleanup-jobs-start
           uri: http://document-service:8081
           predicates:
-            - Path=/api/v1/documents/cleanup, /api/v1/documents/cleanup/**
+            - Path=/api/v1/documents/cleanup/jobs
+            - Method=POST
           filters:
-            - RewritePath=/api/v1/documents/cleanup(?<segment>/?.*), /internal/documents/cleanup${segment}
+            - RewritePath=/api/v1/documents/cleanup/jobs, /internal/documents/cleanup/jobs
+
+        - id: document-service-cleanup-jobs-cancel
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents/cleanup/jobs/*
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/documents/cleanup/jobs/(?<jobId>[^/]+), /internal/documents/cleanup/jobs/${jobId}
+
+        - id: document-service-cleanup-preview
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents/cleanup/preview
+            - Method=POST
+          filters:
+            - RewritePath=/api/v1/documents/cleanup/preview, /internal/documents/cleanup/preview
+
+        - id: document-service-stats
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents/stats
+            - Method=GET
+          filters:
+            - RewritePath=/api/v1/documents/stats, /internal/documents/stats
 
         - id: document-service-delete-all
           uri: http://document-service:8081
@@ -70,6 +100,25 @@ spring:
             - Method=DELETE
           filters:
             - RewritePath=/api/v1/documents/all, /internal/documents/all
+
+        # Upload (POST) + list (GET) at the collection root.
+        - id: document-service-root
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents
+            - Method=GET,POST
+          filters:
+            - RewritePath=/api/v1/documents, /internal/documents
+
+        # Get (GET) / delete (DELETE) a single document by id — must come
+        # AFTER the literal single-segment routes above.
+        - id: document-service-by-id
+          uri: http://document-service:8081
+          predicates:
+            - Path=/api/v1/documents/*
+            - Method=GET,DELETE
+          filters:
+            - RewritePath=/api/v1/documents/(?<id>[^/]+), /internal/documents/${id}
 
         - id: rag-service-settings-cache
           uri: http://rag-service:8000

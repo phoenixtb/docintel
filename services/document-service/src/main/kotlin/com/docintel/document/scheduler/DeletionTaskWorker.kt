@@ -87,6 +87,28 @@ class DeletionTaskWorker(
             TenantContextHolder.setTenantId(task.tenantId)
             TenantContextHolder.setUserRole("platform_admin")
 
+            // Re-read: the task may have been CANCELLED (document re-uploaded — same
+            // content hash resurrects the same id) between batch load and now.
+            val fresh = deletionTaskRepository.findById(task.id).orElse(null) ?: return
+            if (fresh.taskStatus != DeletionTaskStatus.PENDING) {
+                logger.debug("Task {} no longer PENDING ({}), skipping", task.id, fresh.taskStatus)
+                return
+            }
+
+            // Guard: if the document row exists and is NOT in DELETING state, it has been
+            // resurrected by a re-upload that raced ahead of cancelPendingForDocument.
+            // Executing this task would destroy the live document — cancel it instead.
+            val doc = documentRepository.findByIdAndTenantId(task.documentId, task.tenantId)
+            if (doc != null && doc.status != com.docintel.document.entity.ProcessingStatus.DELETING) {
+                logger.info(
+                    "Task {}: document {} resurrected (status={}) — cancelling stale deletion",
+                    task.id, task.documentId, doc.status
+                )
+                task.taskStatus = DeletionTaskStatus.CANCELLED
+                deletionTaskRepository.save(task)
+                return
+            }
+
             if (!task.qdrantDone) {
                 val deleted = runBlocking {
                     vectorStoreClient.deleteDocumentVectors(task.tenantId, task.documentId)

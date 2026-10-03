@@ -1,5 +1,6 @@
 package com.docintel.gateway.filter
 
+import com.docintel.gateway.error.writeErrorEnvelope
 import org.slf4j.LoggerFactory
 import org.springframework.cloud.gateway.filter.GatewayFilterChain
 import org.springframework.cloud.gateway.filter.GlobalFilter
@@ -45,8 +46,9 @@ class InternalAuthFilter : GlobalFilter, Ordered {
     override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> {
         if (secret.isEmpty()) {
             log.error("INTERNAL_GATEWAY_SECRET not configured — rejecting request (fail-secure)")
-            exchange.response.statusCode = HttpStatus.SERVICE_UNAVAILABLE
-            return exchange.response.setComplete()
+            return writeErrorEnvelope(
+                exchange, HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", "Gateway misconfigured."
+            )
         }
 
         val req = exchange.request

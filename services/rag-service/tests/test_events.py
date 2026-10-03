@@ -68,6 +68,39 @@ class TestMetadataEventSerialisation:
         payload = _parse(_serialize_sse(event))
         assert isinstance(payload["metadata"]["cache_hit"], bool)
 
+    # -- B3: per-answer transparency fields --------------------------------
+
+    def test_retrieval_mode_included_when_provided(self):
+        event = MetadataEvent(query_id="qid-005", cache_hit=False, retrieval_mode="hybrid")
+        payload = _parse(_serialize_sse(event))
+        assert payload["metadata"]["retrieval_mode"] == "hybrid"
+
+    def test_retrieval_mode_absent_when_none(self):
+        event = MetadataEvent(query_id="qid-006", cache_hit=False)
+        payload = _parse(_serialize_sse(event))
+        assert "retrieval_mode" not in payload["metadata"]
+
+    def test_rerank_candidates_included_when_provided(self):
+        event = MetadataEvent(
+            query_id="qid-007", cache_hit=False,
+            rerank_candidates_in=20, rerank_candidates_out=5,
+        )
+        payload = _parse(_serialize_sse(event))
+        assert payload["metadata"]["rerank_candidates_in"] == 20
+        assert payload["metadata"]["rerank_candidates_out"] == 5
+
+    def test_reranker_degraded_false_is_included_not_dropped(self):
+        """reranker_degraded=False must still be serialised (distinguishes
+        'reranking ran cleanly' from 'reranking was skipped')."""
+        event = MetadataEvent(query_id="qid-008", cache_hit=False, reranker_degraded=False)
+        payload = _parse(_serialize_sse(event))
+        assert payload["metadata"]["reranker_degraded"] is False
+
+    def test_reranker_degraded_absent_when_none(self):
+        event = MetadataEvent(query_id="qid-009", cache_hit=False)
+        payload = _parse(_serialize_sse(event))
+        assert "reranker_degraded" not in payload["metadata"]
+
 
 # ---------------------------------------------------------------------------
 # RoutingEvent

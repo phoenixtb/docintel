@@ -125,10 +125,19 @@ async def _collect(gen: AsyncIterator) -> list:
     return [event async for event in gen]
 
 
-def _patch_llm(svc: RAGService, tokens: list[str], thinking: list[str] | None = None):
+def _patch_llm(
+    svc: RAGService,
+    tokens: list[str],
+    thinking: list[str] | None = None,
+    usage: dict | None = None,
+):
     """
     Patch build_streaming_generator so that calling llm.run() enqueues tokens
     into the queue that stream() reads.  Returns the patch context manager.
+
+    usage: if given, emits a trailing no-content chunk carrying
+    meta["usage"] — mirrors the real trailing chunk an engine sends when it
+    honours stream_options.include_usage (see llm_adapter.extract_usage).
     """
     thinking = thinking or []
 
@@ -146,6 +155,11 @@ def _patch_llm(svc: RAGService, tokens: list[str], thinking: list[str] | None = 
                 chunk = MagicMock()
                 chunk.content = tok
                 chunk.meta = {}
+                callback(chunk)
+            if usage is not None:
+                chunk = MagicMock()
+                chunk.content = ""
+                chunk.meta = {"usage": usage}
                 callback(chunk)
 
         llm_mock.run.side_effect = _run_side_effect
@@ -433,3 +447,402 @@ async def test_query_drains_stream_into_dict():
     assert isinstance(result["cache_hit"], bool)
     assert isinstance(result["latency_ms"], int)
     assert result["model_used"] == "test-model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_captures_token_usage_when_engine_reports_it():
+    """
+    A5: when the engine sends a trailing usage chunk, RAGService records
+    prompt/completion tokens via CostTracker on _last_tokens_used/_last_cost_usd
+    (read by api/main.py after the stream completes).
+    """
+    svc = _make_service()
+    usage = {"prompt_tokens": 120, "completion_tokens": 45, "total_tokens": 165}
+    with _patch_llm(svc, ["The ", "answer."], usage=usage):
+        await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    assert svc._last_tokens_used == {"prompt": 120, "completion": 45}
+    assert isinstance(svc._last_cost_usd, float)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_zero_tokens_when_engine_omits_usage():
+    """Engines that don't honour stream_options.include_usage leave usage absent
+    — CostTracker must degrade to zero tokens/cost, not raise."""
+    svc = _make_service()
+    with _patch_llm(svc, ["The ", "answer."]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    assert svc._last_tokens_used == {"prompt": 0, "completion": 0}
+    assert svc._last_cost_usd == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_query_result_includes_tokens_used_and_cost():
+    """query() dict result surfaces tokens_used/cost_usd for the /query handler."""
+    svc = _make_service()
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    with _patch_llm(svc, ["answer"], usage=usage):
+        result = await svc.query(**_make_stream_kwargs(svc))
+
+    assert result["tokens_used"] == {"prompt": 10, "completion": 5}
+    assert isinstance(result["cost_usd"], float)
+
+
+# ---------------------------------------------------------------------------
+# B3/B4 — retrieval mode, rerank candidate counts, reranker_degraded, trace_id
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_emits_retrieval_mode_metadata():
+    """Retriever reports retrieval_mode; stream() must surface it in a MetadataEvent."""
+    svc = _make_service()
+    svc._retriever.run.return_value = {"documents": [_make_doc()], "retrieval_mode": "hybrid"}
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    modes = [e.retrieval_mode for e in events if isinstance(e, MetadataEvent) and e.retrieval_mode is not None]
+    assert modes == ["hybrid"]
+    assert svc._last_retrieval_mode == "hybrid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_emits_rerank_candidate_counts():
+    """Reranker receives N docs and returns M — stream() must report both counts."""
+    svc = _make_service()
+    svc._retriever.run.return_value = {"documents": [_make_doc(), _make_doc(), _make_doc()]}
+    svc._opa_validator.run.return_value = {"documents": [_make_doc(), _make_doc(), _make_doc()]}
+    svc._reranker.run.return_value = {"documents": [_make_doc()], "reranker_degraded": False}
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    meta_with_counts = [
+        e for e in events
+        if isinstance(e, MetadataEvent) and e.rerank_candidates_in is not None
+    ]
+    assert len(meta_with_counts) == 1
+    assert meta_with_counts[0].rerank_candidates_in == 3
+    assert meta_with_counts[0].rerank_candidates_out == 1
+    assert meta_with_counts[0].reranker_degraded is False
+    assert svc._last_rerank_candidates_in == 3
+    assert svc._last_rerank_candidates_out == 1
+    assert svc._last_reranker_degraded is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_reranker_failure_marks_degraded_with_counts():
+    """Reranker exception → degraded=True, candidates_out falls back to candidates_in."""
+    svc = _make_service()
+    svc._retriever.run.return_value = {"documents": [_make_doc(), _make_doc()]}
+    svc._opa_validator.run.return_value = {"documents": [_make_doc(), _make_doc()]}
+    svc._reranker.run.side_effect = RuntimeError("reranker unreachable")
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    degraded_events = [
+        e for e in events
+        if isinstance(e, MetadataEvent) and e.reranker_degraded is True
+    ]
+    assert degraded_events
+    assert svc._last_reranker_degraded is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_no_trace_id_when_tracer_absent():
+    """No tracer passed in → _last_trace_id is empty (no Langfuse dependency)."""
+    svc = _make_service()
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc)))
+    assert svc._last_trace_id == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_creates_trace_with_request_id_when_tracer_enabled():
+    """B4 — when the tracer is enabled, the Langfuse trace id equals request_id
+    so ClickHouse's trace_id column can deep-link straight to it."""
+    svc = _make_service()
+    mock_tracer = MagicMock()
+    mock_tracer.enabled = True
+    mock_trace = MagicMock()
+    mock_tracer.start_trace.return_value = mock_trace
+
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc, tracer=mock_tracer)))
+
+    mock_tracer.start_trace.assert_called_once()
+    assert mock_tracer.start_trace.call_args.kwargs["trace_id"] == "req-001"
+    assert svc._last_trace_id == "req-001"
+    mock_trace.update.assert_called_once()
+    mock_trace.flush.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_query_result_includes_retrieval_and_rerank_fields():
+    """query() dict aggregates the new B3/B4 fields for the non-streaming /query path."""
+    svc = _make_service()
+    svc._retriever.run.return_value = {"documents": [_make_doc(), _make_doc()], "retrieval_mode": "dense"}
+    svc._opa_validator.run.return_value = {"documents": [_make_doc(), _make_doc()]}
+    svc._reranker.run.return_value = {"documents": [_make_doc()], "reranker_degraded": False}
+    with _patch_llm(svc, ["answer"]):
+        result = await svc.query(**_make_stream_kwargs(svc))
+
+    assert result["retrieval_mode"] == "dense"
+    assert result["rerank_candidates_in"] == 2
+    assert result["rerank_candidates_out"] == 1
+    assert result["reranker_degraded"] is False
+    assert result["trace_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# G2 — query expansion wiring
+# ---------------------------------------------------------------------------
+
+def _make_doc_id(doc_id: str, score: float = 0.8) -> MagicMock:
+    doc = _make_doc(score=score)
+    doc.id = doc_id
+    return doc
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_disabled_by_default_skips_expander():
+    """use_query_expansion=False (default) — expander never instantiated/called,
+    retriever.run is called exactly once (no union retrieval)."""
+    svc = _make_service()
+    svc._query_expander = MagicMock()  # present but must not be consulted
+    assert svc._settings.use_query_expansion is False
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc)))
+    svc._query_expander.run.assert_not_called()
+    svc._retriever.run.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_unions_candidates_before_rerank():
+    """Enabled + distinct expanded query → expander called, dense embedder
+    called twice (original + expanded), retriever called twice, and the
+    union (deduped by id) is what reaches the reranker."""
+    settings = _make_settings(use_query_expansion=True)
+    svc = _make_service(settings)
+    svc._query_expander = MagicMock()
+    svc._query_expander.run.return_value = {
+        "original_query": "remote work",
+        "expanded_query": "remote work WFH telecommute",
+        "search_terms": ["remote work", "WFH", "telecommute"],
+    }
+    original_doc = _make_doc_id("chunk-original")
+    expanded_only_doc = _make_doc_id("chunk-expanded-only")
+    svc._retriever.run.side_effect = [
+        {"documents": [original_doc], "retrieval_mode": "hybrid"},
+        {"documents": [original_doc, expanded_only_doc]},  # expanded-query retrieval
+    ]
+    svc._opa_validator.run.side_effect = lambda documents, **kw: {"documents": documents}
+    svc._reranker.run.side_effect = lambda query, documents: {"documents": documents, "reranker_degraded": False}
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._dense_embedder.run.call_count == 2
+    assert svc._retriever.run.call_count == 2
+    rerank_call_docs = svc._reranker.run.call_args.kwargs["documents"]
+    assert {d.id for d in rerank_call_docs} == {"chunk-original", "chunk-expanded-only"}
+
+    meta_events = [e for e in events if isinstance(e, MetadataEvent) and e.query_expanded is not None]
+    assert meta_events and meta_events[0].query_expanded is True
+    assert svc._last_query_expanded is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_noop_when_rewrite_equals_original():
+    """Expander returns the same text back (no useful rewrite) — no second
+    embed/retrieve call, query_expanded stays False."""
+    settings = _make_settings(use_query_expansion=True)
+    svc = _make_service(settings)
+    svc._query_expander = MagicMock()
+    svc._query_expander.run.return_value = {
+        "original_query": "What is the termination clause?",
+        "expanded_query": "What is the termination clause?",
+        "search_terms": ["What is the termination clause?"],
+    }
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._dense_embedder.run.call_count == 1
+    assert svc._retriever.run.call_count == 1
+    assert svc._last_query_expanded is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_fails_open_on_expander_exception():
+    """Expander raises (e.g. LLM unreachable) — stream() falls back to the
+    original query only; no crash, query_expanded=False."""
+    settings = _make_settings(use_query_expansion=True)
+    svc = _make_service(settings)
+    svc._query_expander = MagicMock()
+    svc._query_expander.run.side_effect = RuntimeError("LMForge unreachable")
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._dense_embedder.run.call_count == 1
+    assert svc._retriever.run.call_count == 1
+    assert svc._last_query_expanded is False
+    sources_events = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources_events  # stream completed normally despite expander failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_expansion_fails_open_on_timeout():
+    """Expander call exceeds rag_query_expansion_timeout_s — asyncio.wait_for
+    raises TimeoutError, caught and treated identically to any other failure."""
+    settings = _make_settings(use_query_expansion=True, rag_query_expansion_timeout_s=0.01)
+    svc = _make_service(settings)
+
+    def _slow_run(query):
+        import time
+        time.sleep(0.2)
+        return {"expanded_query": query + " slow"}
+
+    svc._query_expander = MagicMock()
+    svc._query_expander.run.side_effect = _slow_run
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._last_query_expanded is False
+    assert svc._retriever.run.call_count == 1
+    assert any(isinstance(e, SourcesEvent) for e in events)
+
+
+# ---------------------------------------------------------------------------
+# G5 — conditional reranking (skip-decision logic)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_skip_disabled_by_default_always_reranks():
+    """rag_rerank_skip_enabled=False (default) — reranker always runs, even
+    when the top fused score would clear the (unused) skip threshold."""
+    svc = _make_service()
+    assert svc._settings.rag_rerank_skip_enabled is False
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.99)], "retrieval_mode": "hybrid",
+    }
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc)))
+
+    svc._reranker.run.assert_called_once()
+    assert svc._last_rerank_skipped is False
+    skipped_meta = [e for e in events if isinstance(e, MetadataEvent) and e.rerank_skipped is not None]
+    assert skipped_meta and skipped_meta[0].rerank_skipped is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_skipped_when_fused_score_clears_gate():
+    """Enabled + hybrid mode + top fused score >= threshold → reranker is
+    never called; fused order/top-k is used as-is; rerank_skipped=True."""
+    settings = _make_settings(rag_rerank_skip_enabled=True, rag_rerank_skip_min_score=0.8)
+    svc = _make_service(settings)
+    docs = [_make_doc_id(f"chunk-{i}", score=0.9 - i * 0.01) for i in range(3)]
+    svc._retriever.run.return_value = {"documents": docs, "retrieval_mode": "hybrid"}
+    svc._opa_validator.run.side_effect = lambda documents, **kw: {"documents": documents}
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    svc._reranker.run.assert_not_called()
+    assert svc._last_rerank_skipped is True
+    skipped_meta = [e for e in events if isinstance(e, MetadataEvent) and e.rerank_skipped is not None]
+    assert skipped_meta and skipped_meta[0].rerank_skipped is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_not_skipped_below_threshold():
+    """Enabled + top fused score below threshold → full rerank still runs."""
+    settings = _make_settings(rag_rerank_skip_enabled=True, rag_rerank_skip_min_score=0.8)
+    svc = _make_service(settings)
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.6)], "retrieval_mode": "hybrid",
+    }
+    svc._opa_validator.run.side_effect = lambda documents, **kw: {"documents": documents}
+
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    svc._reranker.run.assert_called_once()
+    assert svc._last_rerank_skipped is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_never_skipped_outside_hybrid_mode():
+    """Fused-score skip gate only applies to hybrid retrieval — dense-only
+    scores are a different scale and must always go through full rerank,
+    regardless of how high the raw score is."""
+    settings = _make_settings(rag_rerank_skip_enabled=True, rag_rerank_skip_min_score=0.8)
+    svc = _make_service(settings)
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.99)], "retrieval_mode": "dense",
+    }
+
+    with _patch_llm(svc, ["answer"]):
+        await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    svc._reranker.run.assert_called_once()
+    assert svc._last_rerank_skipped is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_stream_rerank_skip_bypasses_tau_relevance_gate():
+    """CRITICAL guard: rag_min_relevance_score (tau) is calibrated on reranker
+    scores and must NEVER be evaluated against fused scores. A fused score
+    that clears the (fused-scale) skip gate but sits below tau's numeric
+    value must still pass through — tau is not re-applied when skipped."""
+    settings = _make_settings(
+        rag_rerank_skip_enabled=True,
+        rag_rerank_skip_min_score=0.8,
+        rag_min_relevance_score=0.95,  # deliberately higher than the fused score below
+    )
+    svc = _make_service(settings)
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.85)], "retrieval_mode": "hybrid",
+    }
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    assert svc._last_rerank_skipped is True
+    svc._reranker.run.assert_not_called()
+    sources_events = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources_events and sources_events[0].sources  # not abstained/filtered by tau
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_query_result_includes_rerank_skipped_field():
+    """query() dict surfaces rerank_skipped for the non-streaming /query path."""
+    settings = _make_settings(rag_rerank_skip_enabled=True, rag_rerank_skip_min_score=0.8)
+    svc = _make_service(settings)
+    svc._retriever.run.return_value = {
+        "documents": [_make_doc(score=0.9)], "retrieval_mode": "hybrid",
+    }
+    with _patch_llm(svc, ["answer"]):
+        result = await svc.query(**_make_stream_kwargs(svc, settings=settings))
+
+    assert result["rerank_skipped"] is True

@@ -4,6 +4,12 @@ output "client_id" {
   sensitive   = true
 }
 
+output "mobile_client_id" {
+  description = "OIDC client ID for the DocIntel native (mobile) app — used by flutter_appauth"
+  value       = module.project.mobile_client_id
+  sensitive   = true
+}
+
 output "project_id" {
   description = "Zitadel project ID for DocintelProject"
   value       = module.project.project_id

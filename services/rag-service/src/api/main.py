@@ -14,7 +14,9 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
+from docintel_common.messaging import RedisStreamBus, TOPIC_ANALYTICS_QUERY
 from docintel_common.tracing import TraceContext, configure_trace_logging
+from docintel_common.errors import install_error_handlers
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -44,8 +46,17 @@ from .schemas import QueryRequest, QueryResponse
 
 logger = logging.getLogger(__name__)
 
+# A7: query telemetry rides the shared Redis Streams bus instead of an HTTP
+# POST to analytics-service — events survive analytics-service downtime
+# (stream retention) instead of being dropped by the old fire-and-forget
+# HTTP call. Trimmed to bound memory; analytics-service's consumer only
+# needs to keep up within this window.
+_ANALYTICS_STREAM_MAXLEN = 100_000
 
-async def _emit_query_event(
+
+async def _publish_query_event(
+    bus: RedisStreamBus,
+    *,
     query_id: str,
     tenant_id: str,
     user_id: str,
@@ -53,34 +64,50 @@ async def _emit_query_event(
     model_used: str,
     cache_hit: bool,
     source_count: int,
-    analytics_url: str,
     thinking_truncated: bool = False,
-    http_client: Optional[httpx.AsyncClient] = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cost_usd: float = 0.0,
+    query_text: str = "",
+    retrieval_mode: str = "",
+    rerank_candidates_in: int = 0,
+    rerank_candidates_out: int = 0,
+    reranker_degraded: bool = False,
+    trace_id: str = "",
+    query_expanded: bool = False,
+    rerank_skipped: bool = False,
 ) -> None:
-    """Fire-and-forget: POST query telemetry to analytics-service."""
+    """Fire-and-forget: publish query telemetry to the analytics.query stream."""
     try:
-        client = http_client or httpx.AsyncClient(timeout=3.0)
-        close_after = http_client is None
-        try:
-            await client.post(
-                f"{analytics_url}/events/query",
-                json={
-                    "query_id": query_id,
-                    "tenant_id": tenant_id,
-                    "user_id": user_id,
-                    "latency_ms": latency_ms,
-                    "model_used": model_used,
-                    "cache_hit": cache_hit,
-                    "source_count": source_count,
-                    "thinking_truncated": thinking_truncated,
-                },
-                timeout=3.0,
-            )
-        finally:
-            if close_after:
-                await client.aclose()
+        await bus.publish(
+            TOPIC_ANALYTICS_QUERY,
+            {
+                "query_id": query_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "latency_ms": latency_ms,
+                "model_used": model_used,
+                "cache_hit": cache_hit,
+                "source_count": source_count,
+                "thinking_truncated": thinking_truncated,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost_usd": cost_usd,
+                # B1/B4 — query text (top-queries / corpus-gap analytics) and
+                # retrieval/rerank/trace metadata for the Insights quality page.
+                "query_text": query_text,
+                "retrieval_mode": retrieval_mode,
+                "rerank_candidates_in": rerank_candidates_in,
+                "rerank_candidates_out": rerank_candidates_out,
+                "reranker_degraded": reranker_degraded,
+                "trace_id": trace_id,
+                "query_expanded": query_expanded,
+                "rerank_skipped": rerank_skipped,
+            },
+            maxlen=_ANALYTICS_STREAM_MAXLEN,
+        )
     except Exception as e:
-        logger.debug("Query telemetry emit failed (non-fatal): %s", e)
+        logger.debug("Query telemetry publish failed (non-fatal): %s", e)
 
 
 def _fire_and_forget(coro) -> asyncio.Task:
@@ -94,6 +121,42 @@ def _fire_and_forget(coro) -> asyncio.Task:
     task.add_done_callback(_on_done)
     return task
 
+
+_SSE_HEARTBEAT_SENTINEL = object()
+_SSE_HEARTBEAT_INTERVAL_S = 20.0
+
+
+async def _with_heartbeat(source, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S):
+    """
+    Wrap an async generator, yielding _SSE_HEARTBEAT_SENTINEL if no item arrives
+    within `interval_s`. Idle mobile/corporate proxies drop silent SSE connections
+    (see docs/api/sse-contracts.md) — this keeps bytes flowing during slow LLM
+    generation (retrieval, rerank, first-token latency) without changing the
+    event schema clients parse.
+
+    Deliberately does NOT use `asyncio.wait_for(it.__anext__(), ...)` per loop
+    iteration: wait_for cancels the awaited coroutine on timeout, and cancelling
+    an in-flight `anext()` call permanently corrupts the underlying async
+    generator (it raises StopAsyncIteration on the next call even though more
+    items remain). Instead, a single `anext()` task is kept alive across
+    timeout cycles and only cancelled once, on early exit (e.g. client abort).
+    """
+    it = source.__aiter__()
+    pending = asyncio.ensure_future(it.__anext__())
+    try:
+        while True:
+            done, _pending_set = await asyncio.wait({pending}, timeout=interval_s)
+            if not done:
+                yield _SSE_HEARTBEAT_SENTINEL
+                continue
+            try:
+                item = pending.result()
+            except StopAsyncIteration:
+                return
+            pending = asyncio.ensure_future(it.__anext__())
+            yield item
+    finally:
+        pending.cancel()
 
 
 # =============================================================================
@@ -166,11 +229,19 @@ async def lifespan(app: FastAPI):
     logger.info("LLM concurrency limit: %d", settings.llm_concurrency_limit)
 
     # Shared HTTP client — connection pool reused across requests (healthcheck,
-    # model list, analytics telemetry). Avoids opening a new TCP connection per
-    # call. The probe / pre-warm helpers use their own short-lived clients since
-    # they fire only at startup before the pool is needed.
+    # model list). Avoids opening a new TCP connection per call. The probe /
+    # pre-warm helpers use their own short-lived clients since they fire only
+    # at startup before the pool is needed.
     app.state.http = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+    )
+
+    # A7: query telemetry producer — publishes to analytics.query instead of
+    # an HTTP POST to analytics-service (see _publish_query_event).
+    app.state.analytics_bus = RedisStreamBus(
+        host=settings.redis_host,
+        port=settings.redis_port,
+        password=settings.redis_password,
     )
 
     yield
@@ -178,6 +249,7 @@ async def lifespan(app: FastAPI):
     logger.info("RAG Service shutting down")
     tracer.shutdown()
     await app.state.http.aclose()
+    await app.state.analytics_bus.close()
 
 
 def _selftest_thinking_adapter() -> None:
@@ -283,6 +355,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+install_error_handlers(app)
 
 
 @app.middleware("http")
@@ -327,6 +400,26 @@ try:
     RAG_CACHE_MISSES = Counter("rag_cache_miss_total", "Semantic cache misses", ["tenant"])
     RAG_LLM_QUEUE_WAITING = Gauge("rag_llm_queue_waiting", "Current semaphore waiters")
     RAG_CHUNKS_INDEXED = Counter("rag_indexing_chunks_total", "Total chunks indexed", ["tenant"])
+    RAG_RERANKER_DEGRADED = Counter(
+        "rag_reranker_degraded_total",
+        "Reranker fallback activations (model unreachable or error)",
+        ["tenant"],
+    )
+    RAG_RERANK_SKIPPED = Counter(
+        "rag_rerank_skipped_total",
+        "G5 — rerank round-trips skipped because the top fused hybrid score cleared rag_rerank_skip_min_score",
+        ["tenant"],
+    )
+    RAG_LLM_TOKENS = Counter(
+        "rag_llm_tokens_total",
+        "LLM tokens consumed per generation (prompt/completion), from engine usage stats",
+        ["tenant", "model", "kind"],
+    )
+    RAG_LLM_COST_USD = Counter(
+        "rag_llm_cost_usd_total",
+        "Estimated LLM cost in USD (LiteLLM pricing table; 0 for unpriced/local models)",
+        ["tenant", "model"],
+    )
     _METRICS_ENABLED = True
 except ImportError:
     _METRICS_ENABLED = False
@@ -652,13 +745,33 @@ async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep):
 # SSE serialiser
 # =============================================================================
 
-def _serialize_sse(event: PipelineEvent) -> str:
+def _serialize_sse(event: PipelineEvent, tenant_id: str = "") -> str:
     """Convert a typed PipelineEvent into an SSE data line, preserving wire format."""
     match event:
-        case MetadataEvent(query_id=qid, cache_hit=ch, context_state=cs):
+        case MetadataEvent(
+            query_id=qid, cache_hit=ch, context_state=cs, reranker_degraded=rd,
+            retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout,
+            query_expanded=qe, rerank_skipped=rs,
+        ):
             payload: dict = {"metadata": {"query_id": qid, "cache_hit": ch}}
             if cs:
                 payload["metadata"]["context_state"] = cs
+            if rd is not None:
+                payload["metadata"]["reranker_degraded"] = rd
+                if rd and _METRICS_ENABLED:
+                    RAG_RERANKER_DEGRADED.labels(tenant=tenant_id or "unknown").inc()
+            if rm is not None:
+                payload["metadata"]["retrieval_mode"] = rm
+            if cin is not None:
+                payload["metadata"]["rerank_candidates_in"] = cin
+            if cout is not None:
+                payload["metadata"]["rerank_candidates_out"] = cout
+            if qe is not None:
+                payload["metadata"]["query_expanded"] = qe
+            if rs is not None:
+                payload["metadata"]["rerank_skipped"] = rs
+                if rs and _METRICS_ENABLED:
+                    RAG_RERANK_SKIPPED.labels(tenant=tenant_id or "unknown").inc()
         case RoutingEvent(domain=d, explicit=e):
             payload = {"routing": {"domain": d, "explicit": e}}
         case QueuedEvent(message=m):
@@ -702,6 +815,7 @@ async def query_documents(
     settings: SettingsDep,
     history: ConversationHistoryDep,
     http_request: Request,
+    tracer: TracerDep,
 ):
     """
     RAG query with tenant isolation and RBAC.
@@ -737,18 +851,45 @@ async def query_documents(
             model_profile_resolver=http_request.app.state.model_profile_resolver,
             conversation_id=request.conversation_id,
             summarizer=http_request.app.state.summarizer,
+            tracer=tracer,
+            retrieve_only=request.retrieve_only,
         )
-        _fire_and_forget(_emit_query_event(
+        model_used = result.get("model_used", "unknown")
+        tokens_used = result.get("tokens_used") or {}
+        cost_usd = result.get("cost_usd", 0.0)
+        if _METRICS_ENABLED:
+            tenant_label = user_ctx.tenant_id or "unknown"
+            if tokens_used.get("prompt"):
+                RAG_LLM_TOKENS.labels(
+                    tenant=tenant_label, model=model_used, kind="prompt"
+                ).inc(tokens_used["prompt"])
+            if tokens_used.get("completion"):
+                RAG_LLM_TOKENS.labels(
+                    tenant=tenant_label, model=model_used, kind="completion"
+                ).inc(tokens_used["completion"])
+            if cost_usd:
+                RAG_LLM_COST_USD.labels(tenant=tenant_label, model=model_used).inc(cost_usd)
+        _fire_and_forget(_publish_query_event(
+            http_request.app.state.analytics_bus,
             query_id=request_id,
             tenant_id=user_ctx.tenant_id,
             user_id=user_ctx.user_id or "",
             latency_ms=result["latency_ms"],
-            model_used=result.get("model_used", "unknown"),
+            model_used=model_used,
             cache_hit=result["cache_hit"],
             source_count=len(result["sources"]),
-            analytics_url=settings.analytics_service_url,
             thinking_truncated=result.get("thinking_truncated", False),
-            http_client=http_request.app.state.http,
+            prompt_tokens=tokens_used.get("prompt", 0),
+            completion_tokens=tokens_used.get("completion", 0),
+            cost_usd=cost_usd,
+            query_text=request.question,
+            retrieval_mode=result.get("retrieval_mode", ""),
+            rerank_candidates_in=result.get("rerank_candidates_in", 0),
+            rerank_candidates_out=result.get("rerank_candidates_out", 0),
+            reranker_degraded=result.get("reranker_degraded", False),
+            trace_id=result.get("trace_id", ""),
+            query_expanded=result.get("query_expanded", False),
+            rerank_skipped=result.get("rerank_skipped", False),
         ))
         return QueryResponse(
             answer=result["answer"],
@@ -772,6 +913,7 @@ async def query_documents_stream(
     settings: SettingsDep,
     history: ConversationHistoryDep,
     http_request: Request,
+    tracer: TracerDep,
 ):
     """Thin streaming handler — delegates all orchestration to RAGService.stream()."""
     llm_semaphore: asyncio.Semaphore = http_request.app.state.llm_semaphore
@@ -789,8 +931,14 @@ async def query_documents_stream(
     async def sse_iter():
         cache_hit = False
         source_count = 0
+        retrieval_mode = ""
+        rerank_candidates_in = 0
+        rerank_candidates_out = 0
+        reranker_degraded = False
+        query_expanded = False
+        rerank_skipped = False
         try:
-            async for event in rag_service.stream(
+            async for event in _with_heartbeat(rag_service.stream(
                 question=request.question,
                 tenant_id=user_ctx.tenant_id,
                 user_context=user_ctx,
@@ -811,18 +959,51 @@ async def query_documents_stream(
                 model_profile_resolver=http_request.app.state.model_profile_resolver,
                 conversation_id=request.conversation_id,
                 summarizer=http_request.app.state.summarizer,
-            ):
+                tracer=tracer,
+                retrieve_only=request.retrieve_only,
+            )):
+                if event is _SSE_HEARTBEAT_SENTINEL:
+                    yield ": keepalive\n\n"
+                    continue
                 if isinstance(event, MetadataEvent):
                     cache_hit = event.cache_hit
+                    if event.retrieval_mode is not None:
+                        retrieval_mode = event.retrieval_mode
+                    if event.rerank_candidates_in is not None:
+                        rerank_candidates_in = event.rerank_candidates_in
+                    if event.rerank_candidates_out is not None:
+                        rerank_candidates_out = event.rerank_candidates_out
+                    if event.reranker_degraded is not None:
+                        reranker_degraded = event.reranker_degraded
+                    if event.query_expanded is not None:
+                        query_expanded = event.query_expanded
+                    if event.rerank_skipped is not None:
+                        rerank_skipped = event.rerank_skipped
                 elif isinstance(event, SourcesEvent):
                     source_count = len(event.sources)
-                yield _serialize_sse(event)
+                yield _serialize_sse(event, tenant_id=user_ctx.tenant_id)
         except Exception as e:
             logger.exception("Streaming query failed")
-            yield _serialize_sse(ErrorEvent(message=str(e)))
+            yield _serialize_sse(ErrorEvent(message=str(e)), tenant_id=user_ctx.tenant_id)
             return
 
-        _fire_and_forget(_emit_query_event(
+        tokens_used = getattr(rag_service, "_last_tokens_used", {}) or {}
+        cost_usd = getattr(rag_service, "_last_cost_usd", 0.0)
+        if _METRICS_ENABLED:
+            tenant_label = user_ctx.tenant_id or "unknown"
+            if tokens_used.get("prompt"):
+                RAG_LLM_TOKENS.labels(
+                    tenant=tenant_label, model=effective_model, kind="prompt"
+                ).inc(tokens_used["prompt"])
+            if tokens_used.get("completion"):
+                RAG_LLM_TOKENS.labels(
+                    tenant=tenant_label, model=effective_model, kind="completion"
+                ).inc(tokens_used["completion"])
+            if cost_usd:
+                RAG_LLM_COST_USD.labels(tenant=tenant_label, model=effective_model).inc(cost_usd)
+
+        _fire_and_forget(_publish_query_event(
+            http_request.app.state.analytics_bus,
             query_id=request_id,
             tenant_id=user_ctx.tenant_id,
             user_id=user_ctx.user_id or "",
@@ -830,9 +1011,18 @@ async def query_documents_stream(
             model_used=effective_model,
             cache_hit=cache_hit,
             source_count=source_count,
-            analytics_url=settings.analytics_service_url,
             thinking_truncated=getattr(rag_service, "_last_thinking_truncated", False),
-            http_client=http_request.app.state.http,
+            prompt_tokens=tokens_used.get("prompt", 0),
+            completion_tokens=tokens_used.get("completion", 0),
+            cost_usd=cost_usd,
+            query_text=request.question,
+            retrieval_mode=retrieval_mode,
+            rerank_candidates_in=rerank_candidates_in,
+            rerank_candidates_out=rerank_candidates_out,
+            reranker_degraded=reranker_degraded,
+            trace_id=getattr(rag_service, "_last_trace_id", ""),
+            query_expanded=query_expanded,
+            rerank_skipped=rerank_skipped,
         ))
 
     return StreamingResponse(

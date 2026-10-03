@@ -7,8 +7,9 @@ requires-python = ">=3.11,<3.13"
 license = {text = "MIT"}
 
 dependencies = [
-    # Shared DocIntel library (domain classifier, device detection)
-    "docintel-common",
+    # Shared DocIntel library. [ml]: get_domain_classifier (DeBERTa zero-shot).
+    # [db]: model_profile_resolver.py needs psycopg2.
+    "docintel-common[ml,db]",
 
     # Web Framework
     "fastapi>=0.115.0",

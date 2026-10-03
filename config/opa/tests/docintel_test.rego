@@ -69,6 +69,54 @@ test_tenant_admin_can_read_settings if {
     }
 }
 
+test_internal_only_from_path_denied_even_with_write_role if {
+    not authz.allow with input as {
+        "user": {
+            "roles":     ["documents:rw", "admin:rw"],
+            "clearance": "restricted",
+            "tenant_id": "alpha",
+            "user_id":   "u9",
+        },
+        "request": {"method": "POST", "path": "/api/v1/documents/from-path"},
+    }
+}
+
+test_internal_only_chunks_bulk_denied if {
+    not authz.allow with input as {
+        "user": {
+            "roles":     ["documents:rw", "admin:rw"],
+            "clearance": "restricted",
+            "tenant_id": "alpha",
+            "user_id":   "u9",
+        },
+        "request": {"method": "POST", "path": "/api/v1/documents/11111111-1111-1111-1111-111111111111/chunks/bulk"},
+    }
+}
+
+test_internal_only_chunks_append_denied if {
+    not authz.allow with input as {
+        "user": {
+            "roles":     ["documents:rw", "admin:rw"],
+            "clearance": "restricted",
+            "tenant_id": "alpha",
+            "user_id":   "u9",
+        },
+        "request": {"method": "POST", "path": "/api/v1/documents/11111111-1111-1111-1111-111111111111/chunks/append"},
+    }
+}
+
+test_internal_only_data_sources_denied if {
+    not authz.allow with input as {
+        "user": {
+            "roles":     ["documents:rw", "admin:rw"],
+            "clearance": "restricted",
+            "tenant_id": "alpha",
+            "user_id":   "u9",
+        },
+        "request": {"method": "GET", "path": "/api/v1/documents/data-sources"},
+    }
+}
+
 test_empty_roles_denied if {
     not authz.allow with input as {
         "user": {

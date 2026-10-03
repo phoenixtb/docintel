@@ -4,7 +4,12 @@ import jakarta.persistence.*
 import java.time.Instant
 import java.util.UUID
 
-enum class DeletionTaskStatus { PENDING, DONE, DEAD }
+/**
+ * CANCELLED: the document was re-uploaded (same content hash → same deterministic
+ * document id) while this deletion was still queued. Executing the stale task would
+ * destroy the resurrected document's vectors/rows, so it is voided instead.
+ */
+enum class DeletionTaskStatus { PENDING, DONE, DEAD, CANCELLED }
 
 /**
  * Outbox record created when a document is marked for deletion.

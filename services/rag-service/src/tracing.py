@@ -165,6 +165,36 @@ class LangfuseTracer:
         finally:
             self._client.flush()
 
+    def start_trace(
+        self,
+        name: str,
+        trace_id: str,
+        inputs: dict | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+    ) -> _Trace:
+        """
+        Create a trace with an explicit id (B4 — lets query_events store the
+        exact same id the RAG pipeline generates, so the UI can deep-link
+        `{langfuse_host}/trace/{trace_id}` without a round-trip lookup).
+
+        Unlike `trace()`, this is not a context manager — the caller owns the
+        returned _Trace and may call `.update()` / `.flush()` on it once the
+        query completes. No-ops (returns a null _Trace) when Langfuse is disabled.
+        """
+        if self._client is None:
+            return _Trace(None, None)
+        lf_trace = self._client.trace(
+            id=trace_id,
+            name=name,
+            user_id=user_id,
+            session_id=session_id,
+            tags=tags or [],
+            input=inputs or {},
+        )
+        return _Trace(lf_trace, self._client)
+
     def shutdown(self) -> None:
         """Flush and close the Langfuse client."""
         if self._client:

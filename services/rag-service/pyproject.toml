@@ -7,8 +7,11 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 
 dependencies = [
-    # Shared DocIntel library (domain classifier, device detection)
-    "docintel-common",
+    # Shared DocIntel library. [db]: model_profile_resolver.py needs psycopg2.
+    # transformers/torch for the domain router come from this project's own
+    # deps below, not docintel-common[ml] — rag-service only reads
+    # docintel_common.domain's plain DOMAIN_LABELS/DOMAIN_DESCRIPTIONS constants.
+    "docintel-common[db]",
 
     # Web Framework
     "fastapi>=0.115.0",
@@ -36,7 +39,10 @@ dependencies = [
     "fastembed>=0.4.0",
 
     # Observability
-    "langfuse>=2.57.0",
+    # tracing.py wraps the v2 API (client.trace/span/generation) — v3+ removed
+    # it (OTEL-based rewrite). Unpinned, uv resolves 4.x and every traced query
+    # dies with AttributeError. Bump only together with a tracing.py rewrite.
+    "langfuse>=2.57.0,<3",
     "prometheus-fastapi-instrumentator>=7.0.0",
     "prometheus-client>=0.21.0",
     
@@ -44,8 +50,10 @@ dependencies = [
     "jinja2>=3.1.0",
     
     # Evaluation
+    # G4: ragas moved to tests/integration/pyproject.toml — it's a harness
+    # (LLM-judge) dependency, not a rag-service runtime one. It was declared
+    # here unused (never imported by src/).
     "datasets>=3.2.0",
-    "ragas>=0.2.0",
     
     # Database
     "psycopg2-binary>=2.9.0",

@@ -34,6 +34,7 @@ from docintel_common.internal_auth import verify_internal_token
 from docintel_common.messaging import RedisStreamBus, TOPIC_INGESTION_COMPLETE
 from docintel_common.security import CLASSIFICATION_ORDER, Classification, DocumentACL
 from docintel_common.tracing import TraceContext, configure_trace_logging
+from docintel_common.errors import install_error_handlers
 
 from ..adapters import MinIOAdapter
 from ..config import get_settings
@@ -107,6 +108,7 @@ app = FastAPI(
     docs_url="/docs",
     lifespan=lifespan,
 )
+install_error_handlers(app)
 
 if _METRICS_ENABLED:
     Instrumentator().instrument(app).expose(app)

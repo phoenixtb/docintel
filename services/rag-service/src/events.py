@@ -40,6 +40,19 @@ class MetadataEvent:
     query_id: str
     cache_hit: bool
     context_state: Optional[dict] = None
+    reranker_degraded: Optional[bool] = None
+    # B3 — per-answer transparency ("Why this answer" panel). Emitted
+    # incrementally as each pipeline stage completes; the UI merges fields
+    # from successive MetadataEvents onto the in-progress message.
+    retrieval_mode: Optional[str] = None
+    rerank_candidates_in: Optional[int] = None
+    rerank_candidates_out: Optional[int] = None
+    # G2 — true when the expanded-query candidates were unioned in before rerank
+    # (expansion succeeded and produced a distinct query); None/False otherwise.
+    query_expanded: Optional[bool] = None
+    # G5 — true when the reranker round-trip was skipped because the top fused
+    # (RRF) hybrid-retrieval score cleared rag_rerank_skip_min_score.
+    rerank_skipped: Optional[bool] = None
 
 
 @dataclass(frozen=True)

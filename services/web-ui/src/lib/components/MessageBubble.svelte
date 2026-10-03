@@ -22,6 +22,12 @@
     liked?: boolean | null;
     queryId?: string;
     routedDomain?: string;
+    rerankerDegraded?: boolean;
+    // B3 — "Why this answer" panel data, carried on MetadataEvent(s) from the SSE stream.
+    retrievalMode?: string;
+    rerankCandidatesIn?: number;
+    rerankCandidatesOut?: number;
+    cacheHit?: boolean;
   }
 
   let {
@@ -116,6 +122,18 @@
       label: DOMAIN_LABEL[domain] ?? domain,
     };
   }
+
+  const RETRIEVAL_MODE_LABEL: Record<string, string> = {
+    hybrid: 'Hybrid (dense + keyword)',
+    dense: 'Dense (semantic only)',
+  };
+
+  const hasWhyData = $derived(
+    message.retrievalMode !== undefined ||
+    message.rerankCandidatesIn !== undefined ||
+    message.cacheHit !== undefined ||
+    message.routedDomain !== undefined
+  );
 </script>
 
 <style>
@@ -196,6 +214,18 @@
       </div>
     {/if}
 
+    <!-- ── Reranker degraded warning ──────────────────────────────── -->
+    {#if message.rerankerDegraded}
+      <div class="flex items-center gap-1.5 px-1 text-xs text-amber-600"
+           title="Reranker unavailable — relevance scores are raw retrieval similarity, not reranked">
+        <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+        </svg>
+        <span>Relevance scores unranked (reranker unavailable)</span>
+      </div>
+    {/if}
+
     <!-- ── Answer bubble ──────────────────────────────────────────── -->
     <div class="px-4 py-4 rounded-2xl glass border border-emerald-500/10 hover:border-emerald-500/15 transition-all duration-200
       dark:shadow-none shadow-sm">
@@ -249,8 +279,11 @@
                 {#if source.section}
                   <span class="text-xs text-slate-600 shrink-0">{source.section}</span>
                 {/if}
-                <span class="shrink-0 px-1.5 py-0.5 rounded text-xs font-medium {scoreColor(source.score)}">
-                  {(source.score * 100).toFixed(0)}%
+                <span
+                  class="shrink-0 px-1.5 py-0.5 rounded text-xs font-medium {scoreColor(source.score)}"
+                  title="Retrieval relevance score — not answer confidence"
+                >
+                  {(source.score * 100).toFixed(0)}% relevance
                 </span>
                 <svg class="w-3 h-3 shrink-0 text-slate-600 transition-transform {expandedSources.has(idx) ? 'rotate-180' : ''}"
                   fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -275,6 +308,41 @@
           {/each}
         </div>
       </div>
+    {/if}
+
+    <!-- ── Why this answer panel ──────────────────────────────────── -->
+    {#if hasWhyData}
+      <details class="rounded-xl border border-dashed border-white/10 bg-white/[0.02] text-xs">
+        <summary class="flex items-center gap-2 px-3 py-2 cursor-pointer select-none text-slate-500 hover:text-slate-300 list-none transition-colors">
+          <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span class="font-medium">Why this answer</span>
+          <span class="ml-auto text-slate-600">(click to expand)</span>
+        </summary>
+        <div class="px-3 pb-3 pt-1 grid grid-cols-2 gap-y-1.5 gap-x-3 text-slate-400">
+          {#if message.routedDomain}
+            {@const chip = domainChip(message.routedDomain)}
+            <span class="text-slate-600">Domain</span>
+            <span><span class="px-1.5 py-0.5 rounded-full font-medium {chip.cls}">{chip.label}</span></span>
+          {/if}
+          {#if message.retrievalMode}
+            <span class="text-slate-600">Retrieval</span>
+            <span>{RETRIEVAL_MODE_LABEL[message.retrievalMode] ?? message.retrievalMode}</span>
+          {/if}
+          {#if message.rerankCandidatesIn !== undefined}
+            <span class="text-slate-600">Reranked</span>
+            <span>{message.rerankCandidatesOut ?? '?'} of {message.rerankCandidatesIn} candidates</span>
+          {/if}
+          <span class="text-slate-600">Cache</span>
+          <span>{message.cacheHit ? 'Hit (served from semantic cache)' : 'Miss (generated fresh)'}</span>
+          {#if message.rerankerDegraded}
+            <span class="text-slate-600">Reranker</span>
+            <span class="text-amber-500">Unavailable — scores are raw retrieval similarity</span>
+          {/if}
+        </div>
+      </details>
     {/if}
 
     <!-- ── Action bar ─────────────────────────────────────────────── -->

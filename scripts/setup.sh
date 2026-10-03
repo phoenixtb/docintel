@@ -12,6 +12,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+ENV_FILE="$PROJECT_DIR/.env"
 
 # Load defaults (single source of truth for model names)
 # shellcheck source=../config/defaults.env
@@ -97,6 +98,32 @@ for model in "${MODELS[@]}"; do
         ok "Pulled: ${model}"
     fi
 done
+
+# =============================================================================
+# Write LLM engine vars to .env
+# =============================================================================
+
+echo ""
+echo "================================================"
+echo "Writing LLM engine configuration to .env"
+echo "================================================"
+
+_upsert_env() {
+    local key="$1" val="$2"
+    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        sed -i.bak "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+    else
+        echo "${key}=${val}" >> "$ENV_FILE"
+    fi
+}
+
+_upsert_env "LLM_ENGINE"      "ollama"
+_upsert_env "LLM_CHAT_URL"    "http://host.docker.internal:11434/v1"
+_upsert_env "LLM_EMBED_URL"   "http://host.docker.internal:11434/v1"
+_upsert_env "LLM_MODEL"       "$DEFAULT_LLM_MODEL"
+_upsert_env "LLM_EMBED_MODEL" "$DEFAULT_EMBED_MODEL"
+
+ok ".env updated (LLM_ENGINE=ollama, :11434, model=$DEFAULT_LLM_MODEL, embed=$DEFAULT_EMBED_MODEL)"
 
 # =============================================================================
 # Done

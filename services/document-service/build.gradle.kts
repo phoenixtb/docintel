@@ -46,7 +46,10 @@ dependencies {
     
     // HTTP Client (for RAG Service communication)
     implementation("org.springframework.boot:spring-boot-starter-webflux")
-    
+
+    // OpenAPI spec generation (exported + merged into docs/api/openapi.json — see scripts/generate-openapi.sh)
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.9")
+
     // Observability
     implementation("io.micrometer:micrometer-registry-prometheus")
     

@@ -251,10 +251,37 @@ route_requires_role(method, path, "user.preferences:rw") {
 }
 
 # ---------------------------------------------------------------------------
-# Allow rule — user must hold at least one matching role
+# Internal-only paths — deny backstop (G7.6c)
+#
+# These document-service endpoints are service-to-service only (HMAC via
+# InternalAuthFilter) and are NOT exposed as gateway routes (G7.6a). This is
+# the third layer of defense in depth: if a route is ever mis-configured to
+# proxy one of these paths, OPA still denies it for any end-user token.
+# ---------------------------------------------------------------------------
+
+is_internal_only_path(path) {
+    path == "/api/v1/documents/from-path"
+}
+
+is_internal_only_path(path) {
+    glob.match("/api/v1/documents/*/chunks/bulk", [], path)
+}
+
+is_internal_only_path(path) {
+    glob.match("/api/v1/documents/*/chunks/append", [], path)
+}
+
+is_internal_only_path(path) {
+    glob.match("/api/v1/documents/data-sources*", [], path)
+}
+
+# ---------------------------------------------------------------------------
+# Allow rule — user must hold at least one matching role, and the path must
+# not be on the internal-only backstop list above.
 # ---------------------------------------------------------------------------
 
 allow {
+    not is_internal_only_path(input.request.path)
     some role
     role = input.user.roles[_]
     route_requires_role(input.request.method, input.request.path, role)

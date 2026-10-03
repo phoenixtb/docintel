@@ -619,6 +619,7 @@ class TestInferKind:
     def test_rerank_detected(self):
         assert infer_kind("jina-reranker-v2:multilingual") == "rerank"
         assert infer_kind("bge-reranker-large") == "rerank"
+        assert infer_kind("qwen3-reranker:0.6b:8bit") == "rerank"
 
     def test_rerank_takes_precedence_over_embed(self):
         # Some catalogs name rerankers with both substrings — order matters.

@@ -487,6 +487,47 @@ class TestBuildStreamingGenerator:
         )
         assert isinstance(gen, ThinkingAwareChatGenerator)
 
+    def test_stream_options_include_usage_always_sent(self):
+        """A5: stream_options.include_usage is always requested so token usage
+        is available for CostTracker — OpenAI-standard, silently ignored by
+        engines that don't support it."""
+        from src.components.llm_adapter import build_streaming_generator
+
+        gen = build_streaming_generator(
+            model="test",
+            chat_url="http://localhost:11434/v1",
+            api_key="none",
+            streaming_callback=lambda c: None,
+            think=None,
+            max_tokens=1024,
+            temperature=0.1,
+        )
+        assert gen.generation_kwargs["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.unit
+class TestExtractUsage:
+    """Tests for extract_usage (A5 — token usage extraction for CostTracker)."""
+
+    def test_returns_none_when_absent(self):
+        from src.components.llm_adapter import extract_usage
+        from haystack.dataclasses import StreamingChunk
+
+        chunk = StreamingChunk(content="hello")
+        assert extract_usage(chunk) is None
+
+    def test_returns_usage_dict_when_present(self):
+        """Haystack's own chunk conversion (haystack-ai~=2.18) writes
+        chunk.meta['usage'] from the raw OpenAI usage object on the trailing
+        chunk — extract_usage just reads it back out."""
+        from src.components.llm_adapter import extract_usage
+        from haystack.dataclasses import StreamingChunk
+
+        chunk = StreamingChunk(content="")
+        chunk.meta["usage"] = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+        usage = extract_usage(chunk)
+        assert usage == {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+
 
 @pytest.mark.unit
 class TestBuildStreamingGeneratorNewParams:

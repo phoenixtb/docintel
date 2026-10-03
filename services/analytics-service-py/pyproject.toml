@@ -5,11 +5,20 @@ description = "DocIntel Analytics Service — event telemetry and feedback via C
 requires-python = ">=3.11"
 
 dependencies = [
+    # A7: Redis Streams consumer for query telemetry (docintel_common.messaging
+    # only — the package's other submodules, e.g. the torch-based domain
+    # classifier, are lazily imported and never loaded by this service).
+    "docintel-common",
+
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.0.0",
     "clickhouse-connect>=0.8.0",
+
+    # Observability
+    "prometheus-fastapi-instrumentator>=7.0.0",
+    "prometheus-client>=0.21.0",
 ]
 
 [project.optional-dependencies]
@@ -17,7 +26,11 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "httpx>=0.27.0",
+    "fakeredis>=2.0.0",
 ]
+
+[tool.uv.sources]
+docintel-common = { path = "../../lib/docintel-common" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

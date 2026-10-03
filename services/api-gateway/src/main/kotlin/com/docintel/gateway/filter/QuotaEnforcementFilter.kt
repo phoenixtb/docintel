@@ -1,5 +1,6 @@
 package com.docintel.gateway.filter
 
+import com.docintel.gateway.error.writeErrorEnvelope
 import org.slf4j.LoggerFactory
 import org.springframework.cloud.gateway.filter.GatewayFilterChain
 import org.springframework.cloud.gateway.filter.GlobalFilter
@@ -107,9 +108,8 @@ class QuotaEnforcementFilter(
     }
 
     private fun tooManyRequests(exchange: ServerWebExchange, message: String): Mono<Void> {
-        exchange.response.statusCode = HttpStatus.TOO_MANY_REQUESTS
         exchange.response.headers.add("X-Quota-Exceeded", message)
-        return exchange.response.setComplete()
+        return writeErrorEnvelope(exchange, HttpStatus.TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS", message)
     }
 
     override fun getOrder(): Int = -97

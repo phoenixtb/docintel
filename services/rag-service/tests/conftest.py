@@ -168,8 +168,19 @@ def test_document_id() -> str:
 
 @pytest.fixture
 def qdrant_url() -> str:
-    """Qdrant URL for tests."""
-    return os.getenv("QDRANT_URL", "http://localhost:6333")
+    """Qdrant URL for tests. Skips the test if Qdrant is unreachable.
+
+    Integration tests depend on this fixture so the suite degrades to a
+    skip (not a failure) on a clean checkout with no containers running.
+    """
+    url = os.getenv("QDRANT_URL", "http://localhost:6333")
+    import httpx
+
+    try:
+        httpx.get(f"{url}/collections", timeout=1.0)
+    except httpx.HTTPError:
+        pytest.skip(f"Qdrant unreachable at {url} — skipping integration test")
+    return url
 
 
 @pytest.fixture

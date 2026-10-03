@@ -101,7 +101,7 @@ def acquire_token(
     except ImportError:
         print(
             "ERROR: PyJWT not installed. Run:\n"
-            "  pip install -r tests/integration/requirements.txt\n",
+            "  cd tests/integration && uv sync\n",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -234,27 +234,27 @@ def _ensure_tenant_exists(base_url: str, tenant_id: str, bearer_token: str) -> N
         sys.exit(1)
 
 
-def setup_e2e_environment(
+# Fallback when queries.yaml has no config.seed_samples block (backward compat
+# with older configs / other callers of setup_e2e_environment).
+DEFAULT_SEED_SAMPLES: dict[str, int] = {"techqa": 5, "hr_policies": 5, "cuad": 5}
+
+
+def _load_one_dataset(
+    dataset_key: str,
+    samples: int,
     tenant_id: str,
-    base_url: str = "http://localhost:8080",
-    ingestion_url: str = "http://localhost:8001",
-    data_loader_url: str = "http://localhost:8003",
-    bearer_token: str | None = None,
+    data_loader_url: str,
+    user_id: str,
 ) -> None:
     """
-    Seed test datasets into the e2e tenant via the data-loader service.
+    Start a data-loader job for a single dataset and block until it finishes.
 
-    Dataset loading moved from ingestion-service (/ingest/dataset/*) to
-    data-loader (/datasets/*) as part of the Phase 1 pipeline redesign.
-    The data-loader auth uses X-User-Id (not the HMAC service token).
-
-    Seeds all three suites' datasets so every query suite has documents.
-    The 'e2e' tenant is pre-seeded in the DB (config/postgres/init.sql).
-    Blocks until the ingestion job completes or raises on error.
+    data-loader's /datasets/load takes ONE samples_per_dataset value applied
+    uniformly to every dataset in the request — calling it once per dataset
+    (each with its own sample count) is how G1 gets per-dataset seed sizes
+    (see queries.yaml config.seed_samples) without touching data-loader itself.
     """
-    user_id = "e2e-test-runner"
-
-    print("Setup: seeding test datasets into e2e tenant …")
+    print(f"Setup: seeding '{dataset_key}' (samples={samples}) into e2e tenant …")
     try:
         resp = httpx.post(
             f"{data_loader_url}/datasets/load",
@@ -263,13 +263,13 @@ def setup_e2e_environment(
                 "X-User-Id": user_id,
                 "X-Tenant-Id": tenant_id,
             },
-            json={"datasets": ["techqa", "hr_policies", "cuad"], "samples_per_dataset": 5},
+            json={"datasets": [dataset_key], "samples_per_dataset": samples},
             timeout=30,
         )
         resp.raise_for_status()
     except Exception as exc:
         print(
-            f"ERROR: Failed to start seed job — {exc}\n"
+            f"ERROR: Failed to start seed job for '{dataset_key}' — {exc}\n"
             f"  Is data-loader reachable at {data_loader_url}?\n",
             file=sys.stderr,
         )
@@ -317,32 +317,144 @@ def setup_e2e_environment(
                     print(f"\r  Ingesting … {done_docs}/{total_docs} ({pct}%)", end="", flush=True)
                 elif etype == "done":
                     done_docs = event.get("processed", total_docs)
-                    print(f"\r  ✓ Ingested {done_docs} documents into tenant '{tenant_id}'")
+                    print(f"\r  ✓ Ingested {done_docs} documents for '{dataset_key}' into tenant '{tenant_id}'")
                     success = True
                     return
                 elif etype == "error":
                     reason = event.get("reason", event)
-                    print(f"\nERROR: Seed job failed: {reason}", file=sys.stderr)
+                    print(f"\nERROR: Seed job failed for '{dataset_key}': {reason}", file=sys.stderr)
                     sys.exit(1)
 
     if not success:
         print(
-            "\nERROR: Seed job stream closed without a 'done' event.\n"
+            f"\nERROR: Seed job stream closed without a 'done' event for '{dataset_key}'.\n"
             "  The ingestion job likely failed — check ingestion-service logs.\n",
             file=sys.stderr,
         )
         sys.exit(1)
 
 
+def setup_e2e_environment(
+    tenant_id: str,
+    base_url: str = "http://localhost:8080",
+    ingestion_url: str = "http://localhost:8001",
+    data_loader_url: str = "http://localhost:8003",
+    bearer_token: str | None = None,
+    seed_samples: dict[str, int] | None = None,
+) -> None:
+    """
+    Seed test datasets into the e2e tenant via the data-loader service.
+
+    Dataset loading moved from ingestion-service (/ingest/dataset/*) to
+    data-loader (/datasets/*) as part of the Phase 1 pipeline redesign.
+    The data-loader auth uses X-User-Id (not the HMAC service token).
+
+    seed_samples: per-dataset sample counts (see queries.yaml config.seed_samples,
+    G1). Falls back to DEFAULT_SEED_SAMPLES (5 each — the pre-G1 behavior) when
+    not provided. One data-loader job is started per dataset sequentially.
+
+    Blocks until every dataset's ingestion job completes or raises on error.
+    """
+    user_id = "e2e-test-runner"
+    samples = seed_samples or DEFAULT_SEED_SAMPLES
+
+    for dataset_key in ("techqa", "hr_policies", "cuad"):
+        _load_one_dataset(
+            dataset_key=dataset_key,
+            samples=samples.get(dataset_key, DEFAULT_SEED_SAMPLES[dataset_key]),
+            tenant_id=tenant_id,
+            data_loader_url=data_loader_url,
+            user_id=user_id,
+        )
+
+    # The data-loader's "done" event means documents were handed to the
+    # pipeline, NOT that embeddings are in Qdrant (status flips to COMPLETED
+    # only after the vector upsert). Querying before that races the tail of
+    # ingestion — observed live: the first query of a run returned 0 sources
+    # and wrongly abstained, while the same corpus served 5 sources seconds
+    # later (reports/full-gate-final-20260808-0438).
+    _wait_for_processing_complete(base_url, tenant_id, bearer_token)
+
+
+def _wait_for_processing_complete(
+    base_url: str,
+    tenant_id: str,
+    bearer_token: str | None,
+    timeout_s: float = 180.0,
+    poll_s: float = 3.0,
+) -> None:
+    """Block until no document in the tenant is PENDING/PROCESSING (or timeout)."""
+    headers: dict[str, str] = {"X-Tenant-Id": tenant_id}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    base = base_url.rstrip("/")
+    deadline = time.time() + timeout_s
+
+    while time.time() < deadline:
+        in_flight = 0
+        total = 0
+        page = 0
+        while True:
+            resp = httpx.get(
+                f"{base}/api/v1/documents",
+                headers=headers,
+                params={"page": page, "size": 200},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                print(
+                    f"  ⚠  Embedding-wait: GET /api/v1/documents HTTP {resp.status_code} — proceeding without wait.",
+                    file=sys.stderr,
+                )
+                return
+            data = resp.json()
+            docs = data.get("content", data if isinstance(data, list) else [])
+            if not docs:
+                break
+            total += len(docs)
+            in_flight += sum(
+                1 for d in docs if d.get("status") in ("PENDING", "PROCESSING")
+            )
+            if data.get("last", True):
+                break
+            page += 1
+
+        if total and in_flight == 0:
+            print(f"  ✓ All {total} documents COMPLETED (embeddings in Qdrant)")
+            return
+        print(
+            f"\r  Waiting for embeddings … {total - in_flight}/{total} completed",
+            end="",
+            flush=True,
+        )
+        time.sleep(poll_s)
+
+    print(
+        f"\n  ⚠  Embedding-wait timed out after {timeout_s:.0f}s — proceeding; "
+        "early queries may under-retrieve.",
+        file=sys.stderr,
+    )
+
+
 def teardown_e2e_environment(
     base_url: str,
     tenant_id: str,
     bearer_token: str | None,
+    purge: bool = False,
 ) -> None:
     """
     Delete all documents from the e2e tenant by listing then deleting each one.
     Uses the standard authenticated gateway endpoints — no HMAC needed.
     Always called (try/finally) to prevent artifact accumulation.
+
+    Document deletion is async: DELETE /api/v1/documents/{id} marks the document
+    DELETING and returns 202 Accepted (queued) — the row + Qdrant vectors are
+    cleaned up later by document-service's DeletionTaskWorker. 202 is the normal
+    success response here, not an error.
+
+    If purge=True, also removes leftover `documents.data_sources` rows for this
+    tenant via a direct psql fallback (see `_purge_data_sources_via_psql` — no
+    document-service API exists for tenant-scoped data-source deletion).
     """
     print(f"\nTeardown: deleting all documents for tenant '{tenant_id}' …")
     headers: dict[str, str] = {"X-Tenant-Id": tenant_id}
@@ -383,7 +495,9 @@ def teardown_e2e_environment(
                     headers=headers,
                     timeout=30,
                 )
-                if del_resp.status_code in (200, 204, 404):
+                # 200/204: synchronous delete. 202: queued for async deletion
+                # (DeletionTaskWorker). 404: already gone. All are success.
+                if del_resp.status_code in (200, 202, 204, 404):
                     deleted += 1
                 else:
                     errors += 1
@@ -391,9 +505,57 @@ def teardown_e2e_environment(
         if errors:
             print(f"  ⚠  Deleted {deleted} docs, {errors} errors. Manual cleanup may be required.")
         else:
-            print(f"  ✓ Tenant '{tenant_id}' cleaned up ({deleted} documents deleted).")
+            print(f"  ✓ Tenant '{tenant_id}' cleaned up ({deleted} documents deleted, async cleanup queued).")
     except Exception as exc:
         print(f"  ⚠  Teardown failed (non-fatal): {exc}", file=sys.stderr)
+
+    if purge:
+        _purge_data_sources_via_psql(tenant_id)
+
+
+def _purge_data_sources_via_psql(tenant_id: str) -> None:
+    """
+    Delete leftover `documents.data_sources` rows for [tenant_id].
+
+    No document-service API exists for tenant-scoped data-source deletion, so this
+    shells out to `docker compose exec postgres psql` (the postgres container has
+    no host port binding — see docker-compose.yml). Manual equivalent, for
+    reference:
+
+        docker compose exec postgres psql -U docintel -d docintel -c \\
+            "DELETE FROM documents.data_sources WHERE tenant_id = '<tenant_id>';"
+
+    Non-fatal: prints a warning and continues if docker/psql is unavailable
+    (e.g. running against a remote stack without local docker access).
+    """
+    import subprocess
+
+    project_root = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+    sql = f"DELETE FROM documents.data_sources WHERE tenant_id = '{tenant_id}';"
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "docintel", "-d", "docintel", "-c", sql],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            print(f"  ✓ Purged data_sources rows for tenant '{tenant_id}' ({result.stdout.strip()}).")
+        else:
+            print(
+                f"  ⚠  data_sources purge failed (non-fatal): {result.stderr.strip()}\n"
+                f"     Manual fallback: docker compose exec postgres psql -U docintel -d docintel "
+                f"-c \"{sql}\"",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(
+            f"  ⚠  data_sources purge failed (non-fatal): {exc}\n"
+            f"     Manual fallback: docker compose exec postgres psql -U docintel -d docintel "
+            f"-c \"{sql}\"",
+            file=sys.stderr,
+        )
 
 
 # =============================================================================
@@ -433,9 +595,22 @@ def _check_url(label: str, url: str, timeout: int = 8) -> None:
         raise PreFlightError(2)
 
 
-def pre_flight(base_url: str, rag_path: str, no_auth: bool, token_url: str | None, tenant_id: str) -> None:
-    """Fail fast with a clear message if the stack or Zitadel is unreachable."""
+def pre_flight(
+    base_url: str,
+    rag_path: str,
+    no_auth: bool,
+    token_url: str | None,
+    tenant_id: str,
+    reranker_url: str | None = None,
+    reranker_model: str | None = None,
+    use_reranking: bool = False,
+) -> dict:
+    """
+    Fail fast with a clear message if the stack or Zitadel is unreachable.
+    Also checks reranker health when use_reranking=True and returns a health dict.
+    """
     print("Pre-flight checks …")
+    health_results: dict = {}
 
     # API Gateway health — always the entry point (rag-service port is not exposed to host)
     gw_health = base_url.rstrip("/") + "/actuator/health"
@@ -448,7 +623,27 @@ def pre_flight(base_url: str, rag_path: str, no_auth: bool, token_url: str | Non
         _check_url("Zitadel", zitadel_base + "/debug/healthz")
         print(f"  ✓ Zitadel reachable ({zitadel_base})")
 
+    # Reranker health — checked whenever use_reranking=True
+    if use_reranking and reranker_url and reranker_model:
+        try:
+            import metrics as _metrics
+            rh = _metrics.reranker_health(reranker_url, reranker_model)
+            health_results["reranker"] = rh
+            if rh["healthy"]:
+                print(f"  ✓ Reranker healthy ({reranker_url}, {rh['latency_ms']}ms)")
+            else:
+                print(
+                    f"  ✗ Reranker UNHEALTHY — HTTP {rh['status_code']} — {rh['error']}\n"
+                    f"    use_reranking=true but reranker is down.\n"
+                    f"    Scores will silently fall back to raw retrieval order.\n"
+                    f"    Pull the model or set USE_RERANKING=false to suppress this warning.",
+                    file=sys.stderr,
+                )
+        except ImportError:
+            pass  # metrics module not available, skip
+
     print()
+    return health_results
 
 
 # =============================================================================
@@ -491,6 +686,7 @@ def call_streaming(
     sources = []
     error = None
     cache_hit = False
+    reranker_degraded = False
     t0 = time.time()
 
     try:
@@ -517,6 +713,8 @@ def call_streaming(
                         if "metadata" in data:
                             meta = data["metadata"]
                             cache_hit = bool(meta.get("cache_hit", False))
+                            if meta.get("reranker_degraded"):
+                                reranker_degraded = True
                         if data.get("thinking_token"):
                             thinking += data["thinking_token"]
                         if data.get("token"):
@@ -541,6 +739,7 @@ def call_streaming(
         "latency_seconds": latency,
         "error": error,
         "cache_hit": cache_hit,
+        "reranker_degraded": reranker_degraded,
     }
 
 
@@ -556,6 +755,8 @@ def evaluate(
     expect_thinking_length_min: int | None = None,
     expect_cache_hit: bool = False,
     expect_opa_denied: bool = False,
+    expect_abstention: bool | None = None,
+    retrieval_only: bool = False,
 ) -> dict:
     """
     Evaluate a streaming result against expectations.
@@ -566,6 +767,12 @@ def evaluate(
     expect_opa_denied        : pass when OPA denied all chunks — sources must be empty
                                and the answer must contain the no-docs sentinel message.
                                Specifically verifies the streaming security gap (A6) is closed.
+    expect_abstention        : when set, checks that the model correctly abstained (True)
+                               or answered (False). Abstention is detected heuristically
+                               from answer text, UNLESS retrieval_only.
+    retrieval_only            : G3 — no answer text was generated (retrieve_only request).
+                               Abstention is judged from source_count instead of text, and
+                               keyword/answer-length checks are skipped (nothing to check).
     """
     answer = result["answer"].lower()
 
@@ -577,13 +784,21 @@ def evaluate(
     ).lower()
     combined = answer + " " + source_text
 
-    keyword_hits = [kw for kw in expect_keywords if kw.lower() in combined]
-    keyword_miss = [kw for kw in expect_keywords if kw.lower() not in combined]
+    keyword_hits = [] if retrieval_only else [kw for kw in expect_keywords if kw.lower() in combined]
+    keyword_miss = [] if retrieval_only else [kw for kw in expect_keywords if kw.lower() not in combined]
 
     # OPA denied implies empty sources — treat identically to expect_no_sources
     effective_no_sources = expect_no_sources or expect_opa_denied
     if effective_no_sources:
         sources_ok = result["source_count"] == 0
+    elif expect_abstention is True:
+        # G1 fix: correctness for near-miss abstention queries is judged by
+        # abstention_correct below, not by source_count. A correct abstention
+        # can legitimately produce zero sources (the min-score gate filtered
+        # everything out — the canned no-relevant-docs response) — the old
+        # `source_count > 0` requirement made every correctly-abstaining query
+        # count as "failed" here, which is exactly backwards.
+        sources_ok = True
     else:
         sources_ok = result["source_count"] > 0
 
@@ -595,13 +810,32 @@ def evaluate(
     if expect_cache_hit:
         cache_hit_ok = bool(result.get("cache_hit", False))
 
+    # Abstention correctness. retrieval_only has no answer text to run the
+    # heuristic on — the RAG service already made the abstain/answer decision
+    # via the min-score gate, so source_count==0 IS that decision (see G3
+    # RAGService.stream retrieve_only branch).
+    abstention_correct_val: bool | None = None
+    if expect_abstention is not None:
+        if retrieval_only:
+            abstention_correct_val = (result["source_count"] == 0) == expect_abstention
+        else:
+            try:
+                import metrics as _m
+                abstention_correct_val = _m.abstention_correct(result["answer"], expect_abstention)
+            except ImportError:
+                pass
+
     passed = (
         result["error"] is None
-        and len(result["answer"]) >= min_answer_length
+        and (retrieval_only or len(result["answer"]) >= min_answer_length)
         and sources_ok
         and len(keyword_miss) == 0
         and thinking_ok
         and cache_hit_ok
+        # G1 fix: a query with a wrong abstention decision must not pass just
+        # because keywords happened to match (they can, via the echoed
+        # question text in the no-relevant-docs sentinel).
+        and abstention_correct_val is not False
     )
 
     return {
@@ -616,6 +850,8 @@ def evaluate(
         "thinking_length": result.get("thinking_length", 0),
         "cache_hit": result.get("cache_hit", False),
         "opa_denied": expect_opa_denied and result["source_count"] == 0,
+        "abstention_correct": abstention_correct_val,
+        "reranker_degraded": result.get("reranker_degraded", False),
     }
 
 
@@ -640,6 +876,36 @@ def write_markdown(report: dict, path: Path) -> None:
         f"",
     ]
 
+    # Infrastructure health (reranker, etc.)
+    if report.get("health"):
+        lines.append("## Infrastructure Health")
+        lines.append("")
+        rh = report["health"].get("reranker")
+        if rh:
+            status = "HEALTHY" if rh["healthy"] else f"UNHEALTHY (HTTP {rh['status_code']})"
+            lines.append(f"- Reranker: **{status}** — {rh['latency_ms']}ms")
+            if rh.get("error"):
+                lines.append(f"  - Error: `{rh['error']}`")
+        lines.append("")
+
+    # Quality summary (if metrics were run)
+    if report.get("quality_summary"):
+        qs = report["quality_summary"]
+        lines += [
+            "## Quality Summary (LLM Judge)",
+            "",
+            f"| Metric | Value |",
+            f"|--------|-------|",
+            f"| Faithfulness (avg) | {qs.get('faithfulness_avg', 'N/A')} |",
+            f"| Answer Relevancy (avg) | {qs.get('answer_relevancy_avg', 'N/A')} |",
+            f"| Citation Coverage (avg) | {qs.get('citation_coverage_avg', 'N/A')} |",
+            f"| Abstention Correct | {qs.get('abstention_correct_rate', 'N/A')} |",
+            f"| hit@{qs.get('k', 5)} (avg) | {qs.get('hit_at_k_avg', 'N/A')} |",
+            f"| MRR (avg) | {qs.get('mrr_avg', 'N/A')} |",
+            f"| Context Recall (avg) | {qs.get('context_recall_avg', 'N/A')} |",
+            "",
+        ]
+
     for suite in report["suites"]:
         suite_pass = sum(1 for q in suite["queries"] if q["eval"]["passed"])
         suite_total = len(suite["queries"])
@@ -660,16 +926,45 @@ def write_markdown(report: dict, path: Path) -> None:
                 kw_note = f" | kw {hit_pct}%"
                 if ev["keyword_miss"]:
                     kw_note += f" (missing: {', '.join(ev['keyword_miss'])})"
+
+            # Abstention correctness
+            abstention_note = ""
+            if ev.get("abstention_correct") is not None:
+                abstention_note = f" | abstention={'✓' if ev['abstention_correct'] else '✗'}"
+
+            # Degraded reranker note
+            degraded_note = " | ⚠ reranker-degraded" if ev.get("reranker_degraded") else ""
+
             lines += [
                 f"### {icon} {q['question']}",
                 f"",
-                f"*{res['latency_seconds']}s · {res['source_count']} sources{kw_note}*",
+                f"*{res['latency_seconds']}s · {res['source_count']} sources"
+                f"{kw_note}{abstention_note}{degraded_note}*",
                 f"",
             ]
+
+            # Retrieval + judge metrics (if present)
+            qm = q.get("quality_metrics")
+            if qm:
+                ret = qm.get("retrieval", {})
+                gen = qm.get("generation", {})
+                metric_parts = []
+                if ret.get("hit_at_k") is not None:
+                    metric_parts.append(f"hit@{ret.get('k',5)}={'✓' if ret['hit_at_k'] else '✗'}")
+                if ret.get("mrr") is not None:
+                    metric_parts.append(f"MRR={ret['mrr']}")
+                if gen.get("faithfulness") is not None:
+                    metric_parts.append(f"faith={gen['faithfulness']:.2f}")
+                if gen.get("answer_relevancy") is not None:
+                    metric_parts.append(f"rel={gen['answer_relevancy']:.2f}")
+                if gen.get("judge_error"):
+                    metric_parts.append(f"judge-err={gen['judge_error'][:40]}")
+                if metric_parts:
+                    lines += [f"*Metrics: {' | '.join(metric_parts)}*", ""]
+
             if res["error"]:
                 lines += [f"> **Error:** {res['error']}", f""]
             elif res["answer"]:
-                # Trim to 600 chars for readability
                 preview = res["answer"][:600]
                 if len(res["answer"]) > 600:
                     preview += "…"
@@ -681,7 +976,7 @@ def write_markdown(report: dict, path: Path) -> None:
                     score_pct = int((s.get("score") or 0) * 100)
                     lines.append(
                         f"- [{s.get('ref_id', '?')}] `{s.get('filename', '')}` "
-                        f"— {s.get('section', '')} ({score_pct}%)"
+                        f"— {s.get('section', '')} (relevance {score_pct}%)"
                     )
                 lines.append("")
 
@@ -690,6 +985,89 @@ def write_markdown(report: dict, path: Path) -> None:
 
 def write_json(report: dict, path: Path) -> None:
     path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# =============================================================================
+# G3 — CI evaluation gate
+# =============================================================================
+
+def check_gate(report: dict, gate_cfg: dict, retrieval_only: bool = False) -> list[str]:
+    """
+    Check aggregate quality metrics (report["quality_summary"]) against the
+    config.gate thresholds from queries.yaml.
+
+    Returns a list of human-readable breach messages naming the metric and its
+    actual vs. threshold value — empty list means the gate passed.
+
+    faithfulness_min is only enforced when the judge actually produced a value
+    (faithfulness_avg is not None) — CI runs with --retrieval-only and no
+    judge, so that criterion is silently skipped there (documented in
+    integration-tests.yml), never silently "passed".
+
+    abstention_correct uses a lower bar in --retrieval-only mode (see
+    abstention_correct_min_retrieval_only in queries.yaml): with no generated
+    text to check, abstention is judged from source_count alone, which can't
+    distinguish "retrieved a genuinely near-miss doc that the LLM would still
+    correctly refuse to answer from" from a real miss. Falls back to
+    abstention_correct_min if the retrieval-only key isn't configured.
+    """
+    breaches: list[str] = []
+    qs = report.get("quality_summary") or {}
+
+    def _to_float(v) -> float | None:
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    hit_min = gate_cfg.get("hit_at_k_min")
+    if hit_min is not None:
+        hit_avg = _to_float(qs.get("hit_at_k_avg"))
+        if hit_avg is None:
+            breaches.append(
+                "hit_at_k: no covered queries produced a retrieval-metric sample "
+                "(need --metrics/--retrieval-only and relevant_docs in queries.yaml)"
+            )
+        elif hit_avg < hit_min:
+            breaches.append(f"hit_at_k_avg={hit_avg:.3f} below gate {hit_min}")
+
+    abstention_min = (
+        gate_cfg.get("abstention_correct_min_retrieval_only", gate_cfg.get("abstention_correct_min"))
+        if retrieval_only
+        else gate_cfg.get("abstention_correct_min")
+    )
+    if abstention_min is not None:
+        rate_str = qs.get("abstention_correct_rate")  # "N/M" or None
+        rate = None
+        if rate_str:
+            num_s, _, den_s = rate_str.partition("/")
+            try:
+                num, den = int(num_s), int(den_s)
+                rate = (num / den) if den else None
+            except ValueError:
+                rate = None
+        if rate is None:
+            breaches.append("abstention_correct: no expect_abstention queries were evaluated")
+        elif rate < abstention_min:
+            breaches.append(f"abstention_correct_rate={rate:.3f} ({rate_str}) below gate {abstention_min}")
+
+    faith_min = gate_cfg.get("faithfulness_min")
+    faith_avg = _to_float(qs.get("faithfulness_avg"))
+    if faith_min is not None and faith_avg is not None and faith_avg < faith_min:
+        breaches.append(f"faithfulness_avg={faith_avg:.3f} below gate {faith_min}")
+
+    if not gate_cfg.get("allow_reranker_degraded", True):
+        degraded = [
+            q["question"]
+            for suite in report.get("suites", [])
+            for q in suite["queries"]
+            if q["eval"].get("reranker_degraded")
+        ]
+        if degraded:
+            preview = ", ".join(degraded[:3]) + ("…" if len(degraded) > 3 else "")
+            breaches.append(f"reranker_degraded on {len(degraded)} query(ies): {preview}")
+
+    return breaches
 
 
 # =============================================================================
@@ -711,11 +1089,37 @@ def main() -> int:
     parser.add_argument("--no-auth", dest="no_auth", action="store_true", help="Skip token acquisition (direct RAG service)")
     parser.add_argument("--no-setup", dest="no_setup", action="store_true",
                         help="Skip dataset seeding and teardown (use when data is already ingested)")
+    parser.add_argument("--purge", dest="purge", action="store_true",
+                        help="On teardown, also purge leftover documents.data_sources rows for the "
+                             "e2e tenant via psql (docker compose exec postgres). No document-service "
+                             "API exists for this — see _purge_data_sources_via_psql.")
     parser.add_argument("--ingestion-url", dest="ingestion_url", default="http://localhost:8001",
                         help="Ingestion service URL (default: http://localhost:8001)")
     parser.add_argument("--data-loader-url", dest="data_loader_url", default="http://localhost:8002",
                         help="Data-loader service URL for dataset seeding (default: http://localhost:8002)")
+    parser.add_argument(
+        "--metrics", dest="run_metrics", action="store_true",
+        help="Run retrieval metrics and LLM-judge generation quality evaluation per query.",
+    )
+    parser.add_argument("--judge-url", dest="judge_url", default=None,
+                        help="Override judge LLM URL (default: config judge_url or http://localhost:11430/v1)")
+    parser.add_argument("--judge-model", dest="judge_model", default=None,
+                        help="Override judge model (default: config judge_model or qwen3.5:4b)")
+    parser.add_argument(
+        "--retrieval-only", dest="retrieval_only", action="store_true",
+        help="G3: skip LLM generation and the LLM judge entirely — send retrieve_only=true "
+             "to the RAG service and evaluate retrieval/rerank/abstention-gate metrics only. "
+             "Cheap (embed + rerank via LMForge, no generation). Implies --metrics.",
+    )
+    parser.add_argument(
+        "--gate", dest="run_gate", action="store_true",
+        help="G3: after the run, check aggregate quality metrics against the "
+             "config.gate thresholds in queries.yaml; non-zero exit + named metric on breach.",
+    )
     args = parser.parse_args()
+
+    if args.retrieval_only:
+        args.run_metrics = True
 
     config_path = Path(args.config)
     if not config_path.exists():
@@ -732,6 +1136,10 @@ def main() -> int:
     use_reranking = run_cfg.get("use_reranking", True)
     timeout   = run_cfg.get("timeout_seconds", 120)
     min_answer_length = run_cfg.get("min_answer_length", 5)
+    reranker_url = run_cfg.get("reranker_url")
+    reranker_model = run_cfg.get("reranker_model")
+    judge_url = args.judge_url or run_cfg.get("judge_url", "http://localhost:11430/v1")
+    judge_model = args.judge_model or run_cfg.get("judge_model", "qwen3.5:4b")
 
     # Token acquisition — skipped if --no-auth or no auth config present
     bearer_token: str | None = None
@@ -744,14 +1152,26 @@ def main() -> int:
         bearer_token, _token_expires_in = acquire_token(auth_cfg, None, None)
         _token_acquired_at = time.time()
 
-    # Pre-flight: fail fast if the stack is not reachable
-    pre_flight(
+    # Pre-flight: fail fast if the stack is not reachable; also checks reranker
+    health_results = pre_flight(
         base_url=base_url,
         rag_path=rag_path,
         no_auth=args.no_auth,
         token_url=auth_cfg.get("token_url") if auth_cfg else None,
         tenant_id=tenant_id,
+        reranker_url=reranker_url,
+        reranker_model=reranker_model,
+        use_reranking=use_reranking,
     )
+
+    # Import metrics module if --metrics was requested
+    _metrics_mod = None
+    if args.run_metrics:
+        try:
+            import metrics as _metrics_mod  # type: ignore[import]
+            print(f"Quality metrics enabled (judge: {judge_model} @ {judge_url})\n")
+        except ImportError:
+            print("WARNING: metrics.py not found — --metrics flag ignored.\n", file=sys.stderr)
 
     suites = cfg["suites"]
     if args.suite:
@@ -773,7 +1193,10 @@ def main() -> int:
             "use_cache": use_cache,
             "use_reranking": use_reranking,
             "authenticated": bearer_token is not None,
+            "metrics_enabled": _metrics_mod is not None,
+            "retrieval_only": args.retrieval_only,
         },
+        "health": health_results,
         "suites": [],
         "summary": {"total": 0, "passed": 0, "failed": 0},
     }
@@ -783,13 +1206,28 @@ def main() -> int:
     data_loader_url = getattr(args, "data_loader_url", "http://localhost:8002")
 
     if not no_setup:
-        setup_e2e_environment(tenant_id=tenant_id, data_loader_url=data_loader_url)
+        setup_e2e_environment(
+            tenant_id=tenant_id,
+            base_url=base_url,
+            data_loader_url=data_loader_url,
+            bearer_token=bearer_token,
+            seed_samples=run_cfg.get("seed_samples"),
+        )
         print()
 
     print(f"\nDocIntel Integration Tests — {base_url}{rag_path}")
     print(f"{'─' * 70}\n")
 
     total = passed = 0
+    # Accumulators for quality summary
+    faithfulness_vals: list[float] = []
+    relevancy_vals: list[float] = []
+    citation_vals: list[float] = []
+    abstention_correct_count = 0
+    abstention_total = 0
+    hit_at_k_vals: list[float] = []
+    mrr_vals: list[float] = []
+    recall_vals: list[float] = []
 
     try:
         for suite_def in suites:
@@ -809,6 +1247,17 @@ def main() -> int:
             extra_payload: dict = {}
             if "thinking" in cfg_overrides:
                 extra_payload["thinking"] = cfg_overrides["thinking"]
+            if args.retrieval_only:
+                extra_payload["retrieve_only"] = True
+
+            # Retrieval-only has no answer text — suites that depend on generated
+            # text (cache-hit replay, thinking tokens) aren't meaningful here.
+            if args.retrieval_only and any(
+                q.get("expect_cache_hit") or q.get("expect_thinking_length_min") is not None
+                for q in suite_def["queries"]
+            ):
+                print(f"   ⏭  Suite '{suite_name}' skipped (--retrieval-only: generation-dependent suite)")
+                continue
 
             print(f"▶  Suite: {suite_name}  ({doc_type})")
 
@@ -825,6 +1274,8 @@ def main() -> int:
                 expect_thinking_min = qdef.get("expect_thinking_length_min")
                 expect_cache_hit = bool(qdef.get("expect_cache_hit", False))
                 expect_opa_denied = bool(qdef.get("expect_opa_denied", False))
+                expect_abstention = qdef.get("expect_abstention")  # bool or None
+                relevant_docs = qdef.get("relevant_docs")          # list or None
 
                 # Refresh token if expiry is within 2 minutes (checked per-query
                 # because individual LLM responses can take 2-4 minutes each)
@@ -836,7 +1287,7 @@ def main() -> int:
                         _token_acquired_at = time.time()
 
                 # Cache hit test: fire query twice; evaluate the second response
-                if expect_cache_hit:
+                if expect_cache_hit and not args.retrieval_only:
                     print(f"   ⋯  [warm] {question[:55]}", end="", flush=True)
                     call_streaming(
                         base_url=base_url, rag_path=rag_path, question=question,
@@ -865,7 +1316,63 @@ def main() -> int:
                     expect_thinking_length_min=expect_thinking_min,
                     expect_cache_hit=expect_cache_hit,
                     expect_opa_denied=expect_opa_denied,
+                    expect_abstention=expect_abstention,
+                    retrieval_only=args.retrieval_only,
                 )
+
+                # Quality metrics (only when --metrics flag is set)
+                quality_metrics: dict | None = None
+                if _metrics_mod is not None:
+                    ret_m = _metrics_mod.retrieval_metrics(
+                        sources=result["sources"],
+                        relevant_docs=relevant_docs or [],
+                        k=5,
+                    )
+                    if args.retrieval_only:
+                        # No answer text was generated — skip the LLM judge
+                        # entirely (that's the point of --retrieval-only).
+                        # abstention_correct comes from evaluate()'s
+                        # source_count-based judgment above.
+                        gen_m = {
+                            "faithfulness": None,
+                            "answer_relevancy": None,
+                            "abstention_correct": ev.get("abstention_correct"),
+                            "judge_error": None,
+                        }
+                    else:
+                        gen_m = _metrics_mod.generation_judge(
+                            question=question,
+                            answer=result["answer"],
+                            sources=result["sources"],
+                            expect_abstention=bool(expect_abstention),
+                            judge_url=judge_url,
+                            judge_model=judge_model,
+                        )
+                        # G6 — citation coverage: fraction of answer sentences
+                        # carrying a valid [n] marker (None on abstentions /
+                        # no sources). Heuristic, no LLM.
+                        gen_m["citation_coverage"] = _metrics_mod.citation_coverage(
+                            answer=result["answer"],
+                            num_sources=result["source_count"],
+                        )
+                    quality_metrics = {"retrieval": ret_m, "generation": gen_m}
+                    # Accumulate for summary
+                    if gen_m.get("faithfulness") is not None:
+                        faithfulness_vals.append(gen_m["faithfulness"])
+                    if gen_m.get("answer_relevancy") is not None:
+                        relevancy_vals.append(gen_m["answer_relevancy"])
+                    if gen_m.get("citation_coverage") is not None:
+                        citation_vals.append(gen_m["citation_coverage"])
+                    if expect_abstention is not None:
+                        abstention_total += 1
+                        if gen_m.get("abstention_correct"):
+                            abstention_correct_count += 1
+                    if ret_m.get("hit_at_k") is not None:
+                        hit_at_k_vals.append(float(ret_m["hit_at_k"]))
+                    if ret_m.get("mrr") is not None:
+                        mrr_vals.append(ret_m["mrr"])
+                    if ret_m.get("context_recall") is not None:
+                        recall_vals.append(ret_m["context_recall"])
 
                 icon = PASS if ev["passed"] else FAIL
                 kw_info = ""
@@ -877,14 +1384,21 @@ def main() -> int:
                     kw_info += f" cache={'HIT' if ev['cache_hit'] else 'MISS'}"
                 if expect_opa_denied:
                     kw_info += f" opa={'DENIED' if ev['opa_denied'] else 'ALLOWED(unexpected)'}"
+                if ev.get("abstention_correct") is not None:
+                    kw_info += f" abs={'✓' if ev['abstention_correct'] else '✗'}"
+                if ev.get("reranker_degraded"):
+                    kw_info += " ⚠ranker"
                 print(f"\r   {icon}  {question[:60]:<60} {result['latency_seconds']:5.1f}s  "
                       f"{result['source_count']} src{kw_info}")
 
                 suite_result["queries"].append({
                     "question": question,
                     "expect_keywords": expect_kw,
+                    "expect_abstention": expect_abstention,
+                    "relevant_docs": relevant_docs,
                     "result": result,
                     "eval": ev,
+                    "quality_metrics": quality_metrics,
                 })
                 total += 1
                 if ev["passed"]:
@@ -910,6 +1424,7 @@ def main() -> int:
                 base_url=base_url,
                 tenant_id=tenant_id,
                 bearer_token=bearer_token,
+                purge=args.purge,
             )
 
     report["summary"] = {
@@ -917,6 +1432,31 @@ def main() -> int:
         "passed": passed,
         "failed": total - passed,
     }
+
+    # Quality summary aggregation
+    def _avg(vals: list[float]) -> str | None:
+        return f"{sum(vals)/len(vals):.3f}" if vals else None
+
+    if _metrics_mod is not None:
+        report["quality_summary"] = {
+            "k": 5,
+            "faithfulness_avg": _avg(faithfulness_vals),
+            "answer_relevancy_avg": _avg(relevancy_vals),
+            "citation_coverage_avg": _avg(citation_vals),
+            "abstention_correct_rate": (
+                f"{abstention_correct_count}/{abstention_total}"
+                if abstention_total else None
+            ),
+            "hit_at_k_avg": _avg(hit_at_k_vals),
+            "mrr_avg": _avg(mrr_vals),
+            "context_recall_avg": _avg(recall_vals),
+        }
+
+    gate_breaches: list[str] = []
+    if args.run_gate:
+        gate_cfg = run_cfg.get("gate", {})
+        gate_breaches = check_gate(report, gate_cfg, retrieval_only=args.retrieval_only)
+        report["gate"] = {"config": gate_cfg, "breaches": gate_breaches, "passed": not gate_breaches}
 
     json_path = Path(str(out_prefix) + ".json")
     md_path   = Path(str(out_prefix) + ".md")
@@ -926,8 +1466,19 @@ def main() -> int:
     print(f"{'─' * 70}")
     print(f"Results: {passed}/{total} passed")
     print(f"JSON  → {json_path}")
-    print(f"MD    → {md_path}\n")
+    print(f"MD    → {md_path}")
 
+    if args.run_gate:
+        if gate_breaches:
+            print(f"\n✗ GATE FAILED — {len(gate_breaches)} breach(es):")
+            for b in gate_breaches:
+                print(f"  - {b}")
+        else:
+            print("\n✓ GATE PASSED")
+    print()
+
+    if args.run_gate and gate_breaches:
+        return 1
     return 0 if passed == total else 1
 
 

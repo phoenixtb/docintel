@@ -6,10 +6,13 @@
 # Use arrow keys to navigate, enter to select.
 #
 # Usage:
-#   ./scripts/docintel.sh                   # Interactive mode
-#   ./scripts/docintel.sh build             # Build (non-interactive)
-#   ./scripts/docintel.sh build --profile=cpu    # Force profile for this run
-#   PROFILE=cu130 ./scripts/docintel.sh build    # Force profile via env
+#   ./scripts/docintel.sh                              # Interactive menu (TTY)
+#   ./scripts/docintel.sh setup [lmforge|ollama|vllm]  # First-time setup
+#   ./scripts/docintel.sh start | start-build | stop | build
+#   ./scripts/docintel.sh status | logs | test | seed | backup
+#   ./scripts/docintel.sh cleanup | cleanup-data | cleanup-all
+#   ./scripts/docintel.sh --profile=cpu build          # Force profile for this run
+#   PROFILE=cu130 ./scripts/docintel.sh build          # Force profile via env
 # ==============================================================================
 
 set -e
@@ -157,7 +160,13 @@ resolve_llm_engine() {
 # ==============================================================================
 upsert_env() {
     local key="$1" val="$2" file="$PROJECT_DIR/.env"
-    [ -f "$file" ] || touch "$file"
+    if [ ! -f "$file" ]; then
+        if [ -f "$PROJECT_DIR/.env.example" ]; then
+            cp "$PROJECT_DIR/.env.example" "$file"
+        else
+            touch "$file"
+        fi
+    fi
     if grep -q "^${key}=" "$file" 2>/dev/null; then
         sed -i.bak "s|^${key}=.*|${key}=${val}|" "$file" && rm -f "$file.bak"
     else
@@ -165,162 +174,74 @@ upsert_env() {
     fi
 }
 
-# ==============================================================================
-# Main menu
-# ==============================================================================
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/docintel.sh [action] [--profile=NAME]
 
-ACTIONS=(
-    "setup"
-    "start"
-    "start-build"
-    "stop"
-    "build"
-    "status"
-    "logs"
-    "test"
-    "seed"
-    "backup"
-    "hw-profile"
-    "docker-engine"
-    "cleanup"
-    "cleanup-data"
-    "cleanup-all"
-    "quit"
-)
+Actions:
+  setup [lmforge|ollama|vllm]  First-time setup (engine + images + models)
+  start                        Start all services
+  start-build                  Rebuild images then start all services
+  stop                         Stop all services (preserves containers)
+  build                        Rebuild services (interactive selector)
+  status                       Show running containers and health
+  logs                         Follow service logs
+  test                         Run tests (interactive selector)
+  seed                         Load sample data into running services
+  backup                       Back up volumes to archive
+  cleanup                      Stop and remove containers
+  cleanup-data                 Wipe all data volumes (keeps images + models)
+  cleanup-all                  Remove containers, volumes, and models
+  help, -h, --help             Show this help
 
-LABELS=(
-    "Setup              First-time setup (engine + images + models)"
-    "Start              Start all services"
-    "Start (build)      Rebuild images then start all services"
-    "Stop               Stop all services (preserves containers)"
-    "Build              Rebuild services (interactive selector)"
-    "Status             Show running containers and health"
-    "Logs               Follow service logs"
-    "Test               Run tests (interactive selector)"
-    "Seed Data          Load sample data into running services"
-    "Backup             Back up volumes to archive"
-    "Hardware Profile   View/switch GPU build profile [$_BANNER_PROFILE]"
-    "Docker Engine      View/switch Docker context [$_BANNER_DCTX]"
-    "Cleanup            Stop and remove containers"
-    "Cleanup (data)     Wipe all data volumes (keeps images + models)"
-    "Cleanup (full)     Remove containers, volumes, and models"
-    "Quit"
-)
+  --profile=NAME               Force hardware profile for this run
 
-# Terminal control
-cursor_to()  { printf "\033[%s;0H" "$1"; }
-clear_line() { printf "\033[2K"; }
-
-SAVED_TTY=$(stty -g 2>/dev/null)
-cleanup() {
-    stty "$SAVED_TTY" 2>/dev/null
-    printf "\033[?25h"
-    echo ""
-}
-trap cleanup EXIT INT TERM
-
-cursor=0
-
-draw_menu() {
-    local start_row=$1
-
-    for i in "${!ACTIONS[@]}"; do
-        cursor_to $((start_row + i))
-        clear_line
-
-        if [[ $i -eq $cursor ]]; then
-            printf "  ${CYAN}▸ ${BOLD}%s${NC}\n" "${LABELS[$i]}"
-        else
-            if [[ "${ACTIONS[$i]}" == "quit" ]]; then
-                printf "    ${DIM}%s${NC}\n" "${LABELS[$i]}"
-            else
-                printf "    %s\n" "${LABELS[$i]}"
-            fi
-        fi
-    done
-
-    cursor_to $((start_row + ${#ACTIONS[@]} + 1))
-    clear_line
-    printf "  ${DIM}↑↓ navigate • enter select • q quit${NC}"
+No action + TTY: interactive menu.
+hw-profile and docker-engine are menu-only.
+EOF
 }
 
-# Header
-clear
-echo ""
-echo -e "  ${BOLD}DocIntel CLI${NC}"
-echo -e "  ${DIM}Manage your DocIntel environment${NC}"
-echo -e "  ${DIM}Hardware profile: ${CYAN}${_BANNER_PROFILE}${NC}${DIM} (source: ${PROFILE_SOURCE})${NC}"
-echo -e "  ${DIM}Docker engine: ${CYAN}${_BANNER_DCTX}${NC}${DIM} (pref: $(read_docker_pref))${NC}"
-echo ""
-
-start_row=5
-printf "\033[?25l"
-stty -echo -icanon min 1 time 0 2>/dev/null
-
-draw_menu $start_row
-
-while IFS= read -r -n1 -s key; do
-    if [[ "$key" == $'\x1b' ]]; then
-        _seq=''
-        IFS= read -r -n2 -s -t 1 _seq || true
-        case "$_seq" in
-            '[A'|'OA') [[ $cursor -gt 0 ]]                    && (( cursor-- )) || true ;;
-            '[B'|'OB') [[ $cursor -lt $((${#ACTIONS[@]}-1)) ]] && (( cursor++ )) || true ;;
-        esac
-    elif [[ "$key" == '' ]]; then
-        break
-    elif [[ "$key" == 'q' || "$key" == 'Q' ]]; then
-        cursor_to $((start_row + ${#ACTIONS[@]} + 3))
-        exit 0
-    fi
-    draw_menu $start_row
-done
-
-# Move below menu
-cursor_to $((start_row + ${#ACTIONS[@]} + 3))
-
-action="${ACTIONS[$cursor]}"
-
-echo ""
-echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-
-# Restore terminal before exec / sub-menus
-stty "$SAVED_TTY" 2>/dev/null
-printf "\033[?25h"
-
 # ==============================================================================
-# Action dispatch
+# Action dispatch (shared by CLI argv and the interactive menu)
 # ==============================================================================
 
-case "$action" in
+dispatch_action() {
+    local action="$1"
+
+    case "$action" in
     setup)
-        # ── Engine sub-selector ────────────────────────────────────────────────
-        _current_engine=$(resolve_llm_engine)
+        if [ -n "${_CLI_MODE:-}" ]; then
+            _chosen_engine="${_SETUP_ENGINE:-$(resolve_llm_engine)}"
+            echo -e "  ${GREEN}✓${NC} Engine: ${BOLD}${_chosen_engine}${NC}"
+            echo ""
+        else
+            # ── Engine sub-selector (interactive only) ─────────────────────────
+            _current_engine=$(resolve_llm_engine)
 
-        ENGINE_OPTS=("lmforge" "ollama" "vllm")
-        ENGINE_LBLS=(
-            "LMForge    Apple Silicon / macOS — local inference, recommended"
-            "Ollama     Any platform — local model runner"
-            "vLLM       External / server-managed (Linux / NVIDIA)"
-        )
+            ENGINE_OPTS=("lmforge" "ollama" "vllm")
+            ENGINE_LBLS=(
+                "LMForge    Apple Silicon / macOS — local inference, recommended"
+                "Ollama     Any platform — local model runner"
+                "vLLM       External / server-managed (Linux / NVIDIA)"
+            )
 
-        # Pre-select the current engine
-        _preselect=0
-        for _i in "${!ENGINE_OPTS[@]}"; do
-            [[ "${ENGINE_OPTS[$_i]}" == "$_current_engine" ]] && _preselect=$_i
-        done
+            # Pre-select the current engine
+            _preselect=0
+            for _i in "${!ENGINE_OPTS[@]}"; do
+                [[ "${ENGINE_OPTS[$_i]}" == "$_current_engine" ]] && _preselect=$_i
+            done
 
-        echo -e "  ${BOLD}Select LLM Engine${NC}"
-        echo -e "  ${DIM}Current: ${_current_engine}${NC}"
-        echo ""
+            echo -e "  ${BOLD}Select LLM Engine${NC}"
+            echo -e "  ${DIM}Current: ${_current_engine}${NC}"
+            echo ""
 
-        pick_from_list "LLM Engine" ENGINE_OPTS ENGINE_LBLS "$_preselect"
-        _chosen_engine="$PICK_RESULT"
+            pick_from_list "LLM Engine" ENGINE_OPTS ENGINE_LBLS "$_preselect"
+            _chosen_engine="$PICK_RESULT"
 
-        echo ""
-        echo -e "  ${GREEN}✓${NC} Engine: ${BOLD}${_chosen_engine}${NC}"
-        echo ""
+            echo ""
+            echo -e "  ${GREEN}✓${NC} Engine: ${BOLD}${_chosen_engine}${NC}"
+            echo ""
+        fi
 
         # Persist to .env so start.sh and future menu runs see it
         upsert_env "LLM_ENGINE" "$_chosen_engine"
@@ -481,4 +402,179 @@ case "$action" in
     quit)
         exit 0
         ;;
-esac
+    esac
+}
+
+# ==============================================================================
+# CLI argv dispatch — no TTY / no stty / no clear
+# ==============================================================================
+
+if [ -n "${1:-}" ]; then
+    _CLI_MODE=1
+    case "$1" in
+        help|-h|--help)
+            usage
+            exit 0
+            ;;
+        setup)
+            if [ -n "${2:-}" ]; then
+                case "$2" in
+                    lmforge|ollama|vllm)
+                        _SETUP_ENGINE="$2"
+                        ;;
+                    *)
+                        echo "Unknown engine: $2" >&2
+                        echo "" >&2
+                        usage >&2
+                        exit 1
+                        ;;
+                esac
+            fi
+            dispatch_action setup
+            exit $?
+            ;;
+        start|start-build|stop|build|status|logs|test|seed|backup|cleanup|cleanup-data|cleanup-all)
+            dispatch_action "$1"
+            exit $?
+            ;;
+        *)
+            echo "Unknown action: $1" >&2
+            echo "" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+fi
+
+if [ ! -t 0 ]; then
+    usage >&2
+    exit 1
+fi
+
+# ==============================================================================
+# Interactive menu
+# ==============================================================================
+
+ACTIONS=(
+    "setup"
+    "start"
+    "start-build"
+    "stop"
+    "build"
+    "status"
+    "logs"
+    "test"
+    "seed"
+    "backup"
+    "hw-profile"
+    "docker-engine"
+    "cleanup"
+    "cleanup-data"
+    "cleanup-all"
+    "quit"
+)
+
+LABELS=(
+    "Setup              First-time setup (engine + images + models)"
+    "Start              Start all services"
+    "Start (build)      Rebuild images then start all services"
+    "Stop               Stop all services (preserves containers)"
+    "Build              Rebuild services (interactive selector)"
+    "Status             Show running containers and health"
+    "Logs               Follow service logs"
+    "Test               Run tests (interactive selector)"
+    "Seed Data          Load sample data into running services"
+    "Backup             Back up volumes to archive"
+    "Hardware Profile   View/switch GPU build profile [$_BANNER_PROFILE]"
+    "Docker Engine      View/switch Docker context [$_BANNER_DCTX]"
+    "Cleanup            Stop and remove containers"
+    "Cleanup (data)     Wipe all data volumes (keeps images + models)"
+    "Cleanup (full)     Remove containers, volumes, and models"
+    "Quit"
+)
+
+# Terminal control — interactive path only
+cursor_to()  { printf "\033[%s;0H" "$1"; }
+clear_line() { printf "\033[2K"; }
+
+SAVED_TTY=$(stty -g 2>/dev/null)
+cleanup() {
+    if [ -n "${SAVED_TTY:-}" ]; then
+        stty "$SAVED_TTY" 2>/dev/null
+    fi
+    printf "\033[?25h"
+    echo ""
+}
+trap cleanup EXIT INT TERM
+
+cursor=0
+
+draw_menu() {
+    local start_row=$1
+
+    for i in "${!ACTIONS[@]}"; do
+        cursor_to $((start_row + i))
+        clear_line
+
+        if [[ $i -eq $cursor ]]; then
+            printf "  ${CYAN}▸ ${BOLD}%s${NC}\n" "${LABELS[$i]}"
+        else
+            if [[ "${ACTIONS[$i]}" == "quit" ]]; then
+                printf "    ${DIM}%s${NC}\n" "${LABELS[$i]}"
+            else
+                printf "    %s\n" "${LABELS[$i]}"
+            fi
+        fi
+    done
+
+    cursor_to $((start_row + ${#ACTIONS[@]} + 1))
+    clear_line
+    printf "  ${DIM}↑↓ navigate • enter select • q quit${NC}"
+}
+
+# Header
+clear
+echo ""
+echo -e "  ${BOLD}DocIntel CLI${NC}"
+echo -e "  ${DIM}Manage your DocIntel environment${NC}"
+echo -e "  ${DIM}Hardware profile: ${CYAN}${_BANNER_PROFILE}${NC}${DIM} (source: ${PROFILE_SOURCE})${NC}"
+echo -e "  ${DIM}Docker engine: ${CYAN}${_BANNER_DCTX}${NC}${DIM} (pref: $(read_docker_pref))${NC}"
+echo ""
+
+start_row=5
+printf "\033[?25l"
+stty -echo -icanon min 1 time 0 2>/dev/null
+
+draw_menu $start_row
+
+while IFS= read -r -n1 -s key; do
+    if [[ "$key" == $'\x1b' ]]; then
+        _seq=''
+        IFS= read -r -n2 -s -t 1 _seq || true
+        case "$_seq" in
+            '[A'|'OA') [[ $cursor -gt 0 ]]                    && (( cursor-- )) || true ;;
+            '[B'|'OB') [[ $cursor -lt $((${#ACTIONS[@]}-1)) ]] && (( cursor++ )) || true ;;
+        esac
+    elif [[ "$key" == '' ]]; then
+        break
+    elif [[ "$key" == 'q' || "$key" == 'Q' ]]; then
+        cursor_to $((start_row + ${#ACTIONS[@]} + 3))
+        exit 0
+    fi
+    draw_menu $start_row
+done
+
+# Move below menu
+cursor_to $((start_row + ${#ACTIONS[@]} + 3))
+
+action="${ACTIONS[$cursor]}"
+
+echo ""
+echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+# Restore terminal before exec / sub-menus
+stty "$SAVED_TTY" 2>/dev/null
+printf "\033[?25h"
+
+dispatch_action "$action"

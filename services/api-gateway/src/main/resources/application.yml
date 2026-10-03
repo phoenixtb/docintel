@@ -4,14 +4,96 @@ spring:
 
   cloud:
     gateway:
-      # Default route configuration
+      # Default route configuration.
+      #
+      # Kept aligned with application-docker.yml (G7.5) — same route surface,
+      # localhost URIs instead of docker service names, no rate-limiter
+      # default-filters (those need a reachable Redis; local/no-Redis dev is
+      # a supported mode for this profile).
       routes:
-        - id: document-service
+        # ---------------------------------------------------------------
+        # document-service — explicit public allowlist (G7.6a). See the
+        # matching block in application-docker.yml for the full rationale;
+        # order is load-bearing (literal single-segment paths before the
+        # generic by-id route).
+        # ---------------------------------------------------------------
+        - id: document-service-events
           uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
           predicates:
-            - Path=/api/v1/documents, /api/v1/documents/**
+            - Path=/api/v1/documents/events
+            - Method=GET
           filters:
-            - RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents${segment}
+            - RewritePath=/api/v1/documents/events, /internal/documents/events
+          metadata:
+            response-timeout: -1
+            connect-timeout: 5000
+
+        - id: document-service-cleanup-jobs-events
+          uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/documents/cleanup/jobs/*/events
+            - Method=GET
+          filters:
+            - RewritePath=/api/v1/documents/cleanup/jobs/(?<jobId>[^/]+)/events, /internal/documents/cleanup/jobs/${jobId}/events
+          metadata:
+            response-timeout: -1
+            connect-timeout: 5000
+
+        - id: document-service-cleanup-jobs-start
+          uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/documents/cleanup/jobs
+            - Method=POST
+          filters:
+            - RewritePath=/api/v1/documents/cleanup/jobs, /internal/documents/cleanup/jobs
+
+        - id: document-service-cleanup-jobs-cancel
+          uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/documents/cleanup/jobs/*
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/documents/cleanup/jobs/(?<jobId>[^/]+), /internal/documents/cleanup/jobs/${jobId}
+
+        - id: document-service-cleanup-preview
+          uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/documents/cleanup/preview
+            - Method=POST
+          filters:
+            - RewritePath=/api/v1/documents/cleanup/preview, /internal/documents/cleanup/preview
+
+        - id: document-service-stats
+          uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/documents/stats
+            - Method=GET
+          filters:
+            - RewritePath=/api/v1/documents/stats, /internal/documents/stats
+
+        - id: document-service-delete-all
+          uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/documents/all
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/documents/all, /internal/documents/all
+
+        - id: document-service-root
+          uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/documents
+            - Method=GET,POST
+          filters:
+            - RewritePath=/api/v1/documents, /internal/documents
+
+        - id: document-service-by-id
+          uri: ${DOCUMENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/documents/*
+            - Method=GET,DELETE
+          filters:
+            - RewritePath=/api/v1/documents/(?<id>[^/]+), /internal/documents/${id}
 
         - id: rag-service-query
           uri: ${RAG_SERVICE_URL:http://localhost:8000}
@@ -20,12 +102,17 @@ spring:
           filters:
             - RewritePath=/api/v1/query, /query
 
+        # response-timeout=-1 prevents the gateway from closing the long-lived
+        # SSE connection (aligned with application-docker.yml — G7.5).
         - id: rag-service-query-stream
           uri: ${RAG_SERVICE_URL:http://localhost:8000}
           predicates:
             - Path=/api/v1/query/stream
           filters:
             - RewritePath=/api/v1/query/stream, /query/stream
+          metadata:
+            response-timeout: -1
+            connect-timeout: 10000
 
         - id: ingestion-service-ingest
           uri: ${INGESTION_SERVICE_URL:http://localhost:8001}
@@ -34,12 +121,25 @@ spring:
           filters:
             - RewritePath=/api/v1/ingest(?<segment>/?.*), /ingest${segment}
 
-        - id: ingestion-service-sample-datasets
-          uri: ${INGESTION_SERVICE_URL:http://localhost:8001}
+        # data-loader: SSE progress stream — long-lived connection, no response timeout.
+        # Must come before data-loader-datasets below (aligned with docker profile — G7.5).
+        - id: data-loader-dataset-progress
+          uri: ${DATA_LOADER_URL:http://localhost:8002}
           predicates:
-            - Path=/api/v1/sample-datasets, /api/v1/sample-datasets/**
+            - Path=/api/v1/datasets/load/*/progress
           filters:
-            - RewritePath=/api/v1/sample-datasets(?<segment>/?.*), /ingest/dataset${segment}
+            - RewritePath=/api/v1/datasets/load/(?<jobId>[^/]+)/progress, /datasets/load/${jobId}/progress
+          metadata:
+            response-timeout: -1
+            connect-timeout: 5000
+
+        # data-loader: dataset list + bulk load trigger.
+        - id: data-loader-datasets
+          uri: ${DATA_LOADER_URL:http://localhost:8002}
+          predicates:
+            - Path=/api/v1/datasets, /api/v1/datasets/**
+          filters:
+            - RewritePath=/api/v1/datasets(?<segment>/?.*), /datasets${segment}
 
         - id: rag-service-conversations
           uri: ${RAG_SERVICE_URL:http://localhost:8000}
@@ -54,6 +154,37 @@ spring:
             - Path=/api/v1/vector-stats
           filters:
             - RewritePath=/api/v1/vector-stats, /vector-stats
+
+        - id: rag-service-models
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/models
+          filters:
+            - RewritePath=/api/v1/models, /models
+
+        - id: rag-service-settings-cache
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/tenants/*/settings/invalidate-cache
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tid>[^/]+)/settings/invalidate-cache, /internal/settings-cache/${tid}
+
+        - id: user-preferences-cache
+          uri: ${RAG_SERVICE_URL:http://localhost:8000}
+          predicates:
+            - Path=/api/v1/users/me/preferences/invalidate-cache
+            - Method=DELETE
+          filters:
+            - RewritePath=/api/v1/users/me/preferences/invalidate-cache, /internal/user-settings-cache
+
+        - id: user-preferences
+          uri: ${ADMIN_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/users/me/preferences
+            - Method=GET,PATCH
+          filters:
+            - RewritePath=/api/v1/users/me/preferences, /internal/users/me/preferences
 
         - id: analytics-service-feedback
           uri: ${ANALYTICS_SERVICE_URL:http://localhost:8001}
@@ -101,6 +232,22 @@ spring:
             - Path=/api/v1/admin/**
           filters:
             - RewritePath=/api/v1/admin/(?<segment>.*), /internal/${segment}
+
+        - id: admin-tenants-settings
+          uri: ${ADMIN_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/tenants/*/settings
+            - Method=GET,PATCH
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tid>[^/]+)/settings, /internal/tenants/${tid}/settings
+
+        - id: admin-tenants-model-profiles
+          uri: ${ADMIN_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/tenants/*/model-profiles
+            - Method=GET,POST
+          filters:
+            - RewritePath=/api/v1/tenants/(?<tid>[^/]+)/model-profiles, /internal/tenants/${tid}/model-profiles
 
         - id: admin-tenants
           uri: ${ADMIN_SERVICE_URL:http://localhost:8082}

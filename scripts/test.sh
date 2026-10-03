@@ -131,30 +131,24 @@ _run_python_tests() {
     local label="$1"
     local svc="$2"
     local test_dir="$3"
-    local python_bin="${4:-python3}"
 
     echo -e "${BOLD}Running $label tests...${NC}"
     echo ""
-    local venv="$svc/.venv"
 
-    if [[ ! -d "$venv" ]]; then
-        echo "  Creating venv..."
-        "$python_bin" -m venv "$venv"
-    fi
-    if [[ ! -f "$venv/.deps-installed" ]] || \
-       [[ "$svc/pyproject.toml" -nt "$venv/.deps-installed" ]]; then
-        echo "  Installing dependencies..."
-        "$venv/bin/pip" install -q -e "$svc[dev]"
-        touch "$venv/.deps-installed"
+    if ! command -v uv &>/dev/null; then
+        echo -e "${RED}uv not found. Install with: brew install uv${NC}"
+        exit 1
     fi
 
-    "$venv/bin/pytest" "$test_dir" -v
+    echo "  Syncing deps (uv, Python 3.12)..."
+    (cd "$svc" && uv sync --python 3.12 --extra dev)
+
+    "$svc/.venv/bin/pytest" "$test_dir" -v
 }
 
 run_ingestion_tests() {
     local svc="$PROJECT_DIR/services/ingestion-service"
-    # docling-haystack 0.1.1 requires Python <3.13 — use python3.12 explicitly
-    _run_python_tests "ingestion-service" "$svc" "$svc/tests/" "python3.12"
+    _run_python_tests "ingestion-service" "$svc" "$svc/tests/"
 }
 
 run_data_loader_tests() {
@@ -170,7 +164,13 @@ run_common_tests() {
 run_contract_tests() {
     echo -e "${BOLD}Running contract tests...${NC}"
     echo ""
-    python3 -m pytest "$PROJECT_DIR/tests/contract/" -v
+    local svc="$PROJECT_DIR/lib/docintel-common"
+    if ! command -v uv &>/dev/null; then
+        echo -e "${RED}uv not found. Install with: brew install uv${NC}"
+        exit 1
+    fi
+    (cd "$svc" && uv sync --python 3.12 --extra dev)
+    "$svc/.venv/bin/pytest" "$PROJECT_DIR/tests/contract/" -v
 }
 
 print_result() {
@@ -274,21 +274,15 @@ case "$action" in
         fi
         echo ""
 
-        cd "$PROJECT_DIR/tests/integration"
-
-        # Ensure venv exists and deps are installed
-        if [[ ! -d ".venv" ]]; then
-            echo "  Creating venv for integration tests..."
-            python3 -m venv .venv
-        fi
-        if [[ ! -f ".venv/.deps-installed" ]] || \
-           [[ requirements.txt -nt ".venv/.deps-installed" ]]; then
-            echo "  Installing dependencies..."
-            .venv/bin/pip install -q -r requirements.txt
-            touch .venv/.deps-installed
+        if ! command -v uv &>/dev/null; then
+            echo -e "${RED}uv not found. Install with: brew install uv${NC}"
+            exit 1
         fi
 
-        .venv/bin/python run_tests.py
+        echo "  Syncing integration test deps (uv, Python 3.12)..."
+        (cd "$PROJECT_DIR/tests/integration" && uv sync --python 3.12 --extra dev)
+
+        "$PROJECT_DIR/tests/integration/.venv/bin/python" "$PROJECT_DIR/tests/integration/run_tests.py"
         print_result
         ;;
     quit)

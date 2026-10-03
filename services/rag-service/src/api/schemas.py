@@ -23,6 +23,10 @@ class QueryRequest(BaseModel):
     use_reranking: bool = True
     # None = use tenant preference; true/false = per-query override
     thinking_mode: Optional[bool] = None
+    # G3: skip prompt build + LLM generation entirely, return sources right
+    # after the min-score/top-k gate. Used by the integration harness for
+    # cheap retrieval+rerank+abstention-gate checks (no generation cost).
+    retrieve_only: bool = False
 
 
 class QueryResponse(BaseModel):

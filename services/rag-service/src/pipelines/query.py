@@ -37,10 +37,17 @@ from haystack.utils import Secret
 
 from ..components.cache import SemanticCacheChecker, SemanticCacheWriter
 from ..components.embedders import BM25SparseTextEmbedder
-from ..components.llm_adapter import build_streaming_generator, extract_lmforge_status, extract_reasoning_content
+from ..components.llm_adapter import (
+    build_streaming_generator,
+    extract_lmforge_status,
+    extract_reasoning_content,
+    extract_usage,
+)
 from ..components.model_profile_resolver import ModelProfileResolver
+from ..components.observability import CostTracker
 from ..components.opa import OpaChunkValidator
 from ..components.prompt import PromptBuilder
+from ..components.query_transform import QueryExpander
 from ..components.reranker import LmforgeReranker
 from ..components.retrieval import SecureRetriever
 from ..events import (
@@ -60,6 +67,7 @@ from docintel_common.security import Classification, UserContext
 
 from ..components.routing import DomainFilterBuilder
 from ..config import Settings, get_settings
+from ..tracing import LangfuseTracer
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +187,12 @@ class RAGService:
         self._reranker: Optional[LmforgeReranker] = None
         self._prompt_builder: Optional[PromptBuilder] = None
 
+        # G2 — query expansion (optional, disabled by default)
+        self._query_expander: Optional[QueryExpander] = None
+
+        # Cost/token accounting — per-tenant in-memory accumulator
+        self._cost_tracker = CostTracker()
+
     # ── Initialisation ───────────────────────────────────────────────────────
 
     def warm_up(self) -> None:
@@ -233,6 +247,9 @@ class RAGService:
                 top_k=cfg.rag_reranker_top_k,
             )
             self._prompt_builder = PromptBuilder()
+
+            if cfg.use_query_expansion:
+                self._query_expander = QueryExpander(llm_model=cfg.llm_expansion_model)
 
             self._ready = True
             logger.info(
@@ -453,12 +470,18 @@ class RAGService:
         model_profile_resolver: ModelProfileResolver | None = None,
         conversation_id: str | None = None,
         summarizer=None,
+        tracer: LangfuseTracer | None = None,
+        retrieve_only: bool = False,
     ) -> AsyncIterator[PipelineEvent]:
         """
         Unified RAG streaming generator — single source of truth for both paths.
 
         Yields typed PipelineEvents in stream order. Callers serialize to SSE
         (streaming handler) or aggregate into a dict (query handler).
+
+        retrieve_only: short-circuit after the min-score/top-k gate (step 8),
+        skipping prompt build + LLM generation. Embed/retrieve/rerank/gate all
+        still run — used for cheap CI/local retrieval-quality checks.
         """
         loop = asyncio.get_running_loop()
         cfg = settings
@@ -467,6 +490,33 @@ class RAGService:
 
         if not self._ready:
             await loop.run_in_executor(None, self.warm_up)
+
+        # Defaults for exit paths that skip retrieval/rerank entirely
+        # (cache hit, embedding/retrieval error) — read by main.py via
+        # getattr(rag_service, "_last_*") once the generator completes.
+        self._last_retrieval_mode = ""
+        self._last_rerank_candidates_in = 0
+        self._last_rerank_candidates_out = 0
+        self._last_reranker_degraded = False
+        self._last_query_expanded = False
+        self._last_rerank_skipped = False
+
+        # B4 — create a Langfuse trace with an explicit id equal to request_id
+        # (== query_id) so ClickHouse can store a single id that both
+        # identifies the query and deep-links to its trace.
+        trace = None
+        if tracer is not None and tracer.enabled:
+            trace = tracer.start_trace(
+                name="rag_query",
+                trace_id=request_id,
+                inputs={"question": question},
+                user_id=user_id,
+                session_id=conversation_id,
+                tags=[tenant_id],
+            )
+            self._last_trace_id = request_id
+        else:
+            self._last_trace_id = ""
 
         # ── 1. Initial metadata ───────────────────────────────────────────────
         initial_context = context_state if (context_state and context_state.get("has_summary")) else None
@@ -520,6 +570,42 @@ class RAGService:
             except Exception as e:
                 logger.warning("Cache check failed (continuing without cache): %s", e)
 
+        # ── 3b. Query expansion (G2 — optional, off by default) ─────────────────
+        # Rewrites the query with a small fast model to bridge vocabulary gaps
+        # (e.g. "WFH" vs "remote work"). Bounded by a hard wall-clock timeout and
+        # fails open to the original query on any error/timeout/no-op rewrite —
+        # expansion must never block or degrade retrieval. The expanded query is
+        # embedded separately and its candidates are unioned in at retrieval time
+        # (step 5); the reranker (step 7) is what handles precision on the wider
+        # candidate set, so widening recall here is safe.
+        expanded_embedding: list[float] | None = None
+        expanded_sparse_embedding = None
+        if cfg.use_query_expansion and self._query_expander is not None:
+            expanded_query = question
+            try:
+                expand_result = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: self._query_expander.run(query=question)),  # type: ignore[union-attr]
+                    timeout=cfg.rag_query_expansion_timeout_s,
+                )
+                expanded_query = expand_result.get("expanded_query", question)
+            except Exception as e:
+                logger.warning("Query expansion failed/timed out, using original query only: %s", e)
+
+            if expanded_query and expanded_query.strip() != question.strip():
+                try:
+                    exp_embed_result = await loop.run_in_executor(
+                        None, lambda: self._dense_embedder.run(text=expanded_query)  # type: ignore[union-attr]
+                    )
+                    exp_sparse_result = await loop.run_in_executor(
+                        None, lambda: self._sparse_embedder.run(text=expanded_query)  # type: ignore[union-attr]
+                    )
+                    expanded_embedding = exp_embed_result["embedding"]
+                    expanded_sparse_embedding = exp_sparse_result.get("sparse_embedding")
+                    self._last_query_expanded = True
+                except Exception as e:
+                    logger.warning("Embedding expanded query failed, using original candidates only: %s", e)
+                    expanded_embedding = None
+
         # ── 4. Route ──────────────────────────────────────────────────────────
         try:
             detected_domain, domain_filter = await loop.run_in_executor(
@@ -547,10 +633,42 @@ class RAGService:
                 ),
             )
             retrieved_docs = retrieval_result["documents"]
+            self._last_retrieval_mode = retrieval_result.get("retrieval_mode", "dense")
         except Exception as e:
             logger.error("Retrieval failed: %s", e)
             yield ErrorEvent(message=f"Retrieval failed: {e}")
             return
+
+        # G2 — union in candidates retrieved via the expanded query, deduped by
+        # chunk id. Failure here is non-fatal: fall back to the original-query
+        # candidates already retrieved above.
+        if expanded_embedding is not None:
+            try:
+                expanded_retrieval = await loop.run_in_executor(
+                    None,
+                    lambda: self._retriever.run(  # type: ignore[union-attr]
+                        query_embedding=expanded_embedding,
+                        query_sparse_embedding=expanded_sparse_embedding,
+                        tenant_id=tenant_id,
+                        user_roles=user_roles or None,
+                        user_id=user_id,
+                        domain_filter=domain_filter,
+                    ),
+                )
+                seen_ids = {d.id for d in retrieved_docs}
+                for d in expanded_retrieval["documents"]:
+                    if d.id not in seen_ids:
+                        retrieved_docs.append(d)
+                        seen_ids.add(d.id)
+            except Exception as e:
+                logger.warning("Expanded-query retrieval failed, continuing with original candidates: %s", e)
+
+        yield MetadataEvent(
+            query_id=request_id,
+            cache_hit=False,
+            retrieval_mode=self._last_retrieval_mode,
+            query_expanded=self._last_query_expanded,
+        )
 
         # ── 6. OPA validate (A6/A7) ───────────────────────────────────────────
         if retrieved_docs:
@@ -571,28 +689,98 @@ class RAGService:
         else:
             documents = []
 
-        # ── 7. Rerank ─────────────────────────────────────────────────────────
+        # ── 7. Rerank (or skip — G5) ──────────────────────────────────────────
         if use_reranking and documents:
-            try:
-                rerank_result = await loop.run_in_executor(
-                    None,
-                    lambda: self._reranker.run(  # type: ignore[union-attr]
-                        query=question,
-                        documents=documents,
-                    ),
-                )
-                documents = rerank_result["documents"]
-            except Exception as e:
-                logger.warning("Reranker failed, falling back to retrieval order: %s", e)
+            candidates_in = len(documents)
+            top_fused_score = documents[0].score or 0.0
+
+            # G5 — after RRF fusion, a top candidate whose fused score clears a
+            # calibrated confidence margin already reflects strong dense+sparse
+            # consensus (that's what a high RRF score means): skip the reranker
+            # round-trip entirely for these queries.
+            #
+            # GUARD — tau/skip interaction (see plan G5): rag_min_relevance_score
+            # (tau, step 8 below) was calibrated on RERANKER scores. Fused RRF
+            # scores live on a different, much smaller numeric scale, so tau must
+            # NEVER be evaluated against un-reranked documents — that would either
+            # gate everything out or nothing, depending on which side of the scale
+            # gap it lands on. rag_rerank_skip_min_score is a SEPARATE threshold,
+            # calibrated directly on the fused-score distribution (same
+            # methodology as calibrate_threshold.py, see docstring in config.py)
+            # to sit comfortably above the abstention/near-miss region. Clearing
+            # it is only possible for queries that would unambiguously pass tau
+            # anyway, so the skip decision itself doubles as this query's
+            # relevance gate — step 8 does not re-apply tau when rerank was
+            # skipped. Any query whose top fused score falls at or below that
+            # bar (including every near-miss/abstain case observed during
+            # calibration) always takes the full rerank + tau path unchanged —
+            # the gate is either decisive-and-skipped or reranked, never both
+            # skipped and ambiguous.
+            can_skip_rerank = (
+                cfg.rag_rerank_skip_enabled
+                and self._last_retrieval_mode == "hybrid"
+                and top_fused_score >= cfg.rag_rerank_skip_min_score
+            )
+
+            if can_skip_rerank:
+                # Fused order from Qdrant's RRF is already the correct ranking —
+                # just cap to the same candidate count the reranker would have
+                # returned, so downstream top_k/prompt sizing is unaffected.
+                documents = documents[: cfg.rag_reranker_top_k]
+                self._last_reranker_degraded = False
+                self._last_rerank_skipped = True
+            else:
+                try:
+                    rerank_result = await loop.run_in_executor(
+                        None,
+                        lambda: self._reranker.run(  # type: ignore[union-attr]
+                            query=question,
+                            documents=documents,
+                        ),
+                    )
+                    documents = rerank_result["documents"]
+                    self._last_reranker_degraded = bool(rerank_result.get("reranker_degraded"))
+                except Exception as e:
+                    logger.warning("Reranker failed, falling back to retrieval order: %s", e)
+                    self._last_reranker_degraded = True
+
+            logger.info(
+                "rerank_gate mode=%s skipped=%s top_fused=%.4f n_in=%d n_out=%d",
+                self._last_retrieval_mode, self._last_rerank_skipped,
+                top_fused_score, candidates_in, len(documents),
+            )
+
+            self._last_rerank_candidates_in = candidates_in
+            self._last_rerank_candidates_out = len(documents)
+            yield MetadataEvent(
+                query_id=request_id,
+                cache_hit=False,
+                reranker_degraded=self._last_reranker_degraded,
+                rerank_candidates_in=self._last_rerank_candidates_in,
+                rerank_candidates_out=self._last_rerank_candidates_out,
+                rerank_skipped=self._last_rerank_skipped,
+            )
 
         # ── 8. Min-score / top-k filter ───────────────────────────────────────
-        if effective_min_score > 0.0:
+        # G5 guard: tau (effective_min_score) is calibrated on RERANKER scores —
+        # never evaluate it against fused-score documents from a skipped rerank
+        # (see step 7). rag_rerank_skip_min_score already served as this
+        # query's relevance gate.
+        if effective_min_score > 0.0 and not self._last_rerank_skipped:
             above = [d for d in documents if (d.score or 0.0) >= effective_min_score]
             if not above and cfg.rag_min_score_fallback_topk > 0:
                 above = documents[:cfg.rag_min_score_fallback_topk]
             documents = above
 
         documents = documents[:effective_top_k]
+
+        # ── 8b. Retrieve-only short-circuit (G3) ────────────────────────────────
+        # Skips generation entirely — correct for both the abstain case (empty
+        # documents) and the answerable case (non-empty documents); the caller
+        # judges abstention from source_count, not from answer text.
+        if retrieve_only:
+            yield SourcesEvent(sources=_build_sources(documents), done=True)
+            return
 
         # ── 9. No-docs branch ─────────────────────────────────────────────────
         if not documents:
@@ -682,8 +870,18 @@ class RAGService:
 
         queue: asyncio.Queue = asyncio.Queue()
         llm_error: list = []
+        usage_holder: dict = {}
 
         def streaming_callback(chunk):
+            # Usage arrives on a trailing chunk with no content when the engine
+            # honours stream_options.include_usage (see llm_adapter.extract_usage).
+            # Captured unconditionally — this chunk carries no content/reasoning
+            # so it falls through the branches below without enqueuing anything.
+            usage = extract_usage(chunk)
+            if usage:
+                usage_holder["prompt_tokens"] = usage.get("prompt_tokens", 0)
+                usage_holder["completion_tokens"] = usage.get("completion_tokens", 0)
+
             # LMForge lifecycle status events — only enqueue the status signal when
             # the chunk carries no content/reasoning (it's a pure lifecycle event).
             # If LMForge includes the status field on content chunks (observed in
@@ -780,8 +978,33 @@ class RAGService:
         else:
             self._last_thinking_truncated = False
 
+        # Cost/token accounting — engines that don't honour stream_options.include_usage
+        # (see extract_usage) leave usage_holder empty; CostTracker degrades to zero
+        # cost/tokens in that case rather than failing the request.
+        litellm_response = None
+        if usage_holder:
+            _prompt_tok = usage_holder.get("prompt_tokens", 0)
+            _completion_tok = usage_holder.get("completion_tokens", 0)
+            litellm_response = {
+                "model": effective_model,
+                "usage": {
+                    "prompt_tokens": _prompt_tok,
+                    "completion_tokens": _completion_tok,
+                    "total_tokens": _prompt_tok + _completion_tok,
+                },
+            }
+        cost_result = self._cost_tracker.run(
+            response=answer, tenant_id=tenant_id, litellm_response=litellm_response
+        )
+        self._last_tokens_used = cost_result["tokens_used"]
+        self._last_cost_usd = cost_result["cost_usd"]
+
         # ── 13. Build sources ─────────────────────────────────────────────────
         sources = _build_sources(documents)
+
+        if trace is not None:
+            trace.update(output={"answer": answer, "source_count": len(sources)})
+            trace.flush()
 
         # ── 14. Cache write (fire-and-forget) ─────────────────────────────────
         if use_cache and self._cache_writer and answer:
@@ -849,6 +1072,8 @@ class RAGService:
         model_profile_resolver: ModelProfileResolver | None = None,
         conversation_id: str | None = None,
         summarizer=None,
+        tracer: LangfuseTracer | None = None,
+        retrieve_only: bool = False,
     ) -> dict:
         """
         Drain stream() into the legacy dict shape consumed by /query.
@@ -859,6 +1084,12 @@ class RAGService:
         sources: list[dict] = []
         cache_hit = False
         detected_domain: str | None = None
+        retrieval_mode: str | None = None
+        rerank_candidates_in: int | None = None
+        rerank_candidates_out: int | None = None
+        reranker_degraded: bool | None = None
+        query_expanded: bool | None = None
+        rerank_skipped: bool | None = None
 
         async for event in self.stream(
             question=question,
@@ -881,10 +1112,24 @@ class RAGService:
             model_profile_resolver=model_profile_resolver,
             conversation_id=conversation_id,
             summarizer=summarizer,
+            tracer=tracer,
+            retrieve_only=retrieve_only,
         ):
             match event:
-                case MetadataEvent(cache_hit=ch):
+                case MetadataEvent(cache_hit=ch, retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout, reranker_degraded=rd, query_expanded=qe, rerank_skipped=rs):
                     cache_hit = ch
+                    if rm is not None:
+                        retrieval_mode = rm
+                    if cin is not None:
+                        rerank_candidates_in = cin
+                    if cout is not None:
+                        rerank_candidates_out = cout
+                    if rd is not None:
+                        reranker_degraded = rd
+                    if qe is not None:
+                        query_expanded = qe
+                    if rs is not None:
+                        rerank_skipped = rs
                 case RoutingEvent(domain=d):
                     detected_domain = d
                 case ThinkingTokenEvent(text=t):
@@ -909,4 +1154,13 @@ class RAGService:
             "model_used": effective_model,
             "detected_domain": detected_domain,
             "thinking_truncated": getattr(self, "_last_thinking_truncated", False),
+            "tokens_used": getattr(self, "_last_tokens_used", {"prompt": 0, "completion": 0}),
+            "cost_usd": getattr(self, "_last_cost_usd", 0.0),
+            "retrieval_mode": retrieval_mode or "",
+            "rerank_candidates_in": rerank_candidates_in or 0,
+            "rerank_candidates_out": rerank_candidates_out or 0,
+            "reranker_degraded": bool(reranker_degraded),
+            "query_expanded": bool(query_expanded),
+            "rerank_skipped": bool(rerank_skipped),
+            "trace_id": getattr(self, "_last_trace_id", ""),
         }

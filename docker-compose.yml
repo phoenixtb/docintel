@@ -105,11 +105,17 @@ services:
       #   Ollama   (any platform, default): http://host.docker.internal:11434/v1
       #   vLLM     (Linux/NVIDIA): http://host.docker.internal:8000/v1
       #   LM Studio (Windows/macOS): http://host.docker.internal:1234/v1
-      - LLM_CHAT_URL=${LLM_CHAT_URL:-http://host.docker.internal:11434/v1}
-      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b}
+      - LLM_CHAT_URL=${LLM_CHAT_URL:-http://host.docker.internal:11430/v1}
+      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b:6bit}
       - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-phi3:mini}
       - LLM_API_KEY=${LLM_API_KEY:-none}
-      - LLM_EXPANSION_MODEL=${LLM_EXPANSION_MODEL:-qwen3:1.7b}
+      - LLM_EXPANSION_MODEL=${LLM_EXPANSION_MODEL:-qwen3:1.7b:4bit}
+      # G2 — query rewriting before retrieval. Off by default pending A/B verification.
+      - USE_QUERY_EXPANSION=${USE_QUERY_EXPANSION:-false}
+      # G5 — skip reranking when the top fused hybrid score clears this margin.
+      # Off by default — no safe margin found in golden-set calibration.
+      - RAG_RERANK_SKIP_ENABLED=${RAG_RERANK_SKIP_ENABLED:-false}
+      - RAG_RERANK_SKIP_MIN_SCORE=${RAG_RERANK_SKIP_MIN_SCORE:-1.01}
       # Embeddings — same engine as chat by default; override LLM_EMBED_URL to switch
       #   LMForge (macOS/Apple Silicon): http://host.docker.internal:11430/v1  [default]
       #   Ollama   (any platform):       http://host.docker.internal:11434/v1
@@ -126,22 +132,34 @@ services:
       - LLM_THINKING_TEMPERATURE=${LLM_THINKING_TEMPERATURE:-0.6}
       - LLM_THINKING_TOP_P=${LLM_THINKING_TOP_P:-0.95}
       - LLM_THINKING_MAX_TOKENS=${LLM_THINKING_MAX_TOKENS:-8192}
-      # Reranker — LMForge /v1/rerank (replaces Infinity sidecar)
-      # Disabled until an MLX-format reranker is added to the LMForge catalog.
-      # Re-enable by setting USE_RERANKING=true once a compatible model is pulled.
-      - RERANKER_MODEL=${LLM_RERANK_MODEL:-jina-reranker-v2:multilingual}
+      # Reranker — LMForge /v1/rerank (Qwen3-Reranker cross-encoder, MLX)
+      # 0.6b:8bit = fast on-device default; qwen3-reranker:4b:8bit for higher quality.
+      - RERANKER_MODEL=${LLM_RERANK_MODEL:-qwen3-reranker:0.6b:8bit}
       - RERANKER_URL=${LLM_RERANK_URL:-http://host.docker.internal:11430/v1}
-      - USE_RERANKING=${USE_RERANKING:-false}
+      - USE_RERANKING=${USE_RERANKING:-true}
       # RAG Pipeline Configuration
       - RAG_RETRIEVER_TOP_K=50
       - RAG_RERANKER_TOP_K=10
       - RAG_DEFAULT_TOP_K=5
+      # Abstention gate: minimum rerank score for a chunk to reach the LLM.
+      # Qwen3-Reranker emits sigmoid scores (0.5 = neutral). Calibrated default
+      # 0.55 sits in the empirical gap between noise/off-topic chunks (~0.50–0.51)
+      # and genuinely relevant chunks (~0.62–0.73) — gates false-confidence
+      # matches (e.g. WFH→work-life-balance) while keeping real answers.
+      # Recalibrate from score distribution via
+      #   python tests/integration/calibrate_threshold.py reports/<report>.json
+      - RAG_MIN_RELEVANCE_SCORE=${RAG_MIN_RELEVANCE_SCORE:-0.55}
+      - RAG_MIN_SCORE_FALLBACK_TOPK=${RAG_MIN_SCORE_FALLBACK_TOPK:-0}
       # Domain router — rag-service reads RAG_DOMAIN_ROUTER_MODEL (field: rag_domain_router_model)
       - RAG_USE_DOMAIN_ROUTING=${RAG_USE_DOMAIN_ROUTING:-true}
       - RAG_DOMAIN_ROUTER_MODEL=${DEFAULT_DOMAIN_CLASSIFIER_MODEL:-MoritzLaurer/deberta-v3-base-zeroshot-v1.1-all-33}
       # Document Service (for sample dataset record creation)
       - DOCUMENT_SERVICE_URL=http://document-service:8081
-      - ANALYTICS_SERVICE_URL=http://analytics-service:8001
+      # A7: query telemetry publishes to analytics.query (Redis Streams) —
+      # analytics-service consumes it directly, no HTTP call from rag-service.
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       # Observability (matches Langfuse auto-provisioned keys)
       - LANGFUSE_HOST=http://langfuse-web:3000
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
@@ -155,6 +173,8 @@ services:
       qdrant:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - docintel-network
@@ -239,7 +259,7 @@ services:
       - LLM_VLM_MODEL=${LLM_VLM_MODEL:-qwen2.5-vl:3b:4bit}
       - VLM_MAX_CONCURRENCY=${VLM_MAX_CONCURRENCY:-2}
       - VLM_RENDER_DPI=${VLM_RENDER_DPI:-150}
-      - INGESTION_USE_PAGE_ROUTING=${INGESTION_USE_PAGE_ROUTING:-false}
+      - INGESTION_USE_PAGE_ROUTING=${INGESTION_USE_PAGE_ROUTING:-true}
       - HAYSTACK_TELEMETRY_ENABLED=false
       # DOMAIN_CLASSIFIER_MODEL is consumed by docintel-common inside the container image
       - INTERNAL_GATEWAY_SECRET=${INTERNAL_GATEWAY_SECRET:-}
@@ -279,7 +299,9 @@ services:
           memory: 4G
 
   analytics-service:
-    build: ./services/analytics-service-py
+    build:
+      context: .
+      dockerfile: services/analytics-service-py/Dockerfile
     environment:
       - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=8123
@@ -287,8 +309,17 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
       - CLICKHOUSE_DATABASE=docintel_analytics
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3001}
+      # A7: background consumer batches analytics.query (Redis Streams) into ClickHouse
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      # B4: browser-reachable Langfuse URL for Insights trace deep-links
+      # (distinct from rag-service's internal LANGFUSE_HOST=http://langfuse-web:3000)
+      - LANGFUSE_PUBLIC_HOST=${LANGFUSE_PUBLIC_HOST:-http://localhost:3000}
     depends_on:
       clickhouse:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - docintel-network
@@ -326,11 +357,11 @@ services:
       # Active model ids — surfaced by GET /internal/active-models for the UI's
       # "Active Models" panel. Source of truth is the deployment env (these
       # mirror the values passed to rag-service / ingestion-service above).
-      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b}
+      - LLM_MODEL=${LLM_MODEL:-qwen3.5:4b:6bit}
       - LLM_VLM_MODEL=${LLM_VLM_MODEL:-qwen2.5-vl:3b:4bit}
       - LLM_EMBED_MODEL=${LLM_EMBED_MODEL:-qwen3-embed:0.6b:8bit}
-      - LLM_RERANK_MODEL=${LLM_RERANK_MODEL:-jina-reranker-v2:multilingual}
-      - USE_RERANKING=${USE_RERANKING:-false}
+      - LLM_RERANK_MODEL=${LLM_RERANK_MODEL:-qwen3-reranker:0.6b:8bit}
+      - USE_RERANKING=${USE_RERANKING:-true}
     depends_on:
       postgres:
         condition: service_healthy

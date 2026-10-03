@@ -38,7 +38,10 @@ dependencies {
 
     // MinIO (for per-tenant bucket provisioning)
     implementation("io.minio:minio:8.5.14")
-    
+
+    // OpenAPI spec generation (exported + merged into docs/api/openapi.json — see scripts/generate-openapi.sh)
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.9")
+
     // Kotlin
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
     implementation("org.jetbrains.kotlin:kotlin-reflect")

@@ -192,6 +192,10 @@ def build_streaming_generator(
     generation_kwargs: dict = {
         "temperature": temperature,
         "max_tokens": max_tokens,
+        # OpenAI-standard: asks the engine to emit a trailing usage-only chunk.
+        # Ignored by engines that don't support it — usage then simply never
+        # appears on any chunk (see extract_usage).
+        "stream_options": {"include_usage": True},
     }
     if top_p is not None:
         generation_kwargs["top_p"] = top_p
@@ -233,4 +237,21 @@ def extract_lmforge_status(chunk: StreamingChunk) -> Optional[str]:
     return chunk.meta.get("lmforge_status")
 
 
-__all__ = ["build_streaming_generator", "extract_reasoning_content", "extract_lmforge_status", "ThinkingAwareChatGenerator"]
+def extract_usage(chunk: StreamingChunk) -> dict | None:
+    """
+    Extract token usage from a StreamingChunk.
+
+    Only the trailing usage-only chunk (sent when the engine honours
+    stream_options.include_usage) carries this — returns None for every
+    other chunk and for engines that don't support it at all.
+    """
+    return chunk.meta.get("usage")
+
+
+__all__ = [
+    "build_streaming_generator",
+    "extract_reasoning_content",
+    "extract_lmforge_status",
+    "extract_usage",
+    "ThinkingAwareChatGenerator",
+]

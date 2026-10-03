@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from docintel_common.tracing import TraceContext, configure_trace_logging
+from docintel_common.errors import install_error_handlers
 
 from ..adapters import HuggingFaceAdapter, LoadedFile
 from ..config import get_settings
@@ -82,6 +83,7 @@ app = FastAPI(
     docs_url="/docs",
     lifespan=lifespan,
 )
+install_error_handlers(app)
 
 if _METRICS_ENABLED:
     Instrumentator().instrument(app).expose(app)

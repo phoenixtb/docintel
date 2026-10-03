@@ -74,7 +74,7 @@ def test_start_load_unknown_dataset_returns_400(client: TestClient) -> None:
         headers={"X-User-Id": "u1", "X-Tenant-Id": "tenant-1"},
     )
     assert response.status_code == 400
-    assert "nonexistent_dataset" in response.json()["detail"]
+    assert "nonexistent_dataset" in response.json()["error"]["message"]
 
 
 def test_start_load_returns_202_with_job_id(client: TestClient) -> None:

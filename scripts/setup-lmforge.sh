@@ -20,9 +20,11 @@ ENV_FILE="$PROJECT_DIR/.env"
 source "$PROJECT_DIR/config/defaults.env"
 _DEFAULT_CHAT_MODEL="$LLM_MODEL"
 _DEFAULT_EMBED_MODEL="$LLM_EMBED_MODEL"
+_DEFAULT_RERANK_MODEL="$LLM_RERANK_MODEL"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
 LLM_MODEL="$_DEFAULT_CHAT_MODEL"
 LLM_EMBED_MODEL="$_DEFAULT_EMBED_MODEL"
+LLM_RERANK_MODEL="$_DEFAULT_RERANK_MODEL"
 
 # Load engine-agnostic setup functions
 # shellcheck source=lib/setup-common.sh
@@ -71,12 +73,79 @@ echo "Running lmforge init (hardware probe + runtime install)..."
 lmforge init
 ok "lmforge init complete"
 
+# Linux: bind 0.0.0.0 so docker containers can reach the daemon via host-gateway.
+# macOS (Darwin) is a no-op — host.docker.internal already reaches loopback there.
+# keep_alive is all-platforms: default 5m idle-unload can race DocIntel's 30s
+# query-embed timeout on cold reload. One restart covers both upserts.
+_lf_cfg="$HOME/.lmforge/config.toml"
+_lf_cfg_changed=0
+if [ "$(uname -s)" = "Linux" ]; then
+    if [ -f "$_lf_cfg" ] && grep -qE '^[[:space:]]*bind_address[[:space:]]*=[[:space:]]*"0\.0\.0\.0"' "$_lf_cfg"; then
+        ok "LMForge already binds 0.0.0.0"
+    elif [ -f "$_lf_cfg" ] && grep -qE '^[[:space:]]*bind_address[[:space:]]*=[[:space:]]*"127\.0\.0\.1"' "$_lf_cfg"; then
+        sed -i.bak 's/^\([[:space:]]*bind_address[[:space:]]*=[[:space:]]*\)"127\.0\.0\.1"/\1"0.0.0.0"/' "$_lf_cfg" \
+            && rm -f "${_lf_cfg}.bak"
+        ok "LMForge bind_address set to 0.0.0.0 (was 127.0.0.1)"
+        _lf_cfg_changed=1
+    elif [ -f "$_lf_cfg" ] && grep -qE '^[[:space:]]*bind_address[[:space:]]*=' "$_lf_cfg"; then
+        warn "LMForge bind_address is a custom value — leaving it unchanged"
+    else
+        # bind_address is a TOML top-level key — PREPEND so it can never land
+        # inside a [section] appended at end-of-file (e.g. [orchestrator] below).
+        mkdir -p "$(dirname "$_lf_cfg")"
+        touch "$_lf_cfg"
+        printf '%s\n%s\n%s' \
+            '# DocIntel: bind on all interfaces so docker containers reach the daemon via host-gateway' \
+            'bind_address = "0.0.0.0"' \
+            "$(cat "$_lf_cfg")" > "${_lf_cfg}.tmp" && mv "${_lf_cfg}.tmp" "$_lf_cfg"
+        ok "LMForge bind_address added: 0.0.0.0"
+        _lf_cfg_changed=1
+    fi
+fi
+
+# keep_alive lives under [orchestrator] in LMForge's config schema — a bare
+# top-level key would be silently ignored.
+if [ -f "$_lf_cfg" ] && grep -qE '^[[:space:]]*keep_alive[[:space:]]*=' "$_lf_cfg"; then
+    ok "LMForge keep_alive already configured"
+elif [ -f "$_lf_cfg" ] && grep -qE '^\[orchestrator\]' "$_lf_cfg"; then
+    # Section exists without keep_alive — insert right after the header.
+    sed -i.bak '/^\[orchestrator\]/a\
+keep_alive = "30m" # DocIntel: default 5m idle-unload races the 30s query-embed timeout on cold reload
+' "$_lf_cfg" && rm -f "${_lf_cfg}.bak"
+    ok "LMForge keep_alive set to 30m (in existing [orchestrator])"
+    _lf_cfg_changed=1
+else
+    mkdir -p "$(dirname "$_lf_cfg")"
+    {
+        echo ''
+        echo '# DocIntel: default 5m idle-unload can race the 30s query-embed timeout on cold reload'
+        echo '[orchestrator]'
+        echo 'keep_alive = "30m"'
+    } >> "$_lf_cfg"
+    ok "LMForge keep_alive appended: 30m ([orchestrator])"
+    _lf_cfg_changed=1
+fi
+
+if [ "$_lf_cfg_changed" = "1" ]; then
+    if [ "$(uname -s)" = "Linux" ]; then
+        if systemctl --user is-active --quiet lmforge 2>/dev/null; then
+            systemctl --user restart lmforge
+            ok "Restarted LMForge user service to apply config"
+        elif curl -sm2 http://127.0.0.1:11430/health >/dev/null 2>&1; then
+            warn "LMForge is running with the old config — restart it (lmforge stop / start.sh will restart it) to apply"
+        fi
+    elif curl -sm2 http://127.0.0.1:11430/health >/dev/null 2>&1; then
+        echo "  Note: LMForge config updated — restart the daemon to apply it"
+    fi
+fi
+
 # =============================================================================
 # Resolve and pull models
 # =============================================================================
 
 CHAT_MODEL="$LLM_MODEL"
 EMBED_MODEL="$LLM_EMBED_MODEL"
+RERANK_MODEL="$LLM_RERANK_MODEL"
 
 # Select chat model based on hardware.
 # Apple Silicon (arm64 macOS) → LLM_MODEL (4B 4-bit by default).
@@ -93,8 +162,9 @@ echo "================================================"
 echo "Pulling LMForge Models"
 echo "================================================"
 echo ""
-echo "  Chat model : $CHAT_MODEL"
-echo "  Embed model: $EMBED_MODEL"
+echo "  Chat model  : $CHAT_MODEL"
+echo "  Embed model : $EMBED_MODEL"
+echo "  Rerank model: $RERANK_MODEL"
 echo ""
 
 echo "Installed models:"
@@ -115,6 +185,14 @@ else
     echo "Pulling '$EMBED_MODEL'..."
     lmforge pull "$EMBED_MODEL"
     ok "Pulled: $EMBED_MODEL"
+fi
+
+if lmforge models list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$RERANK_MODEL"; then
+    ok "Rerank model '$RERANK_MODEL' already installed."
+else
+    echo "Pulling '$RERANK_MODEL'..."
+    lmforge pull "$RERANK_MODEL"
+    ok "Pulled: $RERANK_MODEL"
 fi
 
 # =============================================================================

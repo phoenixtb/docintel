@@ -2,6 +2,7 @@ package com.docintel.document.sse
 
 import org.slf4j.LoggerFactory
 import org.springframework.context.event.EventListener
+import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter
 import java.util.concurrent.ConcurrentHashMap
@@ -95,6 +96,27 @@ class SseEmitterRegistry {
             }
         }
         list.removeAll(dead)
+    }
+
+    /**
+     * Idle mobile/corporate proxies drop silent SSE connections — document events
+     * can go minutes between status transitions, so send a comment-only ": keepalive"
+     * line (no `data:`, ignored by EventSource/fetch-stream parsers) on every
+     * connection roughly every 20s. See docs/api/sse-contracts.md.
+     */
+    @Scheduled(fixedRate = 20_000L, initialDelay = 20_000L)
+    fun sendHeartbeat() {
+        for ((tenantId, list) in emitters) {
+            val dead = mutableListOf<SseEmitter>()
+            for (emitter in list) {
+                try {
+                    emitter.send(SseEmitter.event().comment("keepalive"))
+                } catch (_: Exception) {
+                    dead += emitter
+                }
+            }
+            if (dead.isNotEmpty()) list.removeAll(dead)
+        }
     }
 
     private fun remove(tenantId: String, emitter: SseEmitter) {

@@ -2,6 +2,7 @@ package com.docintel.document.controller
 
 import com.docintel.document.dto.*
 import com.docintel.document.entity.ProcessingStatus
+import com.docintel.document.error.errorEnvelope
 import com.docintel.document.service.DocumentService
 import com.docintel.document.service.cleanup.CleanupJobService
 import com.docintel.document.sse.CleanupSseRegistry
@@ -138,7 +139,8 @@ class DocumentController(
         @RequestParam("tenant_id", required = false) tenantOverride: String?,
     ): ResponseEntity<Any> {
         val effectiveTenant = resolveAdminTenantOverride(tenantId, tenantOverride, rolesHeader)
-            ?: return ResponseEntity.status(403).body(mapOf("error" to "Cross-tenant stats requires documents:delete_all role"))
+            ?: return ResponseEntity.status(403)
+                .body(errorEnvelope("FORBIDDEN", "Cross-tenant stats requires documents:delete_all role"))
         return ResponseEntity.ok(documentService.getStats(effectiveTenant))
     }
 
@@ -296,7 +298,7 @@ class DocumentController(
                 return Pair(
                     tenantId,
                     ResponseEntity.status(HttpStatus.FORBIDDEN)
-                        .body(mapOf("error" to "Cross-tenant cleanup requires the documents:delete_all role")),
+                        .body(errorEnvelope("FORBIDDEN", "Cross-tenant cleanup requires the documents:delete_all role")),
                 )
             }
             return Pair(target, null)
@@ -337,7 +339,7 @@ class DocumentController(
             val response = cleanupJobService.startJob(effectiveTenant, filters)
             ResponseEntity.status(HttpStatus.ACCEPTED).body(response)
         } catch (e: IllegalStateException) {
-            ResponseEntity.status(HttpStatus.CONFLICT).body(mapOf("error" to e.message))
+            ResponseEntity.status(HttpStatus.CONFLICT).body(errorEnvelope("CONFLICT", e.message ?: "Conflict."))
         }
     }
 
