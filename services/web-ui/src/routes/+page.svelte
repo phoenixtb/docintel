@@ -60,7 +60,7 @@
       color: 'amber',
       title: 'Universal Ingest',
       desc: 'Upload PDFs, plain text, legal contracts, or HR policies. Documents are chunked, embedded with nomic-embed-text, and instantly searchable via the hybrid pipeline.',
-      tag: 'MinIO · nomic-embed',
+      tag: 'S3 object store · nomic-embed',
     },
   ];
 

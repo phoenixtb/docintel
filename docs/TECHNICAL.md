@@ -52,7 +52,7 @@ DocIntel is an enterprise-grade document intelligence platform that enables sema
 │                           DATA LAYER                                        │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
-│  │  PostgreSQL  │  │    MinIO     │  │   Qdrant     │  │    Redis     │    │
+│  │  PostgreSQL  │  │   S3 store   │  │   Qdrant     │  │    Redis     │    │
 │  │              │  │              │  │              │  │              │    │
 │  │ • Documents  │  │ • Raw Files  │  │ • Vectors    │  │ • Rate Limit │    │
 │  │ • Chunks     │  │ • PDFs       │  │ • Embeddings │  │ • Sessions   │    │
@@ -99,7 +99,7 @@ DocIntel is an enterprise-grade document intelligence platform that enables sema
 | **Admin Service** | Spring Boot (Kotlin) | Cache management, health monitoring |
 | **Vector Store** | Qdrant | Semantic search, response caching |
 | **Database** | PostgreSQL 15 | Document metadata, chunk storage |
-| **Object Storage** | MinIO | Raw file storage (S3-compatible) |
+| **Object Storage** | S3-compatible store (VersityGW locally, [ADR-0001](adr/0001-object-storage-versitygw.md)) | Raw file storage |
 | **Cache** | Redis | Rate limiting, session storage |
 | **LLM** | Ollama (Qwen3-4B, Phi3-mini) | Local inference, no API costs |
 | **Embeddings** | nomic-embed-text-v1.5 | 768-dimensional vectors |
@@ -155,13 +155,13 @@ DocIntel is an enterprise-grade document intelligence platform that enables sema
 | `DocumentServiceApplication.kt` | Spring Boot entry point |
 | `controller/DocumentController.kt` | REST endpoints for CRUD |
 | `service/DocumentService.kt` | Business logic, orchestration |
-| `service/StorageService.kt` | MinIO file operations |
+| `service/StorageService.kt` | Object-store (S3) file operations |
 | `service/TextExtractionService.kt` | PDF/DOCX text extraction |
 | `service/RagServiceClient.kt` | HTTP client to RAG service |
 | `entity/Document.kt` | JPA entity for documents |
 | `entity/Chunk.kt` | JPA entity for chunks |
 | `repository/DocumentRepository.kt` | R2DBC repository |
-| `config/MinioConfig.kt` | MinIO client configuration |
+| `config/ObjectStoreConfig.kt` | S3 client configuration (`ObjectStoreProperties`) |
 
 ### 4. RAG Service (`services/rag-service`)
 
@@ -205,7 +205,7 @@ DocIntel is an enterprise-grade document intelligence platform that enables sema
 
 ```
 ┌──────┐     ┌─────────┐     ┌─────────────┐     ┌───────┐     ┌────────┐
-│ User │────▶│ Web UI  │────▶│ API Gateway │────▶│ Doc   │────▶│ MinIO  │
+│ User │────▶│ Web UI  │────▶│ API Gateway │────▶│ Doc   │────▶│ S3     │
 └──────┘     └─────────┘     └─────────────┘     │Service│     │(file)  │
                                                   │       │     └────────┘
                                                   │       │
@@ -228,7 +228,7 @@ DocIntel is an enterprise-grade document intelligence platform that enables sema
 **Steps**:
 1. User uploads file via Web UI
 2. API Gateway routes to Document Service
-3. Document Service saves file to MinIO
+3. Document Service saves file to the object store
 4. Document Service creates record in PostgreSQL (status: PENDING)
 5. Document Service extracts text (PDF/DOCX support)
 6. Document Service calls RAG Service `/index` endpoint
@@ -270,7 +270,7 @@ DocIntel is an enterprise-grade document intelligence platform that enables sema
 5. Response cache is invalidated
 6. UI shows indexed chunk counts
 
-**Note**: Sample datasets bypass PostgreSQL/MinIO (no document records created).
+**Note**: data-loader uploads sample-dataset files to the object store and publishes `files.available`; document-service registers them like uploads.
 
 ### Flow 3: Query with Streaming Response
 
@@ -423,7 +423,7 @@ docintel/
 │   │   └── src/
 │   │       ├── main/kotlin/com/docintel/document/
 │   │       │   ├── DocumentServiceApplication.kt
-│   │       │   ├── config/MinioConfig.kt
+│   │       │   ├── config/ObjectStoreConfig.kt
 │   │       │   ├── controller/DocumentController.kt
 │   │       │   ├── dto/DocumentDto.kt
 │   │       │   ├── entity/
@@ -538,11 +538,11 @@ POSTGRES_DB=docintel
 POSTGRES_USER=docintel
 POSTGRES_PASSWORD=docintel
 
-# MinIO
-MINIO_ENDPOINT=minio:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=documents
+# Object store (any S3-compatible server)
+OBJECT_STORE_ENDPOINT=http://object-store:7070
+OBJECT_STORE_REGION=us-east-1
+OBJECT_STORE_ACCESS_KEY=<from .env>
+OBJECT_STORE_SECRET_KEY=<from .env>
 
 # Qdrant
 QDRANT_URL=http://qdrant:6333

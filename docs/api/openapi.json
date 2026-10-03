@@ -4781,7 +4781,7 @@
       "FromPathRequest": {
         "type": "object",
         "properties": {
-          "minioPath": {
+          "objectPath": {
             "type": "string"
           },
           "contentHash": {
@@ -4817,7 +4817,7 @@
           "fileSize",
           "filename",
           "metadata",
-          "minioPath"
+          "objectPath"
         ]
       },
       "FromPathResponse": {
