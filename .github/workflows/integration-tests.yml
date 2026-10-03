@@ -87,7 +87,7 @@ jobs:
       - name: Start infrastructure
         if: steps.probe.outputs.available == 'true'
         run: |
-          docker compose up -d postgres redis qdrant minio clickhouse
+          docker compose up -d postgres redis qdrant object-store object-store-init clickhouse
           docker compose exec -T postgres pg_isready -U docintel -t 30
 
       - name: Build and start app services

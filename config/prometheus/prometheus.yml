@@ -59,7 +59,7 @@ scrape_configs:
           service: ingestion-service
           layer: application
 
-  # FastAPI — sample dataset loader (HuggingFace adapters, MinIO upload)
+  # FastAPI — sample dataset loader (HuggingFace adapters, object-store upload)
   - job_name: data-loader
     metrics_path: /metrics
     static_configs:

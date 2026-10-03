@@ -37,12 +37,12 @@ volumes:
       o: bind
       device: ${DOCINTEL_DATA_DIR}/redis
 
-  minio-data:
+  object-store-data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: ${DOCINTEL_DATA_DIR}/minio
+      device: ${DOCINTEL_DATA_DIR}/object-store
 
   clickhouse-data:
     driver: local

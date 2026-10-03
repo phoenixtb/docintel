@@ -2,7 +2,7 @@
 # scripts/lib/start_helpers.sh
 # ==============================================================================
 # Bootstrap helpers for start.sh: phase/ERR context, tofu apply with logs,
-# infra volume-fingerprint stale-state recovery, MinIO import heal, Qdrant
+# infra volume-fingerprint stale-state recovery, retired-MinIO state cleanup, Qdrant
 # drift pre-check, identity conflict guidance, Phase 6 output validation.
 #
 # Source from start.sh (or a unit-test harness). Requires PROJECT_DIR.
@@ -142,29 +142,24 @@ _heal_stale_lock() {
     return 0
 }
 
-_import_minio_buckets() {
-    local stack_dir
-    stack_dir=$(_tofu_stack_dir "infra")
-    warn "MinIO buckets exist but are missing from state — importing"
-    # || true per-import: an actually-missing bucket must not abort the heal.
-    "$TOFU_BIN" -chdir="$stack_dir" import -input=false -var-file="$INFRA_VAR_FILE" \
-        minio_s3_bucket.documents_raw documents-raw 2>&1 | tee -a "$LAST_TOFU_LOG" || true
-    "$TOFU_BIN" -chdir="$stack_dir" import -input=false -var-file="$INFRA_VAR_FILE" \
-        minio_s3_bucket.documents_processed documents-processed 2>&1 | tee -a "$LAST_TOFU_LOG" || true
-    "$TOFU_BIN" -chdir="$stack_dir" import -input=false -var-file="$INFRA_VAR_FILE" \
-        minio_s3_bucket.models models 2>&1 | tee -a "$LAST_TOFU_LOG" || true
-}
+# The infra stack used to manage MinIO buckets through the aminueza/minio provider.
+# Local state written before that was removed still lists minio_s3_bucket entries,
+# and apply would try to destroy them through a provider that is no longer
+# configured. Forget them once — state-only, no infrastructure is touched.
+# (`removed` blocks do not help: OpenTofu still configures the provider for them.)
+forget_retired_minio_state() {
+    local state="$PROJECT_DIR/terraform/stacks/infra/terraform.tfstate"
+    [ -f "$state" ] || return 0
+    grep -q '"minio_s3_bucket"' "$state" || return 0
 
-_fail_minio_heal() {
-    echo "" >&2
-    echo "  ✗ MinIO buckets exist but remain missing from state after import retry." >&2
-    echo "    Manual imports:" >&2
-    echo "      tofu -chdir=terraform/stacks/infra import -input=false -var-file=\"../../environments/dev.infra.tfvars\" minio_s3_bucket.documents_raw documents-raw" >&2
-    echo "      tofu -chdir=terraform/stacks/infra import -input=false -var-file=\"../../environments/dev.infra.tfvars\" minio_s3_bucket.documents_processed documents-processed" >&2
-    echo "      tofu -chdir=terraform/stacks/infra import -input=false -var-file=\"../../environments/dev.infra.tfvars\" minio_s3_bucket.models models" >&2
-    echo "    Destructive reset: ./scripts/cleanup.sh --data   # wipes all data volumes" >&2
-    echo "    Log: ${LAST_TOFU_LOG:-<none>}" >&2
-    fail "MinIO conflict auto-heal failed (see commands above)"
+    local stack_dir addrs
+    stack_dir=$(_tofu_stack_dir "infra")
+    log "Forgetting retired MinIO bucket entries in infra state..."
+    "$TOFU_BIN" -chdir="$stack_dir" init -input=false > /dev/null || return 1
+    addrs=$("$TOFU_BIN" -chdir="$stack_dir" state list | grep '^minio_s3_bucket\.' || true)
+    [ -n "$addrs" ] || return 0
+    # shellcheck disable=SC2086 # one address per word
+    "$TOFU_BIN" -chdir="$stack_dir" state rm $addrs > /dev/null
 }
 
 _fail_identity_conflict() {
@@ -214,15 +209,6 @@ run_tofu() {
         # Retry failed or lock file wasn't there — fall through.
     fi
 
-    if [ "$stack" = "infra" ] && _log_matches "already own it|BucketAlreadyOwnedByYou|already exists"; then
-        _import_minio_buckets
-        if _tofu_apply "$stack_dir" "$@"; then
-            return 0
-        fi
-        _print_tofu_tail
-        _fail_minio_heal
-    fi
-
     if [ "$stack" = "identity" ] && _log_matches "already exists|AlreadyExists|Errors\..*AlreadyExists"; then
         _print_tofu_tail
         _fail_identity_conflict
@@ -263,14 +249,12 @@ write_volume_fingerprint() {
     local fp
     fp=$(volume_fingerprint_path)
     mkdir -p "$(dirname "$fp")"
-    {
-        echo "minio-data=$(volume_created_at "${project}_minio-data")"
-        echo "qdrant-data=$(volume_created_at "${project}_qdrant-data")"
-    } > "$fp"
+    echo "qdrant-data=$(volume_created_at "${project}_qdrant-data")" > "$fp"
 }
 
-# BEFORE infra apply: if tfstate + fingerprint exist and volumes were
-# recreated (or are missing), clear stale infra state. If tfstate exists
+# BEFORE infra apply: if tfstate + fingerprint exist and the Qdrant volume was
+# recreated (or is missing), clear stale infra state (the stack only manages
+# Qdrant collections). If tfstate exists
 # but fingerprint does not (first run after this feature), leave state.
 check_volume_fingerprint() {
     local state="$PROJECT_DIR/terraform/stacks/infra/terraform.tfstate"
@@ -279,18 +263,16 @@ check_volume_fingerprint() {
     [ -f "$state" ] || return 0
     [ -f "$fp" ] || return 0
 
-    local project rec_minio rec_qdrant cur_minio cur_qdrant
+    local project rec_qdrant cur_qdrant
     project=$(compose_project_name)
-    rec_minio=$(grep '^minio-data=' "$fp" 2>/dev/null | head -1 | cut -d= -f2- || true)
     rec_qdrant=$(grep '^qdrant-data=' "$fp" 2>/dev/null | head -1 | cut -d= -f2- || true)
-    cur_minio=$(volume_created_at "${project}_minio-data")
     cur_qdrant=$(volume_created_at "${project}_qdrant-data")
 
-    if [ "$cur_minio" = "$rec_minio" ] && [ "$cur_qdrant" = "$rec_qdrant" ]; then
+    if [ "$cur_qdrant" = "$rec_qdrant" ]; then
         return 0
     fi
 
-    log "Backing volumes were recreated since last apply — clearing stale infra state"
+    log "Qdrant volume was recreated since last apply — clearing stale infra state"
     rm -f "$state" "${state}.backup" "$fp"
 }
 
