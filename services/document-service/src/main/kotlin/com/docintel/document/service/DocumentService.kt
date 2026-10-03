@@ -89,7 +89,7 @@ class DocumentService(
      * Dedup semantics on content_hash collision:
      *  - COMPLETED  → return existing (second value = true = deduplicated)
      *  - PROCESSING → return in-flight record (deduplicated)
-     *  - FAILED     → re-upload (idempotent MinIO PUT) + return freshly saved record
+     *  - FAILED     → re-upload (idempotent object-store PUT) + return freshly saved record
      *  - PENDING    → return existing (sweeper will re-trigger)
      */
     @Transactional
@@ -123,7 +123,7 @@ class DocumentService(
             }
         }
 
-        // MinIO PUT is idempotent for content-addressable paths.
+        // Object-store PUT is idempotent for content-addressable keys.
         val filePath = storageService.storeFile(file, tenantId, contentHash)
         val safeFilename = java.nio.file.Paths.get(file.originalFilename ?: "unknown").fileName.toString()
 
@@ -167,7 +167,7 @@ class DocumentService(
     }
 
     /**
-     * Register a document that already exists in MinIO at the content-addressable path.
+     * Register a document that already exists in the object store at its content-addressable key.
      *
      * Called internally by data-loader after it has uploaded file bytes. The document_id
      * is derived from content_hash (same algorithm as uploadDocument) so dedup is automatic.
@@ -202,7 +202,7 @@ class DocumentService(
             filename = request.filename,
             contentType = request.contentType,
             fileSize = request.fileSize,
-            filePath = request.minioPath,
+            filePath = request.objectPath,
             status = ProcessingStatus.PENDING,
             metadata = request.metadata,
             contentHash = request.contentHash,
@@ -235,7 +235,7 @@ class DocumentService(
                 DocumentReadyEvent(
                     documentId = documentId.toString(),
                     tenantId   = tenantId,
-                    bucket     = "docintel-$tenantId",
+                    bucket     = StorageService.bucketFor(tenantId),
                     objectPath = doc.filePath,
                     filename   = doc.filename,
                     domainHint = if (domainHint.isBlank()) "auto" else domainHint,
@@ -342,7 +342,7 @@ class DocumentService(
      * Mark a document for async deletion.
      *
      * Atomically sets status=DELETING and inserts a [DeletionTask] outbox record.
-     * [DeletionTaskWorker] will asynchronously clean up Qdrant vectors, MinIO files,
+     * [DeletionTaskWorker] will asynchronously clean up Qdrant vectors, object-store files,
      * and finally the PG rows. Returns false if the document does not exist.
      */
     @Transactional
@@ -364,7 +364,7 @@ class DocumentService(
 
     /**
      * Directly delete document records from PG (called by [DeletionTaskWorker] after
-     * Qdrant + MinIO have been cleaned up). Each repository call has its own
+     * Qdrant + the object store have been cleaned up). Each repository call has its own
      * [Transactional] and is idempotent — safe to retry.
      */
     fun deleteDocumentRecords(id: UUID, tenantId: String) {
@@ -386,7 +386,7 @@ class DocumentService(
      * Optimistically drops the entire Qdrant collection (fast path). Then marks each
      * document DELETING and inserts a [DeletionTask] with [DeletionTask.qdrantDone]
      * set based on whether the Qdrant collection drop succeeded.
-     * [DeletionTaskWorker] then handles per-document MinIO cleanup and PG removal.
+     * [DeletionTaskWorker] then handles per-document object-store cleanup and PG removal.
      */
     suspend fun deleteAllDocuments(tenantId: String): Int {
         val qdrantDone = try {

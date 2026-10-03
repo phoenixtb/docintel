@@ -11,7 +11,7 @@ enum class ProcessingStatus {
     PROCESSING,
     COMPLETED,
     FAILED,
-    /** Document is queued for async cleanup (Qdrant + MinIO). Hidden from user-facing queries. */
+    /** Document is queued for async cleanup (Qdrant + object store). Hidden from user-facing queries. */
     DELETING
 }
 

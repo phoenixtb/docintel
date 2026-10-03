@@ -54,13 +54,13 @@ data class ProcessingResult(
 )
 
 /**
- * Request to register a document that already exists in MinIO.
- * Used by data-loader after it has uploaded file bytes to the content-addressable path.
+ * Request to register a document that already exists in the object store.
+ * Used by data-loader after it has uploaded file bytes to the content-addressable key.
  *
- * Path convention: {tenant_id}/docs/{content_hash}/original.{ext}
+ * [objectPath] is the key inside the tenant bucket: docs/{content_hash}/original.{ext}
  */
 data class FromPathRequest(
-    val minioPath: String,
+    val objectPath: String,
     val contentHash: String,
     val filename: String,
     val fileSize: Long = 0,

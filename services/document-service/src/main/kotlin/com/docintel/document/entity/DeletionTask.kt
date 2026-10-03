@@ -16,7 +16,7 @@ enum class DeletionTaskStatus { PENDING, DONE, DEAD, CANCELLED }
  *
  * The document row is set to [ProcessingStatus.DELETING] and hidden from user
  * queries atomically with this row being inserted. [DeletionTaskWorker] polls
- * PENDING tasks and drives Qdrant + MinIO cleanup, then removes the document
+ * PENDING tasks and drives Qdrant + object-store cleanup, then removes the document
  * row and marks this task DONE.
  *
  * Failure semantics: each failed attempt increments [attempts] and records
@@ -41,8 +41,8 @@ data class DeletionTask(
     @Column(name = "qdrant_done", nullable = false)
     var qdrantDone: Boolean = false,
 
-    @Column(name = "minio_done", nullable = false)
-    var minioDone: Boolean = false,
+    @Column(name = "object_store_done", nullable = false)
+    var objectStoreDone: Boolean = false,
 
     @Column(name = "attempts", nullable = false)
     var attempts: Int = 0,

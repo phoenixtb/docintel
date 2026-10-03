@@ -4,11 +4,20 @@ import com.docintel.document.BaseIntegrationTest
 import com.docintel.document.entity.ProcessingStatus
 import com.docintel.document.repository.ChunkRepository
 import com.docintel.document.repository.DataSourceRepository
+import com.docintel.document.repository.DeletionTaskRepository
+import com.docintel.document.dto.CleanupFiltersRequest
+import com.docintel.document.dto.CleanupJobStatus
+import com.docintel.document.entity.DeletionTaskStatus
+import com.docintel.document.service.cleanup.CleanupJob
+import com.docintel.document.service.cleanup.CleanupJobRegistry
+import org.springframework.data.domain.PageRequest
+import kotlin.test.assertTrue
 import com.docintel.document.repository.DocumentRepository
 import com.docintel.document.service.*
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.ninjasquad.springmockk.MockkBean
 import io.mockk.coEvery
+import io.mockk.coVerify
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -22,11 +31,11 @@ import java.util.UUID
 
 /**
  * Integration tests for DocumentController.
- * Uses Testcontainers for PostgreSQL and MinIO (started in BaseIntegrationTest).
+ * Uses Testcontainers for PostgreSQL and the S3 object store (started in BaseIntegrationTest).
  *
  * - Controller reads the tenant from the X-Tenant-Id *header* (@RequestHeader), not a query param.
- * - deleteDocument is a suspend fun so it returns a DeferredResult; MockMvc requires
- *   an asyncDispatch round-trip to get the actual HTTP status.
+ * - DELETE /{id} is synchronous: it marks the document DELETING and queues a DeletionTask
+ *   (202); DeletionTaskWorker does the actual cleanup.
  */
 @AutoConfigureMockMvc(addFilters = false)
 class DocumentControllerTest : BaseIntegrationTest() {
@@ -36,6 +45,8 @@ class DocumentControllerTest : BaseIntegrationTest() {
     @Autowired private lateinit var documentRepository: DocumentRepository
     @Autowired private lateinit var chunkRepository: ChunkRepository
     @Autowired private lateinit var dataSourceRepository: DataSourceRepository
+    @Autowired private lateinit var deletionTaskRepository: DeletionTaskRepository
+    @Autowired private lateinit var cleanupJobRegistry: CleanupJobRegistry
 
     @MockkBean private lateinit var vectorStoreClient: VectorStoreClient
     @MockkBean(relaxed = true) private lateinit var documentStreamPublisher: com.docintel.document.messaging.DocumentStreamPublisher
@@ -180,58 +191,46 @@ class DocumentControllerTest : BaseIntegrationTest() {
     // ─── Delete ───────────────────────────────────────────────────────────────
 
     @Test
-    fun `DELETE should remove document and return 204`() {
+    fun `DELETE queues deletion, returns 202 and marks the document DELETING`() {
         val docId = uploadTestDocument()
 
-        // deleteDocument is suspend → DeferredResult → needs asyncDispatch
-        val asyncResult = mockMvc.perform(
+        mockMvc.perform(
             delete("/internal/documents/$docId")
                 .header("X-Tenant-Id", testTenantId)
         )
-            .andExpect(request().asyncStarted())
-            .andReturn()
+            .andExpect(status().isAccepted)
 
-        mockMvc.perform(asyncDispatch(asyncResult))
-            .andExpect(status().isNoContent)
-
-        // Verify document is gone
+        // DeletionTaskWorker removes vectors, blobs and the row asynchronously.
         mockMvc.perform(
             get("/internal/documents/$docId")
                 .header("X-Tenant-Id", testTenantId)
         )
-            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.status").value("DELETING"))
+        val tasks = deletionTaskRepository.findByTaskStatus(DeletionTaskStatus.PENDING, PageRequest.of(0, 100))
+        assertTrue(tasks.any { it.documentId == docId && !it.objectStoreDone && !it.qdrantDone })
     }
 
     @Test
     fun `DELETE should return 404 for non-existent document`() {
-        val asyncResult = mockMvc.perform(
+        mockMvc.perform(
             delete("/internal/documents/${UUID.randomUUID()}")
                 .header("X-Tenant-Id", testTenantId)
         )
-            .andExpect(request().asyncStarted())
-            .andReturn()
-
-        mockMvc.perform(asyncDispatch(asyncResult))
             .andExpect(status().isNotFound)
     }
 
     @Test
-    fun `DELETE should return 503 when vector store is unavailable`() {
+    fun `DELETE is accepted even when the vector store is down because cleanup is asynchronous`() {
         val docId = uploadTestDocument("vector-fail-doc.txt")
-
         coEvery { vectorStoreClient.deleteDocumentVectors(any(), any()) } returns false
 
-        val asyncResult = mockMvc.perform(
+        mockMvc.perform(
             delete("/internal/documents/$docId")
                 .header("X-Tenant-Id", testTenantId)
         )
-            .andExpect(request().asyncStarted())
-            .andReturn()
+            .andExpect(status().isAccepted)
 
-        mockMvc.perform(asyncDispatch(asyncResult))
-            .andExpect(status().isServiceUnavailable)
-            .andExpect(jsonPath("$.error").value("Vector store unavailable"))
-
+        coVerify(exactly = 0) { vectorStoreClient.deleteDocumentVectors(any(), any()) }
         coEvery { vectorStoreClient.deleteDocumentVectors(any(), any()) } returns true
     }
 
@@ -270,7 +269,7 @@ class DocumentControllerTest : BaseIntegrationTest() {
     fun `POST from-path should register new document and return 201`() {
         val contentHash = "1".repeat(64)
         val body = mapOf(
-            "minioPath"   to "docs/$contentHash/original.txt",
+            "objectPath"  to "docs/$contentHash/original.txt",
             "contentHash" to contentHash,
             "filename"    to "stream-doc.txt",
             "fileSize"    to 512,
@@ -294,7 +293,7 @@ class DocumentControllerTest : BaseIntegrationTest() {
     fun `POST from-path second call with same hash returns 200 deduplicated=true`() {
         val contentHash = "2".repeat(64)
         val body = mapOf(
-            "minioPath"   to "docs/$contentHash/original.txt",
+            "objectPath"  to "docs/$contentHash/original.txt",
             "contentHash" to contentHash,
             "filename"    to "dedup-doc.txt",
             "fileSize"    to 256
@@ -322,7 +321,7 @@ class DocumentControllerTest : BaseIntegrationTest() {
     fun `POST from-path isolates tenants — same hash different tenant returns 201`() {
         val contentHash = "3".repeat(64)
         val body = mapOf(
-            "minioPath"   to "docs/$contentHash/original.txt",
+            "objectPath"  to "docs/$contentHash/original.txt",
             "contentHash" to contentHash,
             "filename"    to "shared.txt",
             "fileSize"    to 100
@@ -519,19 +518,20 @@ class DocumentControllerTest : BaseIntegrationTest() {
 
     @Test
     fun `POST cleanup jobs returns 409 when another job is active`() {
-        mockMvc.perform(
-            post("/internal/documents/cleanup/jobs")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{}")
-                .header("X-Tenant-Id", testTenantId)
-        ).andExpect(status().isAccepted)
-
-        mockMvc.perform(
-            post("/internal/documents/cleanup/jobs")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{}")
-                .header("X-Tenant-Id", testTenantId)
-        ).andExpect(status().isConflict)
+        // Register the active job directly: a real job on an empty tenant can finish before
+        // the second request arrives, which made this assertion racy.
+        val active = CleanupJob(jobId = UUID.randomUUID(), tenantId = testTenantId, filters = CleanupFiltersRequest())
+        check(cleanupJobRegistry.tryRegister(active)) { "another cleanup job is already active" }
+        try {
+            mockMvc.perform(
+                post("/internal/documents/cleanup/jobs")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{}")
+                    .header("X-Tenant-Id", testTenantId)
+            ).andExpect(status().isConflict)
+        } finally {
+            active.status.set(CleanupJobStatus.CANCELLED)
+        }
     }
 
     @Test

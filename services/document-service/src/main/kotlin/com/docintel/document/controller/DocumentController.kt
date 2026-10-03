@@ -45,7 +45,7 @@ class DocumentController(
     /**
      * Upload a new document (browser multipart upload path).
      *
-     * Computes content hash → dedup check → stores to MinIO at content-addressable path
+     * Computes content hash → dedup check → stores to the object store at its content-addressable key
      * → triggers async ingestion. Deduplicated documents return 200 (already exists),
      * new documents return 201.
      */
@@ -79,10 +79,10 @@ class DocumentController(
     }
 
     /**
-     * Register a document that already exists in MinIO (data-loader path).
+     * Register a document that already exists in the object store (data-loader path).
      *
      * Called by data-loader after it has uploaded file bytes to the content-addressable
-     * MinIO path. Performs dedup check → creates DB record → triggers async ingestion.
+     * object key. Performs dedup check → creates DB record → triggers async ingestion.
      *
      * Returns 200 for deduplicated documents, 201 for new ones.
      */

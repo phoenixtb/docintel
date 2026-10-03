@@ -21,10 +21,10 @@ import kotlin.math.pow
 
 /**
  * Polls [DeletionTask] outbox records and drives async cleanup of Qdrant vectors and
- * MinIO files for documents that have been marked [ProcessingStatus.DELETING].
+ * object-store files for documents that have been marked [ProcessingStatus.DELETING].
  *
  * Each task tracks per-store completion flags ([DeletionTask.qdrantDone],
- * [DeletionTask.minioDone]) so partial failures are retried cheaply. Once both
+ * [DeletionTask.objectStoreDone]) so partial failures are retried cheaply. Once both
  * stores are clean the document and chunk rows are removed from PG and the task is
  * marked [DeletionTaskStatus.DONE].
  *
@@ -120,16 +120,16 @@ class DeletionTaskWorker(
                 }
             }
 
-            if (!task.minioDone) {
+            if (!task.objectStoreDone) {
                 try {
                     storageService.deleteDocumentFiles(task.tenantId, task.filePath)
-                    task.minioDone = true
+                    task.objectStoreDone = true
                 } catch (e: Exception) {
-                    logger.warn("Task {}: MinIO delete failed for document {}: {}", task.id, task.documentId, e.message)
+                    logger.warn("Task {}: object-store delete failed for document {}: {}", task.id, task.documentId, e.message)
                 }
             }
 
-            if (task.qdrantDone && task.minioDone) {
+            if (task.qdrantDone && task.objectStoreDone) {
                 completeTask(task)
             } else {
                 recordAttempt(task)
@@ -162,8 +162,8 @@ class DeletionTaskWorker(
         if (task.attempts >= MAX_ATTEMPTS) {
             task.taskStatus = DeletionTaskStatus.DEAD
             logger.error(
-                "DeletionTaskWorker: task {} DEAD after {} attempts — document={} tenant={} qdrantDone={} minioDone={}",
-                task.id, task.attempts, task.documentId, task.tenantId, task.qdrantDone, task.minioDone
+                "DeletionTaskWorker: task {} DEAD after {} attempts — document={} tenant={} qdrantDone={} objectStoreDone={}",
+                task.id, task.attempts, task.documentId, task.tenantId, task.qdrantDone, task.objectStoreDone
             )
         }
         deletionTaskRepository.save(task)

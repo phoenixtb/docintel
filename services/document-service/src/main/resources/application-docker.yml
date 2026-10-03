@@ -24,8 +24,8 @@ messaging:
     enabled: true
     consumer-name: document-service-1
 
-minio:
-  endpoint: ${MINIO_ENDPOINT:http://minio:9000}
+object-store:
+  endpoint: ${OBJECT_STORE_ENDPOINT:http://object-store:7070}
 
 rag-service:
   url: ${RAG_SERVICE_URL:http://rag-service:8000}

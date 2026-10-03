@@ -1,9 +1,6 @@
 package com.docintel.admin.service
 
-import io.minio.BucketExistsArgs
-import io.minio.MakeBucketArgs
-import io.minio.MinioClient
-import io.minio.RemoveBucketArgs
+import com.docintel.admin.config.ObjectStoreProperties
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.client.SimpleClientHttpRequestFactory
@@ -12,14 +9,20 @@ import org.springframework.web.client.RestTemplate
 import org.springframework.http.HttpEntity
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
+import software.amazon.awssdk.core.exception.SdkException
+import software.amazon.awssdk.services.s3.S3Client
+import software.amazon.awssdk.services.s3.model.BucketAlreadyOwnedByYouException
+import software.amazon.awssdk.services.s3.model.NoSuchBucketException
+import software.amazon.awssdk.services.s3.model.S3Exception
 
 /**
- * Provisions and deprovisions per-tenant Qdrant collections and MinIO buckets.
+ * Provisions and deprovisions per-tenant Qdrant collections and object-store buckets.
  * Called by TenantManagementService on tenant create/delete.
  */
 @Service
 class ProvisioningService(
-    private val minioClient: MinioClient,
+    private val s3: S3Client,
+    private val objectStore: ObjectStoreProperties,
     @Value("\${qdrant.url:http://localhost:6333}") private val qdrantUrl: String,
     @Value("\${qdrant.embedding-dim:768}") private val embeddingDim: Int,
 ) {
@@ -76,29 +79,51 @@ class ProvisioningService(
     }
 
     // -------------------------------------------------------------------------
-    // MinIO
+    // Object store (S3-compatible)
     // -------------------------------------------------------------------------
 
-    fun createMinioBucket(tenantId: String) {
-        val bucket = "docintel-$tenantId"
+    /**
+     * Best-effort: document-service creates the bucket on first upload anyway, so a failure
+     * here must not fail tenant creation.
+     */
+    fun createTenantBucket(tenantId: String) {
+        val bucket = tenantBucket(tenantId)
         try {
-            val exists = minioClient.bucketExists(BucketExistsArgs.builder().bucket(bucket).build())
-            if (!exists) {
-                minioClient.makeBucket(MakeBucketArgs.builder().bucket(bucket).build())
-                log.info("Created MinIO bucket: {}", bucket)
+            s3.createBucket { req ->
+                req.bucket(bucket)
+                if (objectStore.region != "us-east-1") {
+                    req.createBucketConfiguration { it.locationConstraint(objectStore.region) }
+                }
             }
-        } catch (e: Exception) {
-            log.warn("Could not create MinIO bucket {}: {}", bucket, e.message)
+            log.info("Created bucket {}", bucket)
+        } catch (e: BucketAlreadyOwnedByYouException) {
+            log.debug("Bucket {} already exists", bucket)
+        } catch (e: SdkException) {
+            log.warn("Could not create bucket {}: {}", bucket, e.message)
         }
     }
 
-    fun deleteMinioBucket(tenantId: String) {
-        val bucket = "docintel-$tenantId"
+    /**
+     * Remove the tenant bucket. S3 refuses to delete a non-empty bucket; that case is logged
+     * and left for an operator (documents are deleted asynchronously by document-service).
+     */
+    fun deleteTenantBucket(tenantId: String) {
+        val bucket = tenantBucket(tenantId)
         try {
-            minioClient.removeBucket(RemoveBucketArgs.builder().bucket(bucket).build())
-            log.info("Deleted MinIO bucket: {}", bucket)
-        } catch (e: Exception) {
-            log.warn("Could not delete MinIO bucket {} (may have objects): {}", bucket, e.message)
+            s3.deleteBucket { it.bucket(bucket) }
+            log.info("Deleted bucket {}", bucket)
+        } catch (e: NoSuchBucketException) {
+            log.debug("Bucket {} already absent", bucket)
+        } catch (e: S3Exception) {
+            if (e.awsErrorDetails()?.errorCode() == "BucketNotEmpty") {
+                log.warn("Bucket {} not deleted: it still contains objects", bucket)
+            } else {
+                log.warn("Could not delete bucket {}: {}", bucket, e.message)
+            }
+        } catch (e: SdkException) {
+            log.warn("Could not delete bucket {}: {}", bucket, e.message)
         }
     }
+
+    private fun tenantBucket(tenantId: String) = "docintel-$tenantId"
 }
