@@ -2,7 +2,7 @@
 Ingestion Service — FastAPI application.
 
 Endpoints:
-  POST /ingest                — trigger async ingestion of a document from MinIO
+  POST /ingest                — trigger async ingestion of a document from the object store
   DELETE /vectors/{tid}/{did} — delete document vectors from Qdrant
   DELETE /vectors/{tid}       — delete all tenant vectors from Qdrant
   GET /health
@@ -36,7 +36,7 @@ from docintel_common.security import CLASSIFICATION_ORDER, Classification, Docum
 from docintel_common.tracing import TraceContext, configure_trace_logging
 from docintel_common.errors import install_error_handlers
 
-from ..adapters import MinIOAdapter
+from ..adapters import ObjectStoreAdapter, default_object_store
 from ..config import get_settings
 from ..stream_worker import run_stream_worker
 from ..document_client import ChunkPayload, DocumentServiceClient
@@ -83,6 +83,8 @@ async def lifespan(app: FastAPI):
             _job_registry.evict_expired()
 
     settings = get_settings()
+    # Fail the boot, not the first document, on missing/invalid OBJECT_STORE_*.
+    default_object_store()
     eviction_task = asyncio.create_task(_eviction_loop())
     stream_task: asyncio.Task | None = None
     if settings.stream_consumer_enabled:
@@ -234,12 +236,12 @@ async def _ingest_document_background(
 ) -> None:
     """
     Full ingestion pipeline executed in a background task:
-      1. Download from MinIO
+      1. Download from the object store
       2. DoclingConverter → BM25 + Ollama embed → Qdrant write
       3. Persist chunks to PG
       4. Update document status in PG
     """
-    adapter = MinIOAdapter()
+    adapter = ObjectStoreAdapter(default_object_store())
     tmp_paths: list[Path] = []
 
     try:

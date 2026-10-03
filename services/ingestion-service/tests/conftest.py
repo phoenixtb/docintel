@@ -16,6 +16,11 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 # Prevent auth check from failing due to missing secret in tests.
 os.environ.setdefault("INTERNAL_GATEWAY_SECRET", "test-secret-for-unit-tests")
 
+# The lifespan builds the object store; constructing the client does not connect.
+os.environ.setdefault("OBJECT_STORE_ENDPOINT", "http://localhost:7070")
+os.environ.setdefault("OBJECT_STORE_ACCESS_KEY", "test-access")
+os.environ.setdefault("OBJECT_STORE_SECRET_KEY", "test-secret")
+
 from src.job_registry import JobRegistry
 
 

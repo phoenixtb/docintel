@@ -7,10 +7,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # --- MinIO ---
-    minio_url: str = Field(default="http://minio:9000", alias="MINIO_URL")
-    minio_access_key: str = Field(default="minioadmin", alias="MINIO_ACCESS_KEY")
-    minio_secret_key: str = Field(default="minioadmin", alias="MINIO_SECRET_KEY")
+    # Object storage is configured by OBJECT_STORE_* and read by
+    # docintel_common.object_store.ObjectStoreConfig.from_env().
 
     # --- Document service ---
     document_service_url: str = Field(

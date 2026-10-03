@@ -25,16 +25,15 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from minio.error import S3Error
-
 from docintel_common.messaging import (
     RedisStreamBus,
     TOPIC_DOCUMENTS_READY,
     TOPIC_INGESTION_COMPLETE,
 )
+from docintel_common.object_store import ObjectNotFoundError
 from docintel_common.security import DocumentACL
 
-from .adapters import MinIOAdapter
+from .adapters import ObjectStoreAdapter, default_object_store
 from .config import Settings
 from .document_client import ChunkPayload, DocumentServiceClient
 from .pipeline import run_ingestion
@@ -184,7 +183,7 @@ async def _handle_message(
         await bus.ack(TOPIC_DOCUMENTS_READY, _CONSUMER_GROUP, msg_id)
         return
 
-    adapter    = MinIOAdapter()
+    adapter    = ObjectStoreAdapter(default_object_store())
     tmp_paths: list[Path] = []
 
     try:
@@ -194,17 +193,16 @@ async def _handle_message(
                 "object_path": object_path,
                 "filename":    filename,
             })
-        except S3Error as s3e:
-            if s3e.code == "NoSuchKey":
-                logger.warning(
-                    "File not found in MinIO (terminal): document_id=%s bucket=%s path=%s — acking and skipping",
-                    document_id, bucket, object_path,
-                )
-                await _publish_complete(bus, document_id, tenant_id, 0, "general", "FAILED",
-                                        f"Source file missing from object store: {object_path}")
-                await bus.ack(TOPIC_DOCUMENTS_READY, _CONSUMER_GROUP, msg_id)
-                return
-            raise
+        except ObjectNotFoundError:
+            # Missing bucket or key: redelivery would see the same answer, so ack now.
+            logger.warning(
+                "Source object missing (terminal): document_id=%s bucket=%s path=%s — acking and skipping",
+                document_id, bucket, object_path,
+            )
+            await _publish_complete(bus, document_id, tenant_id, 0, "general", "FAILED",
+                                    f"Source file missing from object store: {object_path}")
+            await bus.ack(TOPIC_DOCUMENTS_READY, _CONSUMER_GROUP, msg_id)
+            return
 
         loop   = asyncio.get_running_loop()
         result = await loop.run_in_executor(

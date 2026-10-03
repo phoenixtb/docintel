@@ -8,7 +8,7 @@ class SourceAdapter(ABC):
     """
     Base class for all document source adapters.
 
-    Each adapter fetches documents from its source (MinIO, HuggingFace, raw text)
+    Each adapter fetches documents from its source (object store, HuggingFace, raw text)
     and materialises them as local temp files that DoclingConverter can process.
     The Haystack pipeline is source-agnostic: it only sees file paths.
     """
@@ -29,5 +29,5 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     def source_type(self) -> str:
-        """Return a short identifier for the source type (e.g. 'minio', 'hf', 'text')."""
+        """Return a short identifier for the source type (e.g. 's3', 'hf', 'text')."""
         ...

@@ -16,7 +16,7 @@ def test_importing_messaging_does_not_load_heavy_submodules():
     script = (
         "import sys\n"
         "from docintel_common.messaging import RedisStreamBus, TOPIC_ANALYTICS_QUERY\n"
-        "heavy = [m for m in ('torch', 'transformers', 'psycopg2') if m in sys.modules]\n"
+        "heavy = [m for m in ('torch', 'transformers', 'psycopg2', 'boto3') if m in sys.modules]\n"
         "print(','.join(heavy))\n"
     )
     result = subprocess.run(

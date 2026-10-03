@@ -14,9 +14,10 @@ from fastapi.testclient import TestClient
 # Prevent real Redis connections during import / lifespan
 os.environ.setdefault("REDIS_HOST", "localhost")
 os.environ.setdefault("REDIS_PORT", "6379")
-os.environ.setdefault("MINIO_ENDPOINT", "http://localhost:9000")
-os.environ.setdefault("MINIO_ACCESS_KEY", "minioadmin")
-os.environ.setdefault("MINIO_SECRET_KEY", "minioadmin")
+# The lifespan builds an ObjectStore; constructing the client does not connect.
+os.environ.setdefault("OBJECT_STORE_ENDPOINT", "http://localhost:7070")
+os.environ.setdefault("OBJECT_STORE_ACCESS_KEY", "test-access")
+os.environ.setdefault("OBJECT_STORE_SECRET_KEY", "test-secret")
 
 
 @pytest.fixture(scope="module")

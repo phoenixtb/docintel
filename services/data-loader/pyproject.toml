@@ -7,9 +7,9 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 
 dependencies = [
-    # Shared DocIntel library — only internal_auth (HMAC service tokens) and
-    # tracing are used; no [ml]/[db] extras needed.
-    "docintel-common",
+    # Shared DocIntel library — internal_auth (HMAC service tokens), tracing,
+    # and [s3] for the object-store adapter. No [ml]/[db] extras needed.
+    "docintel-common[s3]",
 
     # Web Framework
     "fastapi>=0.115.0",
@@ -17,9 +17,6 @@ dependencies = [
     "pydantic>=2.10.0",
     "pydantic-settings>=2.0.0",
     "httpx>=0.27.0",
-
-    # MinIO (content-addressable file upload)
-    "minio>=7.2.0",
 
     # HuggingFace dataset loading
     "datasets>=3.2.0",
