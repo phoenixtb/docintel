@@ -117,6 +117,8 @@ jobs:
     name: Kotlin Services
     runs-on: ubuntu-latest
     strategy:
+      # One service's failure must not cancel (and hide) the others' results.
+      fail-fast: false
       matrix:
         service: [api-gateway, document-service, admin-service]
 
