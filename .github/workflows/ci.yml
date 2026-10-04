@@ -100,6 +100,29 @@ jobs:
         run: uv run pytest tests/ -v
 
   # ===========================================================================
+  # Python lockfiles — images install exactly uv.lock (--locked), so a lock
+  # that drifted from its pyproject.toml would fail the image build later
+  # ===========================================================================
+  python-locks:
+    name: Python lockfiles current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.22"
+
+      - name: Check every uv.lock
+        run: |
+          for project in lib/docintel-common services/rag-service services/ingestion-service \
+                         services/data-loader services/analytics-service-py; do
+            echo "== $project"
+            (cd "$project" && uv lock --check)
+          done
+
+  # ===========================================================================
   # Object-store image pin — compose and every test container use one tag
   # ===========================================================================
   object-store-pin:

@@ -1,8 +1,9 @@
 # Pinned versions
 
 The versions the repository builds and runs with today. Changing one is its own PR, except where a
-PR introduces the dependency. Python services pin through `uv.lock` and the web UI through
-`package-lock.json`; this table lists the anchors.
+PR introduces the dependency. Python images install exactly what each service's `uv.lock` pins
+([ADR-0002](adr/0002-python-images-from-lockfiles.md)), apart from the hardware-specific torch
+family. The web UI pins through `package-lock.json`. This table lists the anchors.
 
 ## Languages and build
 
@@ -13,6 +14,8 @@ PR introduces the dependency. Python services pin through `uv.lock` and the web 
 | Gradle wrapper | 8.11.1 | `services/*/gradle/wrapper/gradle-wrapper.properties` |
 | Python | ≥ 3.11 (images `python:3.11-slim`); ingestion-service < 3.13 | `pyproject.toml`, Dockerfiles |
 | Node (web UI build) | 22 (`node:22-alpine`) | `services/web-ui/Dockerfile` |
+| uv | 0.12.22 | Python Dockerfiles (`ghcr.io/astral-sh/uv:0.12.22`), CI `python-locks` |
+| torch (images) | 2.11.0 (`TORCH_VERSION`, CPU by default) | Python Dockerfiles; locks pin 2.12.1, which is not used in images |
 
 Gradle 8.11.1 does not start on JDK 25 or newer: run `./gradlew` with a JDK 21 `JAVA_HOME`.
 

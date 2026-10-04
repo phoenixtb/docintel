@@ -223,6 +223,13 @@ Trigger: `DELETE /internal/documents/{id}`, which returns 202.
 - Set `OBJECT_STORE_FORCE_PATH_STYLE=false` only if the provider rejects path style.
 - The `object-store` service can then be removed from the deployment's compose chain.
 
+**Add or upgrade a Python dependency:**
+1. Edit `pyproject.toml` in the service, or use `uv lock --upgrade-package <name>`.
+2. Run `uv lock` there and commit `uv.lock`.
+3. Rebuild the image.
+
+A stale lock fails the image build (`uv export --locked`) and the CI job `python-locks`.
+
 **Write an integration test that needs S3:** start `versity/versitygw:<pinned tag>` with
 `--port :7070 --health /health --quiet posix /tmp`, then wait for HTTP 200 on `/health`:
 - Kotlin: `BaseIntegrationTest`;
@@ -249,6 +256,7 @@ Use the tag from compose; CI fails otherwise.
 | Decision | Record |
 |---|---|
 | S3 API as the storage contract; VersityGW bundled; vendor names out of contracts | [ADR-0001](../adr/0001-object-storage-versitygw.md) |
+| Python images install exactly `uv.lock`; torch family from the hardware index | [ADR-0002](../adr/0002-python-images-from-lockfiles.md) |
 
 Open decisions:
 - **Upload transaction.** `DocumentService.uploadDocument` is `@Transactional` and performs the
@@ -266,6 +274,13 @@ Open decisions:
 
 ## 9. Gotchas and runbook
 
+- **Images ignore `pyproject.toml` ranges.**
+  - What a Python image contains is exactly `uv.lock`, so a dependency added without `uv lock`
+    fails the build.
+  - torch is the exception: it comes from `TORCH_INDEX`/`TORCH_VERSION`, and `uv pip check`
+    guards compatibility.
+  - Before ADR-0002, images re-resolved at build time. SQLAlchemy 2.1, whose `postgresql://` now
+    means psycopg v3, broke rag-service conversations on any fresh build.
 - **Gradle needs JDK 21.** Gradle 8.11.1 fails on JDK 25+ with a bare version string as the error.
   Set `JAVA_HOME` to a 21 JDK before `./gradlew`.
 - **Testcontainers ≥ 1.21.4 (Java).** Older versions speak Docker API 1.32, which Docker Engine 29
@@ -310,3 +325,5 @@ Runbook:
     `minio_done` → `object_store_done`.
   - Langfuse bucket bootstrap; xattr-preserving backups.
   - Docs bootstrap: ADR folder, contracts, versions, this file.
+  - rag-service pins its Postgres driver to psycopg2. Python images now build from `uv.lock`
+    (ADR-0002), with CI `python-locks`.
