@@ -230,6 +230,11 @@ Trigger: `DELETE /internal/documents/{id}`, which returns 202.
 
 A stale lock fails the image build (`uv export --locked`) and the CI job `python-locks`.
 
+**Add an interactive menu to a script:** source `scripts/lib/menu.sh` and call
+`menu_select <var> <title> KEYS LABELS [preselect] [--cancel]` or
+`menu_multiselect <array> <title> KEYS LABELS`. Do not hand-roll key loops. Add a pty case to
+`tests/scripts/test_menus.py`.
+
 **Write an integration test that needs S3:** start `versity/versitygw:<pinned tag>` with
 `--port :7070 --health /health --quiet posix /tmp`, then wait for HTTP 200 on `/health`:
 - Kotlin: `BaseIntegrationTest`;
@@ -250,6 +255,8 @@ Use the tag from compose; CI fails otherwise.
 | Missing source object is terminal; outages are retried | `test_missing_source_object_fails_document_and_acks_without_retry`, `test_object_store_outage_fails_document_but_leaves_message_for_redelivery` |
 | `files.available` carries `objectPath` end to end | `test_publishes_object_path_of_the_uploaded_file`; `StreamConsumerTest` "FilesAvailableConsumer should carry the data-loader objectPath …" |
 | Retired MinIO entries are dropped from OpenTofu state, nothing else | `tests/scripts/test_start_helpers_minio_state.bats` |
+| Menus survive ↑/↓/Esc at both ends on bash 3.2 and 5, cancel with q/Esc, restore the terminal; docintel.sh returns to its menu after in-process actions | `tests/scripts/test_menus.py` |
+| "Clear logs" recreates only running app services, with the full compose chain | `test_logs_clear_recreates_only_running_app_services_with_the_full_compose_chain` |
 
 ## 8. Decisions index
 
@@ -282,7 +289,15 @@ Open decisions:
   - Before ADR-0002, images re-resolved at build time. SQLAlchemy 2.1, whose `postgresql://` now
     means psycopg v3, broke rag-service conversations on any fresh build.
 - **Gradle needs JDK 21.** Gradle 8.11.1 fails on JDK 25+ with a bare version string as the error.
-  Set `JAVA_HOME` to a 21 JDK before `./gradlew`.
+  Set `JAVA_HOME` to a 21 JDK before `./gradlew`; `scripts/test.sh` finds one itself (JAVA_HOME,
+  `java_home -v 21`, `/usr/lib/jvm`, sdkman, Gradle-provisioned JDKs).
+- **`set -e` and shell arithmetic.** `((x++))` returns status 1 when `x` was 0, and
+  `[[ … ]] && cmd` returns 1 when the test is false. As the last command of a list, either kills a
+  `set -e` script on bash 5; bash 3.2 (macOS) often does not, which hid the menu crash on macOS.
+  Use `x=$((x + 1))` and `if`.
+- **Container recreation needs the compose chain.** A bare `docker compose up` drops the GPU and
+  `DOCINTEL_DATA_DIR` overlays, and the `PROFILE_TAG` image tags. Recreate through
+  `compose_file_chain` + `torch_vars_for_profile`, as `scripts/logs.sh` (`load_compose_env`) does.
 - **Testcontainers ≥ 1.21.4 (Java).** Older versions speak Docker API 1.32, which Docker Engine 29
   rejects ("client version 1.32 is too old"), so every container test fails.
 - **VersityGW data directory.** Every top-level directory under its root is served as a bucket.
@@ -327,3 +342,12 @@ Runbook:
   - Docs bootstrap: ADR folder, contracts, versions, this file.
   - rag-service pins its Postgres driver to psycopg2. Python images now build from `uv.lock`
     (ADR-0002), with CI `python-locks`.
+- **PR-02 (2026-10-05):**
+  - One shared menu library (`scripts/lib/menu.sh`) for docintel.sh, logs.sh, test.sh and
+    build.sh, fixing crashes on ↓/Esc under bash 5.
+  - docintel.sh returns to its menu after in-process actions, and sub-pickers can be cancelled.
+  - logs.sh "Clear logs" keeps the compose chain.
+  - test.sh reports per-suite results, finds a JDK 21 and covers every service.
+  - Seed Data uses data-loader.
+  - start.sh finds `lmforge` in `~/.local/bin`.
+  - New CI job `scripts`.

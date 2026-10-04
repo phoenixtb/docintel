@@ -123,6 +123,27 @@ jobs:
           done
 
   # ===========================================================================
+  # Operational scripts — menus driven in a real pty on bash 5 (where the
+  # `set -e` + `((x++))` crash showed), plus the start-helper bats tests
+  # ===========================================================================
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.22"
+
+      - name: Menu tests (pty)
+        run: uv run --no-project --with pytest pytest -v tests/scripts/test_menus.py
+
+      - name: Start-helper tests (bats)
+        run: npx --yes bats@1.12.0 tests/scripts/test_start_helpers_minio_state.bats
+
+  # ===========================================================================
   # Object-store image pin — compose and every test container use one tag
   # ===========================================================================
   object-store-pin:
