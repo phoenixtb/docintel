@@ -311,7 +311,7 @@ class DocumentServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // MinIO cleanup on ingestion trigger failure
+    // Object-store cleanup on ingestion trigger failure
     // -------------------------------------------------------------------------
 
     @Test
@@ -336,7 +336,7 @@ class DocumentServiceTest {
     fun `registerFromPath should create new document record for unknown hash`() {
         val hash = "a".repeat(64)
         val request = FromPathRequest(
-            minioPath = "docs/$hash/original.txt",
+            objectPath = "docs/$hash/original.txt",
             contentHash = hash,
             filename = "test.txt",
             fileSize = 100L,
@@ -363,7 +363,7 @@ class DocumentServiceTest {
         every { documentRepository.findByIdAndTenantId(expectedId, testTenantId) } returns existing
 
         val request = FromPathRequest(
-            minioPath = "docs/$hash/original.txt",
+            objectPath = "docs/$hash/original.txt",
             contentHash = hash,
             filename = "dedup.txt",
             fileSize = 200L
@@ -386,7 +386,7 @@ class DocumentServiceTest {
         every { documentRepository.save(any()) } answers { firstArg() }
 
         val request = FromPathRequest(
-            minioPath = "docs/$hash/original.txt",
+            objectPath = "docs/$hash/original.txt",
             contentHash = hash,
             filename = "retry.txt",
             fileSize = 300L

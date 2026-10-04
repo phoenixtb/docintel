@@ -53,7 +53,7 @@ async def test_publish_file_available_returns_message_id(publisher):
     await pub.ensure_consumer_group()
 
     payload = {
-        "minioPath": "docs/abc/original.txt",
+        "objectPath": "docs/abc/original.txt",
         "contentHash": "a" * 64,
         "tenantId": "test-tenant",
         "filename": "test.txt",
@@ -74,7 +74,7 @@ async def test_publish_file_available_message_is_readable(publisher):
     await pub.ensure_consumer_group()
 
     payload = {
-        "minioPath": "docs/def/original.txt",
+        "objectPath": "docs/def/original.txt",
         "contentHash": "b" * 64,
         "tenantId": "readable-tenant",
         "filename": "readable.txt",
@@ -103,7 +103,7 @@ async def test_publish_multiple_messages_are_ordered(publisher):
     for i in range(3):
         await pub.publish_file_available(
             {
-                "minioPath": f"docs/{i}/original.txt",
+                "objectPath": f"docs/{i}/original.txt",
                 "contentHash": str(i) * 64,
                 "tenantId": "order-tenant",
                 "filename": f"doc_{i}.txt",

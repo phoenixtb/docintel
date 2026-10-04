@@ -14,7 +14,7 @@
 - System health checking (Qdrant, PostgreSQL, Redis, Ollama)
 - System and tenant usage statistics
 - Semantic cache management (Qdrant `response_cache` collection)
-- Qdrant collection and MinIO bucket provisioning
+- Qdrant collection and object-store bucket provisioning
 
 ---
 
@@ -121,7 +121,7 @@ HTTP client (`WebClient`) to Zitadel API with 10s response timeout.
 ### `ProvisioningService`
 
 - `ensureQdrantCollection()`: Creates Qdrant collection if it doesn't exist (REST API call).
-- `ensureMinIOBucket()`: Creates per-tenant MinIO bucket if missing.
+- `createTenantBucket()` / `deleteTenantBucket()`: best-effort create/delete of `docintel-{tenantId}` via the S3 API. `BucketAlreadyOwnedByYou`, `NoSuchBucket` and `BucketNotEmpty` are handled by name; nothing fails tenant create/delete.
 - Uses `RestTemplate` with 5s connect / 10s read timeout.
 
 ### `HealthService`
@@ -156,7 +156,7 @@ Input validation via `jakarta.validation` (`@NotBlank`, `@Size`, `@Pattern`). Co
 | `service/ZitadelService.kt` | Zitadel API client (WebClient, 10s timeout) |
 | `service/StatsService.kt` | Usage and system statistics |
 | `service/CacheService.kt` | Qdrant cache management + hit rate from query_log |
-| `service/ProvisioningService.kt` | Qdrant / MinIO provisioning |
+| `service/ProvisioningService.kt` | Qdrant / object-store bucket provisioning |
 | `service/HealthService.kt` | Component health checks |
 | `tenant/TenantContextFilter.kt` | Reads X-* headers, populates TenantContextHolder |
 | `tenant/TenantAwareDataSource.kt` | Sets PostgreSQL session variables for RLS |
@@ -183,9 +183,10 @@ Input validation via `jakarta.validation` (`@NotBlank`, `@Size`, `@Pattern`). Co
 | `SPRING_DATASOURCE_URL` | `jdbc:postgresql://postgres:5432/docintel?user=docintel_app&password=docintel_app_secret` | PostgreSQL (as `docintel_app`, RLS enforced) |
 | `ZITADEL_URL` | `http://zitadel-server:9000` | Zitadel base URL |
 | `ZITADEL_TOKEN` | _(required)_ | Zitadel API token |
-| `MINIO_ENDPOINT` | `http://minio:9000` | MinIO URL |
-| `MINIO_ACCESS_KEY` | `minioadmin` | MinIO access key |
-| `MINIO_SECRET_KEY` | `minioadmin` | MinIO secret key |
+| `OBJECT_STORE_ENDPOINT` | `http://object-store:7070` | S3 endpoint (any S3-compatible server) |
+| `OBJECT_STORE_REGION` | `us-east-1` | Signing region |
+| `OBJECT_STORE_ACCESS_KEY` | — (required) | S3 credentials |
+| `OBJECT_STORE_SECRET_KEY` | — (required) | S3 credentials |
 | `QDRANT_URL` | `http://qdrant:6333` | Qdrant URL |
 | `REDIS_HOST` | `redis` | Redis host |
 | `REDIS_PORT` | `6379` | Redis port |

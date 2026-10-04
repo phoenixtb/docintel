@@ -59,7 +59,7 @@ class StreamPublisher:
 
         Payload keys mirror FilesAvailableEvent (camelCase, matching Jackson
         defaults in the Kotlin document-service consumer):
-          minioPath, contentHash, tenantId, filename, contentType,
+          objectPath, contentHash, tenantId, filename, contentType,
           fileSize, dataSourceId, domainHint, metadata
         """
         msg_id: str = await self._redis.xadd(

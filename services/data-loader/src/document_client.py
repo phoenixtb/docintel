@@ -41,7 +41,7 @@ def _headers(tenant_id: str) -> dict[str, str]:
 async def register_from_path(
     *,
     tenant_id: str,
-    minio_path: str,
+    object_path: str,
     content_hash: str,
     filename: str,
     file_size: int,
@@ -54,7 +54,7 @@ async def register_from_path(
     url = f"{cfg.document_service_url}/internal/documents/from-path"
 
     payload: dict = {
-        "minioPath": minio_path,
+        "objectPath": object_path,
         "contentHash": content_hash,
         "filename": filename,
         "fileSize": file_size,

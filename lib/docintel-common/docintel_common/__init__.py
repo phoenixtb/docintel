@@ -51,6 +51,14 @@ if TYPE_CHECKING:
         UserContext,
         clearance_permits,
     )
+    from .object_store import (
+        ObjectNotFoundError,
+        ObjectStore,
+        ObjectStoreConfig,
+        ObjectStoreConfigError,
+        ObjectStoreError,
+        tenant_bucket,
+    )
     from .model_profile_resolver import (
         BUILTIN_PROFILES,
         ModelProfileResolver,
@@ -91,6 +99,13 @@ __all__ = [
     "DocumentACL",
     "UserContext",
     "RetrievalAuditEvent",
+    # object storage (requires the [s3] extra)
+    "ObjectNotFoundError",
+    "ObjectStore",
+    "ObjectStoreConfig",
+    "ObjectStoreConfigError",
+    "ObjectStoreError",
+    "tenant_bucket",
     # model profile resolver
     "BUILTIN_PROFILES",
     "ModelProfileResolver",
@@ -126,6 +141,12 @@ _ATTR_TO_SUBMODULE = {
     "RetrievalAuditEvent": "security",
     "UserContext": "security",
     "clearance_permits": "security",
+    "ObjectNotFoundError": "object_store",
+    "ObjectStore": "object_store",
+    "ObjectStoreConfig": "object_store",
+    "ObjectStoreConfigError": "object_store",
+    "ObjectStoreError": "object_store",
+    "tenant_bucket": "object_store",
     "BUILTIN_PROFILES": "model_profile_resolver",
     "ModelProfileResolver": "model_profile_resolver",
     "ModelSamplingParams": "model_profile_resolver",

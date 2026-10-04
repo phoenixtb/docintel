@@ -8,12 +8,13 @@ import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.ContextConfiguration
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.PostgreSQLContainer
+import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.utility.DockerImageName
 
 @Suppress("UNCHECKED_CAST")
 
 /**
- * Base class for integration tests that require Testcontainers (PostgreSQL, MinIO).
+ * Base class for integration tests that require Testcontainers (PostgreSQL, VersityGW S3, Redis).
  *
  * Containers are started eagerly in the companion object init block (class-load time),
  * then wired into the Spring Environment via [Initializer] — which runs before any
@@ -35,29 +36,32 @@ abstract class BaseIntegrationTest {
         override fun initialize(ctx: ConfigurableApplicationContext) {
             val username = postgres.username
             val password = postgres.password
-            val minioEndpoint = "http://${minio.host}:${minio.getMappedPort(9000)}"
+            val objectStoreEndpoint = "http://${objectStore.host}:${objectStore.getMappedPort(7070)}"
             val redisHost = redis.host
             val redisPort = redis.getMappedPort(6379)
 
             // Embed credentials in the JDBC URL so the PostgreSQL driver reads them
             // directly regardless of how HikariCP builds its connection Properties.
-            val jdbcUrl = postgres.jdbcUrl
-                .replace("?", "?user=$username&password=$password&")
+            // Appended (not prepended): TenantDataSourceConfig.flyway() strips
+            // [?&]user=/password= and would otherwise swallow the '?' before the
+            // container's own parameters (loggerLevel=OFF).
+            val jdbcUrl = postgres.jdbcUrl +
+                (if ('?' in postgres.jdbcUrl) "&" else "?") + "user=$username&password=$password"
 
             System.setProperty("spring.datasource.url", jdbcUrl)
             System.setProperty("spring.datasource.username", username)
             System.setProperty("spring.datasource.password", password)
             System.setProperty("spring.datasource.driver-class-name", "org.postgresql.Driver")
-            System.setProperty("minio.endpoint", minioEndpoint)
+            System.setProperty("object-store.endpoint", objectStoreEndpoint)
 
             TestPropertyValues.of(
                 "spring.datasource.url=$jdbcUrl",
                 "spring.datasource.username=$username",
                 "spring.datasource.password=$password",
                 "spring.datasource.driver-class-name=org.postgresql.Driver",
-                "minio.endpoint=$minioEndpoint",
-                "minio.access-key=minioadmin",
-                "minio.secret-key=minioadmin",
+                "object-store.endpoint=$objectStoreEndpoint",
+                "object-store.access-key=$OBJECT_STORE_ACCESS_KEY",
+                "object-store.secret-key=$OBJECT_STORE_SECRET_KEY",
                 "spring.data.redis.host=$redisHost",
                 "spring.data.redis.port=$redisPort",
             ).applyTo(ctx.environment)
@@ -70,13 +74,20 @@ abstract class BaseIntegrationTest {
                 .withDatabaseName("testdb")
                 .withUsername("test")
                 .withPassword("test")
+                .withInitScript("db/test-roles.sql")
 
-        val minio: GenericContainer<*> =
-            GenericContainer(DockerImageName.parse("minio/minio:RELEASE.2024-01-16T16-07-38Z"))
-                .withExposedPorts(9000)
-                .withEnv("MINIO_ROOT_USER", "minioadmin")
-                .withEnv("MINIO_ROOT_PASSWORD", "minioadmin")
-                .withCommand("server /data")
+        const val OBJECT_STORE_ACCESS_KEY = "test-access"
+        const val OBJECT_STORE_SECRET_KEY = "test-secret-key"
+
+        // Keep in sync with the object-store service in docker-compose.yml
+        // (enforced by scripts/check-object-store-pin.sh).
+        val objectStore: GenericContainer<*> =
+            GenericContainer(DockerImageName.parse("versity/versitygw:v1.8.0"))
+                .withExposedPorts(7070)
+                .withEnv("ROOT_ACCESS_KEY", OBJECT_STORE_ACCESS_KEY)
+                .withEnv("ROOT_SECRET_KEY", OBJECT_STORE_SECRET_KEY)
+                .withCommand("--port", ":7070", "--health", "/health", "--quiet", "posix", "/tmp")
+                .waitingFor(Wait.forHttp("/health").forPort(7070).forStatusCode(200))
 
         val redis: GenericContainer<*> =
             GenericContainer(DockerImageName.parse("redis:7.4.0-alpine"))
@@ -84,7 +95,7 @@ abstract class BaseIntegrationTest {
 
         init {
             postgres.start()
-            minio.start()
+            objectStore.start()
             redis.start()
         }
     }

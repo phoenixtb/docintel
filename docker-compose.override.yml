@@ -13,14 +13,18 @@ services:
   #   environment:
   #     - DEBUG=true
 
-  # MinIO host ports remapped to 19000/19001 to avoid conflict with OrbStack's
-  # internal services which occupy 9000 (cslistener) and 9001 (etlservicemgr).
-  # All DocIntel services connect via internal Docker network (minio:9000).
-  # Dev tooling (backup.sh, mc client, MinIO Console) uses 19000/19001 from the host.
-  minio:
+  # Object store dev ports: S3 API on 19000, WebUI (bucket/object browser) on 19001.
+  # 1900x avoids OrbStack's 9000/9001. Services use object-store:7070 internally.
+  # The WebUI runs in the browser, so it must call the S3 API via the host port.
+  object-store:
     ports:
-      - "19000:9000"
-      - "19001:9001"
+      - "19000:7070"
+      - "19001:7071"
+    environment:
+      VGW_WEBUI_PORT: ":7071"
+      VGW_WEBUI_NO_TLS: "true"
+      VGW_WEBUI_GATEWAYS: "http://localhost:19000"
+      VGW_CORS_ALLOW_ORIGIN: "http://localhost:19001"
 
   # Expose ingestion-service for seed-data.sh and local dev tooling.
   # Bound to 0.0.0.0 (not 127.0.0.1) — explicit loopback bindings trigger a

@@ -35,7 +35,7 @@ Web UI (SvelteKit) ──► API Gateway (Spring Cloud, JWT + OPA RBAC)
  Document Svc   RAG Service     Ingestion Svc   Admin Svc
  (Kotlin/JPA)   (FastAPI/       (FastAPI/       (Kotlin)
      │           Haystack)       Docling)           │
-   MinIO        Qdrant + OPA    Redis Streams   Zitadel (SSO)
+   S3 store     Qdrant + OPA    Redis Streams   Zitadel (SSO)
                 LMForge (LLM/embed/rerank — local inference)
 ```
 

@@ -7,7 +7,7 @@ from typing import Iterator
 
 @dataclass
 class LoadedFile:
-    """A single file loaded from a source, ready to be uploaded to MinIO."""
+    """A single file loaded from a source, ready to be uploaded to the object store."""
     content: bytes
     filename: str
     metadata: dict = field(default_factory=dict)
@@ -18,7 +18,7 @@ class SourceAdapter(ABC):
     Base class for all document source adapters.
 
     Each adapter fetches documents from its source and yields LoadedFile objects.
-    The caller is responsible for hashing content, uploading to MinIO, and
+    The caller is responsible for hashing content, uploading to the object store, and
     registering with document-service.
     """
 
@@ -33,7 +33,7 @@ class SourceAdapter(ABC):
                        enforced by content hash scoping in document-service).
 
         Yields:
-            LoadedFile instances ready for MinIO upload.
+            LoadedFile instances ready for object-store upload.
         """
         ...
 

@@ -2,6 +2,7 @@ package com.docintel.document.messaging
 
 import com.docintel.document.dto.FromPathRequest
 import com.docintel.document.service.DocumentService
+import com.docintel.document.service.StorageService
 import com.docintel.document.sse.DocumentStatusEvent
 import com.docintel.document.tenant.TenantContext
 import com.docintel.document.tenant.TenantContextHolder
@@ -17,7 +18,7 @@ import java.util.UUID
 /**
  * Consumes the [StreamTopics.FILES_AVAILABLE] stream.
  *
- * Produced by the data-loader service after a file is uploaded to MinIO.
+ * Produced by the data-loader service after a file is uploaded to the object store.
  * For each message:
  *   1. Register the document record via [DocumentService.registerFromPath]
  *      (dedup-safe — returns existing if content_hash already known).
@@ -62,7 +63,7 @@ class FilesAvailableConsumer(
             TenantContextHolder.set(TenantContext(tenantId = event.tenantId, userRole = "tenant_user", userId = ""))
             val request = FromPathRequest(
                 contentHash  = event.contentHash,
-                minioPath    = event.minioPath,
+                objectPath   = event.objectPath,
                 filename     = event.filename,
                 contentType  = event.contentType,
                 fileSize     = event.fileSize,
@@ -84,8 +85,8 @@ class FilesAvailableConsumer(
                     DocumentReadyEvent(
                         documentId = doc.id.toString(),
                         tenantId   = event.tenantId,
-                        bucket     = "docintel-${event.tenantId}",
-                        objectPath = event.minioPath,
+                        bucket     = StorageService.bucketFor(event.tenantId),
+                        objectPath = event.objectPath,
                         filename   = event.filename,
                         domainHint = event.domainHint,
                         metadata   = event.metadata

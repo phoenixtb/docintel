@@ -13,7 +13,7 @@ ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
 ARG TORCH_VERSION=2.11.0+cpu
 
 # Pull uv binary — 10-100x faster than pip
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.22 /uv /usr/local/bin/uv
 
 RUN apt-get update && apt-get install -y \
     curl \
@@ -34,22 +34,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url https://pypi.org/simple \
         "torch==${TORCH_VERSION}"
 
-# ── Layer 1b: local common lib (not on PyPI) ─────────────────────────────────
-COPY lib/docintel-common/ /app/lib/docintel-common/
+# ── Layer 2: locked service deps (reruns only when pyproject.toml / uv.lock change) ─
+# Versions come from uv.lock, never from a fresh resolve — see
+# scripts/docker/install-locked-deps.sh. The lib's pyproject.toml is enough for
+# uv to validate the path dependency recorded in the lock.
+COPY scripts/docker/install-locked-deps.sh /usr/local/bin/install-locked-deps
+COPY services/rag-service/pyproject.toml services/rag-service/uv.lock /build/services/rag-service/
+COPY lib/docintel-common/pyproject.toml /build/lib/docintel-common/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system /app/lib/docintel-common/
+    install-locked-deps /build/services/rag-service
 
-# ── Layer 2: service deps (only reruns when pyproject.toml changes) ───────────
-# Cache mount = persistent host-side package cache across builds (like ~/.gradle).
-# uv downloads each package once; subsequent builds — even after pyproject.toml
-# changes — pull from the local cache, not from PyPI.
-# Stub src/__init__.py lets uv resolve deps from pyproject.toml without real source.
-# --no-sources tells uv to ignore [tool.uv.sources] path overrides (docintel-common
-# is already installed above so the resolver finds it satisfied).
-COPY services/rag-service/pyproject.toml services/rag-service/README.md ./
-RUN mkdir -p src && touch src/__init__.py
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-sources .
+# ── Layer 2b: local common lib (its own deps are already pinned above) ─────────
+COPY lib/docintel-common/ /app/lib/docintel-common/
+RUN uv pip install --system --no-deps /app/lib/docintel-common/ \
+    && uv pip check --system
 
 # ── Layer 3: actual source (changes here don't bust dep layers above) ─────────
 COPY services/rag-service/src/ ./src/

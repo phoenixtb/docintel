@@ -36,8 +36,13 @@ dependencies {
     // WebClient for Authentik API calls
     implementation("org.springframework.boot:spring-boot-starter-webflux")
 
-    // MinIO (for per-tenant bucket provisioning)
-    implementation("io.minio:minio:8.5.14")
+    // S3-compatible object store (per-tenant bucket provisioning)
+    implementation(platform("software.amazon.awssdk:bom:2.55.11"))
+    implementation("software.amazon.awssdk:s3") {
+        // Sync client only — the async Netty transport is never used.
+        exclude(group = "software.amazon.awssdk", module = "netty-nio-client")
+    }
+    implementation("software.amazon.awssdk:apache-client")
 
     // OpenAPI spec generation (exported + merged into docs/api/openapi.json — see scripts/generate-openapi.sh)
     implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.9")
@@ -55,9 +60,9 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     
     // Testcontainers
-    testImplementation("org.testcontainers:testcontainers:1.20.4")
-    testImplementation("org.testcontainers:junit-jupiter:1.20.4")
-    testImplementation("org.testcontainers:postgresql:1.20.4")
+    testImplementation("org.testcontainers:testcontainers:1.21.4")
+    testImplementation("org.testcontainers:junit-jupiter:1.21.4")
+    testImplementation("org.testcontainers:postgresql:1.21.4")
     
     // MockK for Kotlin mocking
     testImplementation("io.mockk:mockk:1.13.13")

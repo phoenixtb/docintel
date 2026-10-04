@@ -45,7 +45,9 @@ class StreamConsumerTest {
     fun setUp() {
         every { redisTemplate.opsForStream<String, String>() } returns streamOps
         every { streamOps.acknowledge(any(), any(), any<RecordId>()) } returns 1L
-        every { eventPublisher.publishEvent(any()) } just Runs
+        // any<Any>(): DocumentStatusEvent is not an ApplicationEvent, so it goes through
+        // the publishEvent(Object) overload; plain any() binds to publishEvent(ApplicationEvent).
+        every { eventPublisher.publishEvent(any<Any>()) } just Runs
 
         filesConsumer = FilesAvailableConsumer(
             documentService = documentService,
@@ -69,7 +71,7 @@ class StreamConsumerTest {
     fun `FilesAvailableConsumer should register new document and publish DocumentReady`() {
         val docId = UUID.randomUUID()
         val event = FilesAvailableEvent(
-            minioPath    = "docs/abc/original.txt",
+            objectPath   = "docs/abc/original.txt",
             contentHash  = "a".repeat(64),
             tenantId     = "test-tenant",
             filename     = "test.txt",
@@ -89,11 +91,44 @@ class StreamConsumerTest {
         verify { streamOps.acknowledge(StreamTopics.FILES_AVAILABLE, FilesAvailableConsumer.CONSUMER_GROUP, any<RecordId>()) }
     }
 
+    /** Byte-for-byte the shape data-loader publishes (services/data-loader/src/api/main.py). */
+    private val dataLoaderPayload = """
+        {"objectPath": "docs/abc/original.txt", "contentHash": "${"a".repeat(64)}",
+         "tenantId": "alpha", "filename": "hr-1.txt", "contentType": "text/plain",
+         "fileSize": 12, "dataSourceId": "${UUID.randomUUID()}", "domainHint": "hr_policy",
+         "metadata": {"source_dataset": "hr_policies"}}
+    """.trimIndent()
+
+    @Test
+    fun `FilesAvailableConsumer should carry the data-loader objectPath into registration and DocumentReady`() {
+        val request = slot<FromPathRequest>()
+        val ready = slot<DocumentReadyEvent>()
+        every { documentService.registerFromPath(capture(request), any()) } returns Pair(docResponse(UUID.randomUUID()), false)
+        every { streamPublisher.publishDocumentReady(capture(ready)) } returns mockk()
+
+        filesConsumer.onMessage(mockRawMessage(StreamTopics.FILES_AVAILABLE, dataLoaderPayload))
+
+        assertEquals("docs/abc/original.txt", request.captured.objectPath)
+        assertEquals("docs/abc/original.txt", ready.captured.objectPath)
+        assertEquals("docintel-alpha", ready.captured.bucket)
+        assertEquals("hr_policy", ready.captured.domainHint)
+    }
+
+    @Test
+    fun `FilesAvailableConsumer should ack and skip a payload still using the retired minioPath field`() {
+        val legacy = dataLoaderPayload.replace("\"objectPath\"", "\"minioPath\"")
+
+        filesConsumer.onMessage(mockRawMessage(StreamTopics.FILES_AVAILABLE, legacy))
+
+        verify(exactly = 0) { documentService.registerFromPath(any(), any()) }
+        verify { streamOps.acknowledge(StreamTopics.FILES_AVAILABLE, FilesAvailableConsumer.CONSUMER_GROUP, any<RecordId>()) }
+    }
+
     @Test
     fun `FilesAvailableConsumer should skip publishDocumentReady on dedup hit`() {
         val docId = UUID.randomUUID()
         val event = FilesAvailableEvent(
-            minioPath   = "docs/dup/original.txt",
+            objectPath   = "docs/dup/original.txt",
             contentHash = "b".repeat(64),
             tenantId    = "tenant-x",
             filename    = "dup.txt"
@@ -133,7 +168,7 @@ class StreamConsumerTest {
     @Test
     fun `FilesAvailableConsumer should NOT ack when registerFromPath throws`() {
         val event = FilesAvailableEvent(
-            minioPath   = "docs/err/original.txt",
+            objectPath   = "docs/err/original.txt",
             contentHash = "c".repeat(64),
             tenantId    = "tenant-err",
             filename    = "err.txt"

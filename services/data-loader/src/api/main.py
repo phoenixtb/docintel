@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from docintel_common.tracing import TraceContext, configure_trace_logging
 from docintel_common.errors import install_error_handlers
+from docintel_common.object_store import ObjectStore
 
 from ..adapters import HuggingFaceAdapter, LoadedFile
 from ..config import get_settings
@@ -32,7 +33,7 @@ from ..document_client import (
     fail_data_source,
 )
 from ..job_registry import JobRegistry
-from ..minio_client import compute_content_hash, upload_file
+from ..storage import compute_content_hash, upload_file
 from ..stream_publisher import StreamPublisher
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,9 @@ _job_registry = JobRegistry()
 async def lifespan(app: FastAPI):
     logger.info("Data loader service starting up")
     app.state.job_registry = _job_registry
+    # Built at startup so missing/invalid OBJECT_STORE_* settings fail the boot,
+    # not the first dataset load.
+    app.state.object_store = ObjectStore.from_env()
 
     settings = get_settings()
     publisher = StreamPublisher(
@@ -198,11 +202,12 @@ async def _load_dataset_background(
     registry: JobRegistry,
     job_id: str,
     publisher: "StreamPublisher",
+    store: ObjectStore,
 ) -> int:
     """
     Per-dataset load pipeline (async bus path):
       1. HuggingFaceAdapter.fetch() → LoadedFile iterator (sync, run in executor)
-      2. For each file: compute SHA-256 → upload to MinIO → publish to files.available stream
+      2. For each file: compute SHA-256 → upload to the object store → publish to files.available
       3. Emit SSE progress events after each published file
       4. Return published_count
     """
@@ -225,9 +230,10 @@ async def _load_dataset_background(
         content_hash = compute_content_hash(tenant_id, loaded_file.content)
 
         try:
-            minio_path = await loop.run_in_executor(
+            object_path = await loop.run_in_executor(
                 None,
                 lambda lf=loaded_file, ch=content_hash: upload_file(
+                    store,
                     tenant_id=tenant_id,
                     content_hash=ch,
                     content=lf.content,
@@ -237,14 +243,14 @@ async def _load_dataset_background(
             )
         except Exception as e:
             logger.warning(
-                "MinIO upload failed for %s (dataset=%s): %s — skipping",
+                "Object-store upload failed for %s (dataset=%s): %s — skipping",
                 loaded_file.filename, dataset_key, e,
             )
             continue
 
         try:
             await publisher.publish_file_available({
-                "minioPath":    minio_path,
+                "objectPath":   object_path,
                 "contentHash":  content_hash,
                 "tenantId":     tenant_id,
                 "filename":     loaded_file.filename,
@@ -279,11 +285,12 @@ async def _run_bulk_load(
     registry: JobRegistry,
     job_id: str,
     publisher: "StreamPublisher",
+    store: ObjectStore,
 ) -> None:
     """
     Background worker: sequentially load each dataset.
 
-    Files are uploaded to MinIO and published to the files.available stream.
+    Files are uploaded to the object store and published to the files.available stream.
     document-service consumes the stream asynchronously, so there is no
     synchronous dedup result here. The data source document_count reflects
     the number of files published (not final registered count after dedup).
@@ -311,6 +318,7 @@ async def _run_bulk_load(
                 registry=registry,
                 job_id=job_id,
                 publisher=publisher,
+                store=store,
             )
             total_published += published
 
@@ -400,6 +408,7 @@ async def start_dataset_load(
         registry,
         job_id,
         publisher,
+        http_request.app.state.object_store,
     )
 
     return DatasetLoadResponse(

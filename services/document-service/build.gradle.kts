@@ -35,8 +35,13 @@ dependencies {
     // Redis Streams message bus
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
     
-    // MinIO (S3-compatible storage)
-    implementation("io.minio:minio:8.5.14")
+    // S3-compatible object storage (VersityGW locally; any S3 in production)
+    implementation(platform("software.amazon.awssdk:bom:2.55.11"))
+    implementation("software.amazon.awssdk:s3") {
+        // Sync client only — the async Netty transport is never used.
+        exclude(group = "software.amazon.awssdk", module = "netty-nio-client")
+    }
+    implementation("software.amazon.awssdk:apache-client")
     
     // Kotlin
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
@@ -59,10 +64,9 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     
     // Testcontainers
-    testImplementation("org.testcontainers:testcontainers:1.20.4")
-    testImplementation("org.testcontainers:junit-jupiter:1.20.4")
-    testImplementation("org.testcontainers:postgresql:1.20.4")
-    testImplementation("org.testcontainers:minio:1.20.4")
+    testImplementation("org.testcontainers:testcontainers:1.21.4")
+    testImplementation("org.testcontainers:junit-jupiter:1.21.4")
+    testImplementation("org.testcontainers:postgresql:1.21.4")
     
     // MockK for Kotlin mocking
     testImplementation("io.mockk:mockk:1.13.13")

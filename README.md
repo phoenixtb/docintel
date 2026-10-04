@@ -35,7 +35,7 @@ A production-grade document Q&A system demonstrating enterprise RAG patterns.
         │                     │                     │
         ▼                     ▼                     ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  PostgreSQL  │  Qdrant  │  Redis  │  MinIO  │  Ollama  │ Langfuse│
+│  PostgreSQL  │  Qdrant  │  Redis  │ S3 store │ Ollama  │ Langfuse│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -59,7 +59,7 @@ cd docintel
 
 This will:
 1. Check that Ollama is installed and running
-2. Start infrastructure services (Qdrant, PostgreSQL, Redis, MinIO, Langfuse)
+2. Start infrastructure services (Qdrant, PostgreSQL, Redis, object store, Langfuse)
 3. Initialize Qdrant collections
 4. Pull required models (~8-10GB)
 
@@ -89,7 +89,7 @@ Starts infrastructure, Zitadel, and all application services. Authentication is 
 | Web UI | http://localhost:3001 | demo-admin | DocIntel@123 |
 | Zitadel Admin | http://localhost:9090 | akadmin | DocIntel@123 |
 | Langfuse | http://localhost:3000 | admin@docintel.local | admin123 |
-| MinIO Console | http://localhost:9001 | minioadmin | minioadmin |
+| Object store WebUI | http://localhost:19001 | `OBJECT_STORE_ACCESS_KEY` (.env) | `OBJECT_STORE_SECRET_KEY` (.env) |
 
 **Demo users** (password: `DocIntel@123`):
 - `demo-admin` / `demo-user` — tenant: default
@@ -265,7 +265,7 @@ docintel/
 | Vector DB | Qdrant | Apache 2.0 |
 | Database | PostgreSQL 18 | PostgreSQL License |
 | Cache | Redis | BSD |
-| Object Storage | MinIO | AGPL / Commercial |
+| Object Storage | Any S3-compatible store; VersityGW locally ([ADR-0001](docs/adr/0001-object-storage-versitygw.md)) | Apache 2.0 |
 | Observability | Langfuse + ClickHouse | MIT |
 
 ## Service URLs
@@ -277,7 +277,8 @@ docintel/
 | Zitadel | http://localhost:9090 | Identity provider |
 | Langfuse | http://localhost:3000 | Observability UI |
 | Qdrant | http://localhost:6333 | Vector DB dashboard |
-| MinIO Console | http://localhost:9001 | Object storage UI |
+| Object store (S3 API) | http://localhost:19000 | S3 endpoint for dev tooling |
+| Object store WebUI | http://localhost:19001 | Bucket / object browser |
 | PostgreSQL | localhost:5432 | Database |
 | Redis | localhost:6379 | Cache |
 
@@ -291,6 +292,8 @@ docintel/
 
 ## Documentation
 
+- [Maintainer mental model](docs/dev/MENTAL-MODEL.md) — how the system fits together, flows, recipes, runbook
+- [Architecture decisions](docs/adr/) · [Contracts](docs/contracts/) · [Pinned versions](docs/versions.md)
 - [Project Specification](docs/part2b-project-spec.md)
 - [API Documentation](docs/api-docs.md)
 - [Architecture Guide](docs/architecture.md)

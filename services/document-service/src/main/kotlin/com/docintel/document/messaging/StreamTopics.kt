@@ -13,9 +13,9 @@ object StreamTopics {
     const val DOCUMENTS_PROGRESS = "documents.progress"
 }
 
-/** Published by data-loader when a file is uploaded to MinIO and ready for registration. */
+/** Published by data-loader when a file is uploaded to the object store and ready for registration. */
 data class FilesAvailableEvent(
-    val minioPath: String,
+    val objectPath: String,
     val contentHash: String,
     val tenantId: String,
     val filename: String,

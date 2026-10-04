@@ -73,7 +73,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: ./cleanup.sh [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --data      Wipe all data volumes only (Qdrant, Postgres, Redis, MinIO)"
+            echo "  --data      Wipe all data volumes only (Qdrant, Postgres, Redis, object store)"
             echo "              Keeps Docker images, build cache, and Ollama models intact."
             echo "  --volumes   Remove containers AND Docker volumes (data loss!)"
             echo "  --cache     Prune the Docker build cache (reclaims GBs; next build is slower)"
@@ -135,7 +135,7 @@ echo "Containers removed."
 
 if [ "$DATA_ONLY" = true ]; then
     echo ""
-    echo "WARNING: This will delete all application data (Qdrant, PostgreSQL, Redis, MinIO, ClickHouse)."
+    echo "WARNING: This will delete all application data (Qdrant, PostgreSQL, Redis, object store, ClickHouse)."
     echo "Docker images, build cache, and Ollama models are preserved."
     if [ -n "${DOCINTEL_DATA_DIR:-}" ]; then
         echo ""
@@ -147,7 +147,8 @@ if [ "$DATA_ONLY" = true ]; then
 
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         echo "Removing data volumes..."
-        for vol in qdrant-data postgres-data redis-data minio-data clickhouse-data clickhouse-logs huggingface-cache docling-cache prometheus-data grafana-data; do
+        # minio-data: volume of the retired MinIO service, removed if still present.
+        for vol in qdrant-data postgres-data redis-data object-store-data minio-data clickhouse-data clickhouse-logs huggingface-cache docling-cache prometheus-data grafana-data; do
             docker volume rm "docintel_${vol}" 2>/dev/null && echo "  removed docintel_${vol}" || echo "  skipped docintel_${vol} (not found / bind mount)"
         done
         echo "Data volumes removed."
@@ -207,7 +208,7 @@ fi
 
 if [ "$REMOVE_VOLUMES" = true ]; then
     echo ""
-    echo "WARNING: This will delete ALL data (PostgreSQL, Qdrant, Redis, MinIO, Zitadel)!"
+    echo "WARNING: This will delete ALL data (PostgreSQL, Qdrant, Redis, object store, Zitadel)!"
     if [ -n "${DOCINTEL_DATA_DIR:-}" ]; then
         echo ""
         echo "NOTE: DOCINTEL_DATA_DIR is set ($DOCINTEL_DATA_DIR)."

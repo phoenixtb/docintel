@@ -8,8 +8,8 @@ license = {text = "MIT"}
 
 dependencies = [
     # Shared DocIntel library. [ml]: get_domain_classifier (DeBERTa zero-shot).
-    # [db]: model_profile_resolver.py needs psycopg2.
-    "docintel-common[ml,db]",
+    # [db]: model_profile_resolver.py needs psycopg2. [s3]: object-store adapter.
+    "docintel-common[ml,db,s3]",
 
     # Web Framework
     "fastapi>=0.115.0",
@@ -47,9 +47,6 @@ dependencies = [
     # fastembed-haystack provides the Haystack component; fastembed is the underlying library
     "fastembed-haystack>=1.1.0",
     "fastembed>=0.4.0",
-
-    # MinIO (direct object storage access)
-    "minio>=7.2.0",
 
     # Database (direct PG access for chunk persistence)
     "psycopg2-binary>=2.9.0",

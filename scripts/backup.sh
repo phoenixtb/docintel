@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # DocIntel Backup Script
 # ======================
-# Backs up PostgreSQL, Qdrant, and MinIO data.
+# Backs up PostgreSQL, Qdrant, and object-store (document blob) data.
 # Run daily via cron or manually: ./scripts/backup.sh
 #
 # Usage:
@@ -85,26 +85,31 @@ print(data.get('result', {}).get('name', ''))
 fi
 
 # =============================================================================
-# MinIO Backup
+# Object store backup (local VersityGW)
 # =============================================================================
+# VersityGW stores each object as a plain file with its S3 metadata (content type,
+# ETag) in user.* xattrs, so a tar that keeps xattrs is a complete backup.
+# busybox tar in the gateway image drops xattrs; GNU tar in a throwaway
+# container reads the same volume (named volume or DOCINTEL_DATA_DIR bind).
+# Objects are immutable and content-addressed, so archiving while running is safe.
+# Managed S3 (OBJECT_STORE_ENDPOINT elsewhere): use the provider's versioning or
+# replication instead — this step only covers the local object-store service.
 echo ""
-echo "[3/3] Backing up MinIO document storage..."
+echo "[3/3] Backing up object store..."
 
-MINIO_ENDPOINT="${MINIO_ENDPOINT:-http://localhost:19000}"
-MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-minioadmin}"
-MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-minioadmin}"
-
-mkdir -p "${BACKUP_DIR}/minio"
-
-# Use mc (MinIO client) if available, otherwise skip with a warning
-if command -v mc &>/dev/null; then
-    mc alias set docintel-backup "${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" \
-        --api S3v4 2>/dev/null || true
-    mc mirror --preserve docintel-backup/ "${BACKUP_DIR}/minio/" 2>/dev/null || true
-    echo "      Saved: ${BACKUP_DIR}/minio/"
+OBJECT_STORE_CID=$(docker compose -f "${COMPOSE_FILE}" ps -q object-store)
+if [ -n "${OBJECT_STORE_CID}" ]; then
+    BACKUP_DIR_ABS=$(cd "${BACKUP_DIR}" && pwd)
+    docker run --rm \
+        --volumes-from "${OBJECT_STORE_CID}:ro" \
+        -v "${BACKUP_DIR_ABS}:/backup" \
+        debian:13-slim \
+        tar --xattrs --xattrs-include='user.*' -czf /backup/object-store.tar.gz -C /data .
+    echo "      Saved: ${BACKUP_DIR}/object-store.tar.gz"
+    echo "      Restore (object-store stopped): docker run --rm -v <volume>:/data -v <dir>:/backup:ro \\"
+    echo "        debian:13-slim tar --xattrs --xattrs-include='user.*' -xzf /backup/object-store.tar.gz -C /data"
 else
-    echo "      WARNING: 'mc' (MinIO client) not found. Install from https://min.io/docs/minio/linux/reference/minio-mc.html"
-    echo "      Skipping MinIO backup."
+    echo "      WARNING: object-store container is not running — skipping."
 fi
 
 # =============================================================================

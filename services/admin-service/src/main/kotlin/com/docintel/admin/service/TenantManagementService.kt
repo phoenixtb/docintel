@@ -31,9 +31,9 @@ class TenantManagementService(
             req.id, req.name, req.quotaDocuments, req.quotaQueriesPerDay, defaultLlmModel
         )
         zitadelService.createTenantGroups(req.id)
-        // Provision per-tenant Qdrant collection and MinIO bucket
+        // Provision per-tenant Qdrant collection and object-store bucket
         provisioningService.createQdrantCollection(req.id)
-        provisioningService.createMinioBucket(req.id)
+        provisioningService.createTenantBucket(req.id)
         // Seed model profiles from platform defaults so the tenant starts with values populated
         modelProfileService.seedTenantProfiles(req.id)
         log.info("Created tenant ${req.id}")
@@ -75,11 +75,11 @@ class TenantManagementService(
         jdbcTemplate.update("DELETE FROM users WHERE tenant_id = ?", tenantId)
         val affected = jdbcTemplate.update("DELETE FROM tenants WHERE id = ?", tenantId)
 
-        // Step 3: Deprovision Qdrant + MinIO resources
+        // Step 3: Deprovision Qdrant + object-store resources
         cacheService.clearTenantCache(tenantId)
         zitadelService.deleteTenantGroup(tenantId)
         provisioningService.deleteQdrantCollection(tenantId)
-        provisioningService.deleteMinioBucket(tenantId)
+        provisioningService.deleteTenantBucket(tenantId)
 
         log.info("Deleted tenant $tenantId")
         return DeleteTenantResponse(success = affected > 0, tenantId = tenantId)

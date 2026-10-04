@@ -8,20 +8,26 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.mock.web.MockMultipartFile
+import software.amazon.awssdk.core.sync.RequestBody
+import software.amazon.awssdk.services.s3.S3Client
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.assertEquals
 
 /**
- * Integration tests for StorageService against MinIO Testcontainer.
+ * Integration tests for StorageService against a real S3 server (VersityGW Testcontainer).
  *
  * Content-addressable path convention: docs/{content_hash}/original.{ext}
- * Tenant isolation is at the MinIO bucket level: bucket = "docintel-{tenantId}".
+ * Tenant isolation is at the bucket level: bucket = "docintel-{tenantId}".
  */
 class StorageServiceTest : BaseIntegrationTest() {
 
     @Autowired
     private lateinit var storageService: StorageService
+
+    @Autowired
+    private lateinit var s3: S3Client
 
     private val testTenantId = "test-tenant"
     private val testContentHash = "a".repeat(64)   // 64-char hex-like string for tests
@@ -73,7 +79,7 @@ class StorageServiceTest : BaseIntegrationTest() {
         val path1 = storageService.storeFile(file1, testTenantId, hash)
         val path2 = storageService.storeFile(file2, testTenantId, hash)
 
-        // Same hash → same path (idempotent MinIO PUT)
+        // Same hash → same path (idempotent PUT)
         assertEquals(path1, path2)
     }
 
@@ -118,10 +124,69 @@ class StorageServiceTest : BaseIntegrationTest() {
 
         storageService.deleteDocumentFiles(testTenantId, storedPath)
 
-        assertThrows<Exception> {
+        assertThrows<NoSuchKeyException> {
             storageService.getFile(storedPath)
         }
     }
+
+    @Test
+    fun `getFile on a missing key throws NoSuchKeyException`() {
+        // Ensure the bucket exists so the failure is about the key, not the bucket.
+        storageService.storeFile(MockMultipartFile("file", "x.txt", "text/plain", "x".toByteArray()), testTenantId, "f".repeat(64))
+
+        assertThrows<NoSuchKeyException> {
+            storageService.getFile("docs/${"0".repeat(64)}/original.txt")
+        }
+    }
+
+    @Test
+    fun `deleteDocumentFiles removes every object under the document prefix and spares siblings`() {
+        val tenant = "tenant-prefix"
+        val doomed = storageService.storeFile(MockMultipartFile("file", "a.pdf", "application/pdf", "a".toByteArray()), tenant, "1".repeat(64))
+        val sibling = storageService.storeFile(MockMultipartFile("file", "b.pdf", "application/pdf", "b".toByteArray()), tenant, "2".repeat(64))
+        val bucket = StorageService.bucketFor(tenant)
+        // Derived artefacts that live next to the original (e.g. page renders).
+        s3.putObject({ it.bucket(bucket).key("docs/${"1".repeat(64)}/pages/1.png") }, RequestBody.fromString("png"))
+
+        storageService.deleteDocumentFiles(tenant, doomed)
+
+        assertEquals(emptyList(), keysUnder(bucket, "docs/${"1".repeat(64)}/"))
+        assertEquals(listOf(sibling), keysUnder(bucket, "docs/${"2".repeat(64)}/"))
+    }
+
+    @Test
+    fun `deleteDocumentFiles deletes more than one DeleteObjects batch`() {
+        val tenant = "tenant-batch"
+        val hash = "3".repeat(64)
+        val original = storageService.storeFile(MockMultipartFile("file", "big.txt", "text/plain", "x".toByteArray()), tenant, hash)
+        val bucket = StorageService.bucketFor(tenant)
+        repeat(1_005) { i ->
+            s3.putObject({ it.bucket(bucket).key("docs/$hash/shards/$i.json") }, RequestBody.fromString("{}"))
+        }
+
+        storageService.deleteDocumentFiles(tenant, original)
+
+        assertEquals(emptyList(), keysUnder(bucket, "docs/$hash/"))
+    }
+
+    @Test
+    fun `deleteDocumentFiles is a no-op when the tenant bucket does not exist`() {
+        storageService.deleteDocumentFiles("tenant-never-uploaded", "docs/${"4".repeat(64)}/original.txt")
+    }
+
+    @Test
+    fun `deleteDocumentFiles is idempotent`() {
+        val tenant = "tenant-idem"
+        val path = storageService.storeFile(MockMultipartFile("file", "d.txt", "text/plain", "d".toByteArray()), tenant, "5".repeat(64))
+
+        storageService.deleteDocumentFiles(tenant, path)
+        storageService.deleteDocumentFiles(tenant, path)
+
+        assertEquals(emptyList(), keysUnder(StorageService.bucketFor(tenant), "docs/${"5".repeat(64)}/"))
+    }
+
+    private fun keysUnder(bucket: String, prefix: String): List<String> =
+        s3.listObjectsV2Paginator { it.bucket(bucket).prefix(prefix) }.contents().map { it.key() }
 
     @Test
     fun `should handle special characters in filename`() {

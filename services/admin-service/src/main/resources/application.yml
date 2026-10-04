@@ -44,11 +44,14 @@ zitadel:
   pat: ${ZITADEL_SERVICE_ACCOUNT_PAT:}
   project-id: ${ZITADEL_PROJECT_ID:}
 
-# MinIO configuration for per-tenant bucket provisioning
-minio:
-  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
-  access-key: ${MINIO_ACCESS_KEY:minioadmin}
-  secret-key: ${MINIO_SECRET_KEY:minioadmin}
+# S3-compatible object store (ObjectStoreProperties) for per-tenant bucket provisioning.
+# Credentials have no defaults: a missing OBJECT_STORE_ACCESS_KEY / _SECRET_KEY fails startup.
+object-store:
+  endpoint: ${OBJECT_STORE_ENDPOINT:http://localhost:19000}
+  region: ${OBJECT_STORE_REGION:us-east-1}
+  access-key: ${OBJECT_STORE_ACCESS_KEY:}
+  secret-key: ${OBJECT_STORE_SECRET_KEY:}
+  force-path-style: ${OBJECT_STORE_FORCE_PATH_STYLE:true}
 
 internal:
   gateway:

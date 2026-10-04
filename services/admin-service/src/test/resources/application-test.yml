@@ -36,6 +36,13 @@ internal:
   gateway:
     secret: test-internal-secret
 
+# Object store: ProvisioningServiceObjectStoreTest builds its own client against a
+# VersityGW Testcontainer; the Spring context only needs valid settings to start.
+object-store:
+  endpoint: http://localhost:7070
+  access-key: test-access
+  secret-key: test-secret-key
+
 logging:
   level:
     com.docintel: DEBUG

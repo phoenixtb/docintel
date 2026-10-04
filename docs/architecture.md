@@ -34,7 +34,7 @@ DocIntel is a multi-tenant document Q&A system built with a polyglot microservic
 ┌─────────────────────────────────────────────────────────────────┐
 │                       Data Layer                                 │
 ├─────────────┬─────────────┬─────────────┬─────────────┬─────────┤
-│ PostgreSQL  │   Qdrant    │    Redis    │    MinIO    │ Ollama  │
+│ PostgreSQL  │   Qdrant    │    Redis    │  S3 store   │ Ollama  │
 │ (metadata)  │  (vectors)  │   (cache)   │  (files)    │ (LLM)   │
 └─────────────┴─────────────┴─────────────┴─────────────┴─────────┘
 ```
@@ -63,7 +63,7 @@ DocIntel is a multi-tenant document Q&A system built with a polyglot microservic
 
 **Key Technologies:**
 - Apache Tika for extraction
-- MinIO for file storage
+- S3-compatible object store for raw files (VersityGW locally, any S3 in production; [ADR-0001](adr/0001-object-storage-versitygw.md))
 - PostgreSQL for metadata
 
 ### RAG Service (Python/FastAPI/Haystack)
@@ -194,7 +194,7 @@ Langfuse provides full observability of LLM interactions.
 ### Document Ingestion
 
 ```
-Client → API Gateway → Document Service → MinIO (store file)
+Client → API Gateway → Document Service → Object store (store file)
                                        → PostgreSQL (metadata)
                                        → RAG Service (chunk + embed)
                                        → Qdrant (store vectors)

@@ -142,7 +142,7 @@ class TestStreamEventContracts:
     """Verify that stream event shapes are consistent across producers/consumers."""
 
     FILES_AVAILABLE_REQUIRED = {
-        "minioPath", "contentHash", "tenantId", "filename",
+        "objectPath", "contentHash", "tenantId", "filename",
     }
     FILES_AVAILABLE_OPTIONAL = {
         "contentType", "fileSize", "dataSourceId", "domainHint", "metadata",
@@ -158,7 +158,7 @@ class TestStreamEventContracts:
 
     def test_files_available_event_has_required_fields(self):
         event = {
-            "minioPath": "docs/abc/original.txt",
+            "objectPath": "docs/abc/original.txt",
             "contentHash": "a" * 64,
             "tenantId": "alpha",
             "filename": "doc.txt",

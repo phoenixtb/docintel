@@ -70,12 +70,78 @@ jobs:
         run: uv run pytest tests/ -v
 
   # ===========================================================================
+  # Shared Python library — object-store adapter tests start a real VersityGW
+  # container (Testcontainers; Docker is available on ubuntu-latest)
+  # ===========================================================================
+  docintel-common:
+    name: docintel-common
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lib/docintel-common
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --extra s3 --extra dev
+
+      - name: Lint object-store adapter
+        run: |
+          uv run ruff check docintel_common/object_store.py tests/test_object_store.py tests/test_object_store_integration.py
+          uv run ruff format --check docintel_common/object_store.py tests/test_object_store.py tests/test_object_store_integration.py
+
+      - name: Run tests
+        run: uv run pytest tests/ -v
+
+  # ===========================================================================
+  # Python lockfiles — images install exactly uv.lock (--locked), so a lock
+  # that drifted from its pyproject.toml would fail the image build later
+  # ===========================================================================
+  python-locks:
+    name: Python lockfiles current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.22"
+
+      - name: Check every uv.lock
+        run: |
+          for project in lib/docintel-common services/rag-service services/ingestion-service \
+                         services/data-loader services/analytics-service-py; do
+            echo "== $project"
+            (cd "$project" && uv lock --check)
+          done
+
+  # ===========================================================================
+  # Object-store image pin — compose and every test container use one tag
+  # ===========================================================================
+  object-store-pin:
+    name: Object-store image pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check pins
+        run: scripts/check-object-store-pin.sh
+
+  # ===========================================================================
   # Kotlin Services
   # ===========================================================================
   kotlin-services:
     name: Kotlin Services
     runs-on: ubuntu-latest
     strategy:
+      # One service's failure must not cancel (and hide) the others' results.
+      fail-fast: false
       matrix:
         service: [api-gateway, document-service, admin-service]
 

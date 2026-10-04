@@ -30,10 +30,20 @@ ml = [
 db = [
     "psycopg2-binary>=2.9.0",
 ]
+# S3-compatible object storage adapter (docintel_common.object_store) — needed
+# by services that read or write document blobs (data-loader,
+# ingestion-service). boto3 talks plain S3, so the server behind
+# OBJECT_STORE_ENDPOINT is a deployment choice (VersityGW, AWS S3, R2, ...).
+s3 = [
+    "boto3>=1.43.108",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "fakeredis>=2.0.0",
+    # Real S3 server for docintel_common.object_store integration tests
+    "testcontainers>=4.15.0",
+    "ruff>=0.8.0",
 ]
 
 [build-system]
@@ -46,3 +56,10 @@ packages = ["docintel_common"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
