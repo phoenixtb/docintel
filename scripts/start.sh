@@ -129,6 +129,12 @@ ollama)
 
 # ── LMForge ──────────────────────────────────────────────────────────────────
 lmforge)
+    # install-lmforge.sh installs to ~/.local/bin, which only login shells put on
+    # PATH; SSH commands and cron would otherwise report it missing.
+    _lmforge_dir="${LMFORGE_INSTALL_DIR:-$HOME/.local/bin}"
+    if ! command -v lmforge &> /dev/null && [ -x "$_lmforge_dir/lmforge" ]; then
+        export PATH="$_lmforge_dir:$PATH"
+    fi
     if ! command -v lmforge &> /dev/null; then
         fail "lmforge binary not found. Run ./scripts/setup-lmforge.sh first."
     fi
