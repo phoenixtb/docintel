@@ -21,13 +21,30 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
 from .config import get_settings as _get_settings
 from .context import _tenant_ctx, _role_ctx
 
+
+def psycopg2_url(url: str) -> URL:
+    """
+    Pin a bare ``postgresql://`` URL to the psycopg2 driver this service ships.
+
+    SQLAlchemy 2.1 changed the default driver for ``postgresql://`` from psycopg2
+    to psycopg (v3), which is not installed. POSTGRES_URL stays a plain libpq URL
+    because other services pass the same form straight to ``psycopg2.connect``.
+    An explicit driver (``postgresql+...://``) is left untouched.
+    """
+    parsed = make_url(url)
+    if parsed.drivername == "postgresql":
+        return parsed.set(drivername="postgresql+psycopg2")
+    return parsed
+
+
 engine = create_engine(
-    _get_settings().postgres_url,
+    psycopg2_url(_get_settings().postgres_url),
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,
