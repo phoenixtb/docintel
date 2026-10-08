@@ -149,7 +149,7 @@ services:
       # matches (e.g. WFH→work-life-balance) while keeping real answers.
       # Recalibrate from score distribution via
       #   python tests/integration/calibrate_threshold.py reports/<report>.json
-      - RAG_MIN_RELEVANCE_SCORE=${RAG_MIN_RELEVANCE_SCORE:-0.55}
+      - RAG_MIN_RELEVANCE_SCORE=${RAG_MIN_RELEVANCE_SCORE:-0.70}
       - RAG_MIN_SCORE_FALLBACK_TOPK=${RAG_MIN_SCORE_FALLBACK_TOPK:-0}
       # Domain router — rag-service reads RAG_DOMAIN_ROUTER_MODEL (field: rag_domain_router_model)
       - RAG_USE_DOMAIN_ROUTING=${RAG_USE_DOMAIN_ROUTING:-true}
