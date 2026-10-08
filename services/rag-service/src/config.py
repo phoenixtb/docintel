@@ -116,6 +116,13 @@ class Settings(BaseSettings):
     # tests/integration/calibrate_threshold.py when the reranker model,
     # quantisation or LMForge engine changes.
     rag_min_relevance_score: float = 0.70
+    # Context floor: once the TOP chunk clears rag_min_relevance_score (the
+    # answerability decision, calibrated on top scores), supporting chunks are
+    # kept down to this probability. 0.20 is where the former per-chunk gate sat
+    # (0.55 on LMForge's old squeezed scale = 0.20 as a probability), so context
+    # selection for answerable queries is unchanged. Gating every chunk at the
+    # answerability bar stripped supporting clauses from the prompt.
+    rag_min_context_score: float = 0.20
     # When no doc passes rag_min_relevance_score, how many top docs to return anyway.
     # 0 = strict (return empty → NO_RELEVANT_DOCUMENTS_RESPONSE).
     # Set to 1 to always return at least one result regardless of score.

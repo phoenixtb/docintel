@@ -938,3 +938,44 @@ async def test_healthy_reranker_scores_above_tau_are_kept():
 
     sources = [e for e in events if isinstance(e, SourcesEvent)]
     assert sources and len(sources[0].sources) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_answerable_query_keeps_supporting_chunks_down_to_the_context_floor():
+    """tau decides answerability on the TOP chunk; supporting clauses between the
+    context floor and tau stay in the prompt (gating each chunk at tau stripped them)."""
+    settings = _make_settings(rag_min_relevance_score=0.7, rag_min_context_score=0.2)
+    svc = _make_service(settings)
+    svc._reranker.run.return_value = {
+        "documents": [
+            _make_doc("fee clause", score=0.94),
+            _make_doc("services", score=0.62),
+            _make_doc("records", score=0.22),
+            _make_doc("title page", score=0.15),
+        ],
+        "reranker_degraded": False, "degraded_reason": None,
+    }
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings, top_k=5)))
+
+    sources = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources and len(sources[0].sources) == 3  # 0.94, 0.62, 0.22 — not the 0.15
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_query_abstains_when_the_top_chunk_is_below_tau_even_above_the_floor():
+    settings = _make_settings(rag_min_relevance_score=0.7, rag_min_context_score=0.2)
+    svc = _make_service(settings)
+    svc._reranker.run.return_value = {
+        "documents": [_make_doc(score=0.6), _make_doc(score=0.5)],
+        "reranker_degraded": False, "degraded_reason": None,
+    }
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    sources = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources and sources[0].sources == []

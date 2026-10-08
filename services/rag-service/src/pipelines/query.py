@@ -782,8 +782,17 @@ class RAGService:
         # rag_rerank_skip_min_score already served as the gate; when degraded or
         # off, generation's grounding instructions handle absent information and
         # the UI shows the degraded flag.
+        #
+        # Two decisions, matching how tau is calibrated (on the TOP score):
+        #   answerability — abstain unless the best chunk clears tau;
+        #   context       — keep supporting chunks down to rag_min_context_score.
         if effective_min_score > 0.0 and reranker_scored:
-            above = [d for d in documents if (d.score or 0.0) >= effective_min_score]
+            top = (documents[0].score or 0.0) if documents else 0.0
+            if top >= effective_min_score:
+                floor = min(cfg.rag_min_context_score, effective_min_score)
+                above = [d for d in documents if (d.score or 0.0) >= floor]
+            else:
+                above = []
             if not above and cfg.rag_min_score_fallback_topk > 0:
                 above = documents[:cfg.rag_min_score_fallback_topk]
             documents = above
