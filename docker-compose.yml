@@ -142,12 +142,10 @@ services:
       - RAG_RETRIEVER_TOP_K=50
       - RAG_RERANKER_TOP_K=10
       - RAG_DEFAULT_TOP_K=5
-      # Abstention gate: minimum rerank score for a chunk to reach the LLM.
-      # Qwen3-Reranker emits sigmoid scores (0.5 = neutral). Calibrated default
-      # 0.55 sits in the empirical gap between noise/off-topic chunks (~0.50–0.51)
-      # and genuinely relevant chunks (~0.62–0.73) — gates false-confidence
-      # matches (e.g. WFH→work-life-balance) while keeping real answers.
-      # Recalibrate from score distribution via
+      # Abstention gate on reranker probabilities (docs/contracts/reranker.md):
+      # the top chunk must reach RAG_MIN_RELEVANCE_SCORE or the query abstains;
+      # supporting chunks are kept down to RAG_MIN_CONTEXT_SCORE. Not applied
+      # when the reranker is degraded or off. Recalibrate on both engines via
       #   python tests/integration/calibrate_threshold.py reports/<report>.json
       - RAG_MIN_RELEVANCE_SCORE=${RAG_MIN_RELEVANCE_SCORE:-0.70}
       - RAG_MIN_CONTEXT_SCORE=${RAG_MIN_CONTEXT_SCORE:-0.20}

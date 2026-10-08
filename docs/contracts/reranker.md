@@ -31,6 +31,19 @@ server and model.
 | other non-200 | anything else | degraded, reason `http_<status>` |
 | transport error / timeout | LMForge down or slow | degraded, reason `unavailable` |
 
+## Relevance gate (healthy reranker)
+
+Two thresholds, because answerability and context are different questions:
+
+| Setting | Default | Applied to | Effect |
+|---|---|---|---|
+| `rag_min_relevance_score` (tau) | 0.70 | the **top** chunk only | below tau → no context, abstain |
+| `rag_min_context_score` (floor) | 0.20 | every chunk, once the top chunk passes | supporting chunks at or above `min(floor, tau)` are kept |
+
+A per-chunk tau at 0.70 left one chunk for multi-clause answers, and the small generation model
+then abstained despite holding the answer. If filtering empties the list,
+`rag_min_score_fallback_topk` (0 = off) keeps that many chunks.
+
 ## Degraded behaviour
 
 - **Order.** Documents keep their retrieval (RRF-fused) order and scores.

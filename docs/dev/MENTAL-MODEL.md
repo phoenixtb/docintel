@@ -253,6 +253,7 @@ Use the tag from compose; CI fails otherwise.
 | `files.available` carries `objectPath` end to end | `test_publishes_object_path_of_the_uploaded_file`; `StreamConsumerTest` "FilesAvailableConsumer should carry the data-loader objectPath …" |
 | Retired MinIO entries are dropped from OpenTofu state, nothing else | `tests/scripts/test_start_helpers_minio_state.bats` |
 | A reranker outage, error code, unknown score scale or `use_reranking: false` never turns answers into abstentions; tau applies only to reranker probabilities | `tests/test_reranker.py`; `test_degraded_reranker_answers_from_retrieval_order_without_tau`, `test_reranker_exception_also_answers_from_retrieval_order`, `test_reranking_disabled_does_not_apply_tau_to_fused_scores` |
+| An answerable query keeps its supporting chunks down to the context floor; a weak top chunk abstains even when others clear the floor | `test_answerable_query_keeps_supporting_chunks_down_to_the_context_floor`, `test_query_abstains_when_the_top_chunk_is_below_tau_even_above_the_floor` |
 
 ## 8. Decisions index
 
@@ -282,6 +283,9 @@ Open decisions:
   - It applies only when the reranker actually scored the documents. Reranking off, G5-skipped
     or degraded means fused RRF scores, and gating those turned every answer into "no relevant
     documents" (incident 2026-10-05).
+  - Tau gates answerability on the **top** chunk; supporting chunks are kept down to
+    `rag_min_context_score` (0.20). Tau per chunk left one chunk, and the small generation model
+    then abstained on multi-clause answers.
   - The same model gives different probability scales on llama.cpp (GGUF) and oMLX (mxfp8), so
     calibrate on both ([contract](../contracts/reranker.md)).
 - **Images ignore `pyproject.toml` ranges.**
@@ -343,3 +347,4 @@ Runbook:
     degraded).
   - `rag_min_relevance_score` 0.55 → 0.70, recalibrated on llama.cpp and oMLX
     (`docs/contracts/reranker.md`).
+  - Tau applies to the top chunk; new `rag_min_context_score` (0.20) floor for supporting chunks.
