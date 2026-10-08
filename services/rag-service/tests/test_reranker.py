@@ -33,13 +33,16 @@ def _respond(monkeypatch, status=200, json=None, exc=None):
 
 
 def test_probability_scores_are_used_as_is_and_sorted(monkeypatch):
-    calls = _respond(monkeypatch, json={
-        "score_type": "probability",
-        "results": [
-            {"index": 0, "relevance_score": 0.00001},
-            {"index": 1, "relevance_score": 0.22},
-        ],
-    })
+    calls = _respond(
+        monkeypatch,
+        json={
+            "score_type": "probability",
+            "results": [
+                {"index": 0, "relevance_score": 0.00001},
+                {"index": 1, "relevance_score": 0.22},
+            ],
+        },
+    )
 
     out = LmforgeReranker(url="http://lmforge/v1", top_k=2).run(query="q", documents=DOCS)
 
@@ -68,9 +71,13 @@ def test_undeclared_or_other_score_scale_degrades_instead_of_being_misread(monke
     [(400, "query_too_long"), (400, "input_too_long"), (422, "reranker_unusable")],
 )
 def test_lmforge_error_codes_degrade_with_that_code(monkeypatch, status, code):
-    _respond(monkeypatch, status=status, json={
-        "error": {"message": "x", "type": "invalid_request_error", "param": None, "code": code}
-    })
+    _respond(
+        monkeypatch,
+        status=status,
+        json={
+            "error": {"message": "x", "type": "invalid_request_error", "param": None, "code": code}
+        },
+    )
 
     out = LmforgeReranker().run(query="q", documents=DOCS)
 
@@ -96,11 +103,14 @@ def test_transport_failure_degrades_as_unavailable(monkeypatch):
 
 
 def test_truncated_documents_are_logged_and_still_scored(monkeypatch, caplog):
-    _respond(monkeypatch, json={
-        "score_type": "probability",
-        "meta": {"truncated_documents": [2]},
-        "results": [{"index": 2, "relevance_score": 0.4}],
-    })
+    _respond(
+        monkeypatch,
+        json={
+            "score_type": "probability",
+            "meta": {"truncated_documents": [2]},
+            "results": [{"index": 2, "relevance_score": 0.4}],
+        },
+    )
 
     with caplog.at_level("INFO"):
         out = LmforgeReranker().run(query="q", documents=DOCS)
