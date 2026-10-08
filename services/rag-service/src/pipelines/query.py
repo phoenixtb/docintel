@@ -690,6 +690,10 @@ class RAGService:
             documents = []
 
         # ── 7. Rerank (or skip — G5) ──────────────────────────────────────────
+        # True only when the documents carry genuine reranker probabilities —
+        # the one scale tau (step 8) is calibrated on. Stays False when reranking
+        # is off, skipped (G5) or degraded, where documents keep fused RRF scores.
+        reranker_scored = False
         if use_reranking and documents:
             candidates_in = len(documents)
             top_fused_score = documents[0].score or 0.0
@@ -740,14 +744,22 @@ class RAGService:
                     )
                     documents = rerank_result["documents"]
                     self._last_reranker_degraded = bool(rerank_result.get("reranker_degraded"))
+                    if self._last_reranker_degraded:
+                        logger.warning(
+                            "Reranker degraded (%s): answering from retrieval order, "
+                            "relevance threshold not applied",
+                            rerank_result.get("degraded_reason"),
+                        )
+                    else:
+                        reranker_scored = True
                 except Exception as e:
                     logger.warning("Reranker failed, falling back to retrieval order: %s", e)
                     self._last_reranker_degraded = True
 
             logger.info(
-                "rerank_gate mode=%s skipped=%s top_fused=%.4f n_in=%d n_out=%d",
+                "rerank_gate mode=%s skipped=%s degraded=%s top_fused=%.4f n_in=%d n_out=%d",
                 self._last_retrieval_mode, self._last_rerank_skipped,
-                top_fused_score, candidates_in, len(documents),
+                self._last_reranker_degraded, top_fused_score, candidates_in, len(documents),
             )
 
             self._last_rerank_candidates_in = candidates_in
@@ -762,11 +774,15 @@ class RAGService:
             )
 
         # ── 8. Min-score / top-k filter ───────────────────────────────────────
-        # G5 guard: tau (effective_min_score) is calibrated on RERANKER scores —
-        # never evaluate it against fused-score documents from a skipped rerank
-        # (see step 7). rag_rerank_skip_min_score already served as this
-        # query's relevance gate.
-        if effective_min_score > 0.0 and not self._last_rerank_skipped:
+        # tau (effective_min_score) is calibrated on RERANKER probabilities, so it
+        # applies only when the reranker actually scored the documents. Fused RRF
+        # scores (reranking off, G5 skip, or degraded reranker) live on another
+        # scale; gating them with tau silently turned every answer into "no
+        # relevant documents" during reranker outages. When skipped,
+        # rag_rerank_skip_min_score already served as the gate; when degraded or
+        # off, generation's grounding instructions handle absent information and
+        # the UI shows the degraded flag.
+        if effective_min_score > 0.0 and reranker_scored:
             above = [d for d in documents if (d.score or 0.0) >= effective_min_score]
             if not above and cfg.rag_min_score_fallback_topk > 0:
                 above = documents[:cfg.rag_min_score_fallback_topk]

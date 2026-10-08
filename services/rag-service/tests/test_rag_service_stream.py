@@ -846,3 +846,95 @@ async def test_query_result_includes_rerank_skipped_field():
         result = await svc.query(**_make_stream_kwargs(svc, settings=settings))
 
     assert result["rerank_skipped"] is True
+
+
+# ── Relevance gate (tau) applies only to genuine reranker scores ──────────────
+# Incident 2026-10-05: with the reranker failing, tau (calibrated on reranker
+# probabilities) was applied to fused RRF scores and every answer became
+# "no relevant documents".
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_degraded_reranker_answers_from_retrieval_order_without_tau():
+    settings = _make_settings(rag_min_relevance_score=0.2)
+    svc = _make_service(settings)
+    fused = [_make_doc("Arca fee clause", score=0.016), _make_doc("Leave policy", score=0.015)]
+    svc._opa_validator.run.return_value = {"documents": fused}
+    svc._reranker.run.return_value = {
+        "documents": fused, "reranker_degraded": True, "degraded_reason": "unavailable",
+    }
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    sources = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources and len(sources[0].sources) == 2  # not dropped by tau
+    meta = [e for e in events if isinstance(e, MetadataEvent) and e.reranker_degraded is not None]
+    assert meta and meta[0].reranker_degraded is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_reranker_exception_also_answers_from_retrieval_order():
+    settings = _make_settings(rag_min_relevance_score=0.2)
+    svc = _make_service(settings)
+    svc._opa_validator.run.return_value = {"documents": [_make_doc(score=0.016)]}
+    svc._reranker.run.side_effect = RuntimeError("connection reset")
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    sources = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources and sources[0].sources
+    assert svc._last_reranker_degraded is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_reranking_disabled_does_not_apply_tau_to_fused_scores():
+    settings = _make_settings(rag_min_relevance_score=0.2)
+    svc = _make_service(settings)
+    svc._opa_validator.run.return_value = {"documents": [_make_doc(score=0.016)]}
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(
+            svc.stream(**_make_stream_kwargs(svc, settings=settings, use_reranking=False))
+        )
+
+    svc._reranker.run.assert_not_called()
+    sources = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources and sources[0].sources
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_healthy_reranker_scores_below_tau_are_filtered_to_abstention():
+    settings = _make_settings(rag_min_relevance_score=0.2)
+    svc = _make_service(settings)
+    svc._reranker.run.return_value = {
+        "documents": [_make_doc(score=0.05)], "reranker_degraded": False, "degraded_reason": None,
+    }
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    sources = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources and sources[0].sources == []  # abstained: below tau on the reranker scale
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_healthy_reranker_scores_above_tau_are_kept():
+    settings = _make_settings(rag_min_relevance_score=0.2)
+    svc = _make_service(settings)
+    svc._reranker.run.return_value = {
+        "documents": [_make_doc(score=0.22), _make_doc(score=0.01)],
+        "reranker_degraded": False, "degraded_reason": None,
+    }
+
+    with _patch_llm(svc, ["answer"]):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    sources = [e for e in events if isinstance(e, SourcesEvent)]
+    assert sources and len(sources[0].sources) == 1

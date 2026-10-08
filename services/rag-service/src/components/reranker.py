@@ -2,18 +2,35 @@
 Reranker component for Haystack pipelines.
 
 LmforgeReranker
-  Calls LMForge's OpenAI-compatible POST /v1/rerank endpoint.
-  Works with oMLX on Mac (Apple Silicon). Falls back gracefully if LMForge is unavailable.
-  Scores are normalised to [0, 1]; documents returned in descending score order.
+  Calls LMForge's POST /v1/rerank (contract: docs/contracts/reranker.md).
+  Scores are relevance probabilities in [0, 1] (`score_type: "probability"`);
+  documents are returned in descending score order.
+
+  Any failure — transport error, an LMForge error code, or a response that does
+  not declare probability scores — yields `reranker_degraded=True` with a
+  `degraded_reason`, and the documents in their retrieval (fused) order. Callers
+  must not apply a reranker-calibrated threshold to those fused scores.
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from haystack import Document, component
 
 logger = logging.getLogger(__name__)
+
+# LMForge error codes (docs/contracts/reranker.md); anything else is reported as http_<status>.
+_KNOWN_ERROR_CODES = {"query_too_long", "input_too_long", "reranker_unusable"}
+
+
+def _error_code(response: httpx.Response) -> str:
+    """LMForge errors look like {"error": {"message", "type", "param", "code"}}."""
+    try:
+        code = (response.json().get("error") or {}).get("code")
+    except ValueError:
+        code = None
+    return code if code in _KNOWN_ERROR_CODES else f"http_{response.status_code}"
 
 
 @component
@@ -40,18 +57,19 @@ class LmforgeReranker:
         self.top_k = top_k
         self.timeout = timeout
 
-    @component.output_types(documents=list[Document], reranker_degraded=bool)
+    @component.output_types(
+        documents=list[Document], reranker_degraded=bool, degraded_reason=str | None
+    )
     def run(
         self,
         query: str,
         documents: list[Document],
-        top_k: Optional[int] = None,
+        top_k: int | None = None,
     ) -> dict[str, Any]:
         if not documents:
-            return {"documents": [], "reranker_degraded": False}
+            return {"documents": [], "reranker_degraded": False, "degraded_reason": None}
 
         effective_top_k = top_k or self.top_k
-        doc_texts = [doc.content or "" for doc in documents]
 
         try:
             response = httpx.post(
@@ -59,42 +77,61 @@ class LmforgeReranker:
                 json={
                     "model": self.model,
                     "query": query,
-                    "documents": doc_texts,
+                    "documents": [doc.content or "" for doc in documents],
                     "top_n": effective_top_k,
                 },
                 timeout=self.timeout,
             )
-            response.raise_for_status()
-            results = response.json().get("results", [])
-
-            scored: list[Document] = []
-            for r in results:
-                idx = r["index"]
-                score = r["relevance_score"]
-                doc = documents[idx]
-                scored.append(
-                    Document(
-                        id=doc.id,
-                        content=doc.content,
-                        meta=doc.meta,
-                        score=score,
-                        embedding=doc.embedding,
-                        sparse_embedding=doc.sparse_embedding,
-                    )
-                )
-
-            scored.sort(key=lambda d: d.score or 0.0, reverse=True)
-            return {"documents": scored, "reranker_degraded": False}
-
         except httpx.HTTPError as e:
-            logger.error(
-                "LMForge reranker request failed: %s — falling back to unranked (degraded mode)",
-                e,
+            return self._degraded(documents, effective_top_k, "unavailable", str(e))
+
+        if response.status_code != 200:
+            return self._degraded(
+                documents, effective_top_k, _error_code(response), response.text[:300]
             )
-            fallback = list(documents[:effective_top_k])
-            for doc in fallback:
-                doc.score = doc.score or 0.0
-            return {"documents": fallback, "reranker_degraded": True}
+
+        body = response.json()
+        # Older LMForge passed probabilities through a second sigmoid into
+        # [0.5, 0.73] and did not declare a scale. Reading those as probabilities
+        # would make every threshold wrong, so an undeclared scale is degraded.
+        if body.get("score_type") != "probability":
+            return self._degraded(
+                documents,
+                effective_top_k,
+                "unsupported_score_contract",
+                f"score_type={body.get('score_type')!r}; LMForge with probability scores required",
+            )
+
+        truncated = (body.get("meta") or {}).get("truncated_documents") or []
+        if truncated:
+            logger.info("Reranker truncated %d long document(s): %s", len(truncated), truncated)
+
+        scored: list[Document] = []
+        for r in body.get("results", []):
+            doc = documents[r["index"]]
+            scored.append(
+                Document(
+                    id=doc.id,
+                    content=doc.content,
+                    meta=doc.meta,
+                    score=r["relevance_score"],
+                    embedding=doc.embedding,
+                    sparse_embedding=doc.sparse_embedding,
+                )
+            )
+        scored.sort(key=lambda d: d.score or 0.0, reverse=True)
+        return {"documents": scored, "reranker_degraded": False, "degraded_reason": None}
+
+    @staticmethod
+    def _degraded(
+        documents: list[Document], top_k: int, reason: str, detail: str
+    ) -> dict[str, Any]:
+        logger.error("Reranker degraded (%s): %s — continuing in retrieval order", reason, detail)
+        return {
+            "documents": list(documents[:top_k]),
+            "reranker_degraded": True,
+            "degraded_reason": reason,
+        }
 
 
 # Alias kept for backward compatibility during transition
