@@ -163,6 +163,23 @@ class TestPromptBuilderMessages:
         assert "messages" in result
         assert "Acme Corp" in result["messages"][0].text
 
+    def test_system_prompt_asks_for_partial_answers_before_abstaining(self):
+        """A related but incomplete context gets a partial answer, not a refusal.
+
+        The all-or-nothing rule made small models refuse when the context held
+        a related clause (Arca's blockchain-administrator fee for a question
+        about crypto payment provisions).
+        """
+        from src.components.prompt import PromptBuilder
+        Document = get_document_class()
+
+        system = PromptBuilder().run(
+            documents=[Document(content="Clause.", meta={})], query="q"
+        )["messages"][0].text
+
+        assert "answers only part of the question" in system
+        assert "only when no retrieved chunk is relevant" in system
+
 
 @pytest.mark.unit
 class TestDomainFilterBuilder:
