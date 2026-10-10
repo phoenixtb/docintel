@@ -50,7 +50,10 @@ def _get_tenant_retrievers(
                 QdrantHybridRetriever(document_store=store, top_k=top_k),
                 QdrantEmbeddingRetriever(document_store=store, top_k=top_k),
             )
-        return _retriever_cache[cache_key]
+        retrievers: tuple[QdrantHybridRetriever, QdrantEmbeddingRetriever] = _retriever_cache[
+            cache_key
+        ]
+        return retrievers
 
 
 @component
@@ -134,11 +137,12 @@ class SecureRetriever:
         )
         acl_filter = self._build_acl_filter(user_roles, user_id, domain_filter)
 
-        use_hybrid = self._use_hybrid and query_sparse_embedding is not None
-        if use_hybrid:
+        sparse = query_sparse_embedding if self._use_hybrid else None
+        use_hybrid = sparse is not None
+        if sparse is not None:
             result = hybrid_retriever.run(
                 query_embedding=query_embedding,
-                query_sparse_embedding=query_sparse_embedding,
+                query_sparse_embedding=sparse,
                 filters=acl_filter,
             )
         else:

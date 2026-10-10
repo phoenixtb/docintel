@@ -44,7 +44,8 @@ from collections.abc import Callable
 # startup (import time), not mid-stream during a user query.
 # ---------------------------------------------------------------------------
 try:
-    from haystack.components.generators.chat.openai import (
+    # Private symbol, not re-exported by Haystack; its presence is what this block checks.
+    from haystack.components.generators.chat.openai import (  # type: ignore[attr-defined]
         OpenAIChatGenerator,
         _convert_chat_completion_chunk_to_streaming_chunk,
         _convert_streaming_chunks_to_chat_message,
@@ -67,7 +68,7 @@ try:
 
     _REASONING_CONTENT_AVAILABLE = True
 except ImportError:
-    _ReasoningContent = None  # type: ignore[assignment]
+    _ReasoningContent = None  # type: ignore[misc,assignment]
     _REASONING_CONTENT_AVAILABLE = False
 
 

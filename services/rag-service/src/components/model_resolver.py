@@ -112,7 +112,7 @@ class TenantModelResolver:
         """Fetch/cache the platform-level model override. None = Tenant Choice."""
         cached_val, expires_at = self.__class__._platform_cache
         if cached_val is not _SENTINEL and time.monotonic() < expires_at:
-            return cached_val if isinstance(cached_val, str) else None  # type: ignore[return-value]
+            return cached_val if isinstance(cached_val, str) else None
 
         result = await asyncio.get_running_loop().run_in_executor(
             None, self._fetch_platform_model_sync

@@ -91,7 +91,8 @@ def _parse_json_answer(raw: str) -> str:
     try:
         parsed = json.loads(raw.strip())
         if isinstance(parsed, dict) and "answer" in parsed:
-            return parsed["answer"]
+            answer: str = parsed["answer"]
+            return answer
     except (json.JSONDecodeError, TypeError):
         pass
     return raw

@@ -12,6 +12,7 @@ import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
 import httpx
 from docintel_common.errors import install_error_handlers
@@ -1181,7 +1182,7 @@ async def delete_tenant_conversations(
     if not x_tenant_id:
         raise HTTPException(status_code=400, detail="X-Tenant-Id header required")
 
-    from sqlalchemy import text
+    from sqlalchemy import CursorResult, text
 
     from ..db import SessionLocal
 
@@ -1190,9 +1191,13 @@ async def delete_tenant_conversations(
             # platform_admin role to bypass RLS for cross-tenant admin operation
             db.execute(text("SET LOCAL app.user_role = 'platform_admin'"))
             db.execute(text("SET LOCAL app.current_tenant = :tid"), {"tid": x_tenant_id})
-            result = db.execute(
-                text("DELETE FROM conversations WHERE tenant_id = :tid"),
-                {"tid": x_tenant_id},
+            # A DML statement always yields a CursorResult; Session.execute is typed as Result.
+            result = cast(
+                CursorResult[Any],
+                db.execute(
+                    text("DELETE FROM conversations WHERE tenant_id = :tid"),
+                    {"tid": x_tenant_id},
+                ),
             )
             db.commit()
             return result.rowcount

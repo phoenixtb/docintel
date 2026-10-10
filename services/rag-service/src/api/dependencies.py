@@ -24,17 +24,20 @@ logger = logging.getLogger(__name__)
 
 def get_settings(request: Request) -> Settings:
     """Return the Settings instance stored on app.state."""
-    return request.app.state.settings
+    settings: Settings = request.app.state.settings
+    return settings
 
 
 def get_rag_service(request: Request) -> RAGService:
     """Return the RAGService instance stored on app.state."""
-    return request.app.state.rag_service
+    rag_service: RAGService = request.app.state.rag_service
+    return rag_service
 
 
 def get_tracer(request: Request) -> LangfuseTracer:
     """Return the LangfuseTracer instance stored on app.state."""
-    return request.app.state.tracer
+    tracer: LangfuseTracer = request.app.state.tracer
+    return tracer
 
 
 # ---------------------------------------------------------------------------
@@ -148,13 +151,12 @@ async def get_conversation_history(
     Returns an empty LoadedHistory when no conversation_id is provided.
     DB errors are propagated as 500 HTTPException so the caller can handle them.
     """
-    if not request.conversation_id:
+    conversation_id = request.conversation_id
+    if not conversation_id:
         return LoadedHistory()
     try:
         messages, context_state = await _run_db(
-            lambda: rag_service._load_conversation_history(
-                request.conversation_id, user_ctx.tenant_id
-            )
+            lambda: rag_service._load_conversation_history(conversation_id, user_ctx.tenant_id)
         )
         return LoadedHistory(messages=messages, context_state=context_state)
     except Exception as e:

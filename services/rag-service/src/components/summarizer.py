@@ -88,7 +88,7 @@ class AnchoredSummarizer:
             )
             resp.raise_for_status()
             result = resp.json()
-            summary = result["choices"][0]["message"]["content"].strip()
+            summary: str = result["choices"][0]["message"]["content"].strip()
             if not summary:
                 raise ValueError("Empty response from summarizer model")
             return summary
