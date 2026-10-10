@@ -28,47 +28,66 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-# Non-interactive: clear logs
-if [[ "$1" == "clear" ]]; then
-    TARGET="${2:-}"
-    if [[ -n "$TARGET" ]]; then
-        echo -e "${YELLOW}Clearing logs for: ${BOLD}$TARGET${NC}"
-        docker compose stop "$TARGET" 2>/dev/null
-        docker compose rm -f "$TARGET" 2>/dev/null
-        docker compose up -d "$TARGET" 2>/dev/null
-        echo -e "${GREEN}Done. Logs cleared (container recreated).${NC}"
-    else
-        echo -e "${YELLOW}Clearing logs for all app services...${NC}"
-        SERVICES=(rag-service ingestion-service api-gateway document-service web-ui admin-service analytics-service docintel-actions)
-        for svc in "${SERVICES[@]}"; do
-            docker rm -f "$(docker compose ps -q "$svc" 2>/dev/null)" 2>/dev/null || true
-        done
-        docker compose up -d 2>/dev/null
-        echo -e "${GREEN}Done. Logs cleared (containers recreated).${NC}"
-    fi
-    exit 0
-fi
+# App services whose log buffers "clear" resets (infrastructure is left alone).
+APP_SERVICES=(rag-service ingestion-service api-gateway document-service web-ui admin-service analytics-service data-loader docintel-actions)
 
-# Non-interactive: debug or single service
-if [[ "$1" == "debug" ]]; then
-    echo -e "${BOLD}Debug mode: rag-service + api-gateway (query path)${NC}"
+# Resolve the same compose file chain and image tags start.sh uses (GPU overlay,
+# DOCINTEL_DATA_DIR storage overlay, PROFILE_TAG). Recreating containers from the
+# base file alone would drop those overlays — with DOCINTEL_DATA_DIR set the
+# services would come back on empty named volumes.
+load_compose_env() {
+    set -a
+    # shellcheck source=../config/defaults.env
+    source "$PROJECT_DIR/config/defaults.env"
+    [ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
+    set +a
+    # shellcheck source=lib/profile_config.sh
+    source "$SCRIPT_DIR/lib/profile_config.sh"
+    read_profile > /dev/null
+    torch_vars_for_profile "$PROFILE"
+    compose_file_chain "$PROJECT_DIR"
+}
+
+# Recreate (only) the given running app containers: a fresh container starts
+# with an empty log buffer. Services that are not running stay stopped.
+clear_logs() {
+    local targets=("$@") running=() svc
+    if [ ${#targets[@]} -eq 0 ]; then targets=("${APP_SERVICES[@]}"); fi
+    load_compose_env
+    for svc in "${targets[@]}"; do
+        # shellcheck disable=SC2086
+        if [ -n "$(docker compose $COMPOSE_FILES ps -q "$svc" 2>/dev/null)" ]; then
+            running+=("$svc")
+        fi
+    done
+    if [ ${#running[@]} -eq 0 ]; then
+        echo -e "${YELLOW}None of these services is running: ${targets[*]}${NC}"
+        return 0
+    fi
+    echo -e "${YELLOW}Recreating ${running[*]} (clears their log buffers)...${NC}"
+    # shellcheck disable=SC2086
+    docker compose $COMPOSE_FILES up -d --force-recreate --no-deps "${running[@]}"
+    echo -e "${GREEN}Done. Logs cleared.${NC}"
+}
+
+follow_logs() {
+    local label="$1"; shift
+    echo -e "${BOLD}Following: ${label}${NC}"
     echo -e "${DIM}Ctrl+C to exit${NC}"
     echo ""
-    docker compose logs -f rag-service api-gateway 2>/dev/null || {
-        echo -e "${RED}Services not running. Start with ./scripts/start.sh${NC}"
+    docker compose logs -f "$@" || {
+        echo -e "${RED}No logs for ${label} — is it running? Start with ./scripts/start.sh${NC}"
         exit 1
     }
-    exit 0
-fi
+}
 
-if [[ -n "$1" ]]; then
-    docker compose logs -f "$1" 2>/dev/null || {
-        echo -e "${RED}Service '$1' not found or not running.${NC}"
-        echo "Valid: rag-service, ingestion-service, api-gateway, document-service, web-ui, admin-service, analytics-service, docintel-actions"
-        exit 1
-    }
-    exit 0
-fi
+# Non-interactive
+case "${1:-}" in
+    clear) shift; clear_logs "$@"; exit 0 ;;
+    debug) follow_logs "rag-service + api-gateway (query path)" rag-service api-gateway; exit 0 ;;
+    "")    ;;
+    *)     follow_logs "$1" "$1"; exit 0 ;;
+esac
 
 # Interactive menu
 OPTIONS=(
@@ -80,6 +99,7 @@ OPTIONS=(
     "web-ui"
     "admin-service"
     "analytics-service"
+    "data-loader"
     "docintel-actions"
     "all"
     "clear"
@@ -94,88 +114,24 @@ LABELS=(
     "web-ui             SvelteKit SPA frontend"
     "admin-service      Admin operations, tenant management"
     "analytics-service  Event ingestion, ClickHouse analytics"
+    "data-loader        Sample dataset loading"
     "docintel-actions   Zitadel Actions v2 custom claims webhook"
     "All                All services"
-    "Clear logs         Recreate all containers (wipes log buffers)"
+    "Clear logs         Recreate running app containers (wipes their log buffers)"
 )
 
-cursor=0
+# shellcheck source=lib/menu.sh
+source "$SCRIPT_DIR/lib/menu.sh"
 
-cursor_to()  { printf "\033[%s;0H" "$1"; }
-clear_line() { printf "\033[2K"; }
-
-# Save terminal state upfront; restore fully on any exit
-SAVED_TTY=$(stty -g 2>/dev/null)
-cleanup() {
-    stty "$SAVED_TTY" 2>/dev/null
-    printf "\033[?25h"  # show cursor
-    echo ""
-}
-trap cleanup EXIT INT TERM
-
-draw_menu() {
-    local start_row=$1
-    for i in "${!OPTIONS[@]}"; do
-        cursor_to $((start_row + i))
-        clear_line
-        if [[ $i -eq $cursor ]]; then
-            printf "  ${CYAN}▸ ${BOLD}%s${NC}\n" "${LABELS[$i]}"
-        else
-            printf "    %s\n" "${LABELS[$i]}"
-        fi
-    done
-    cursor_to $((start_row + ${#OPTIONS[@]} + 1))
-    clear_line
-    printf "  ${DIM}↑↓ navigate • enter select • q quit${NC}"
-}
-
-clear
 echo ""
 echo -e "  ${BOLD}DocIntel Logs${NC}"
-echo -e "  ${DIM}Select service to follow (Ctrl+C to exit logs)${NC}"
+echo ""
+menu_select choice "Select service to follow" OPTIONS LABELS 0 --cancel || exit 0
 echo ""
 
-start_row=5
-printf "\033[?25l"                        # hide cursor
-stty -echo -icanon min 1 time 0 2>/dev/null  # raw mode: no echo, no line buffer
-draw_menu $start_row
-
-while IFS= read -r -n1 -s key; do
-    if [[ "$key" == $'\x1b' ]]; then
-        # Read remainder of escape sequence without subshell
-        IFS= read -r -n2 -s -t 1 seq
-        case "$seq" in
-            '[A') ((cursor > 0)) && ((cursor--)) ;;
-            '[B') ((cursor < ${#OPTIONS[@]} - 1)) && ((cursor++)) ;;
-        esac
-    elif [[ "$key" == '' ]]; then
-        # Enter key
-        break
-    elif [[ "$key" == 'q' || "$key" == 'Q' ]]; then
-        exit 0
-    fi
-    draw_menu $start_row
-done
-
-choice="${OPTIONS[$cursor]}"
-echo ""
-echo -e "${BOLD}Following: ${choice}${NC}"
-echo -e "${DIM}Ctrl+C to exit${NC}"
-echo ""
-
-if [[ "$choice" == "debug" ]]; then
-    docker compose logs -f rag-service api-gateway
-elif [[ "$choice" == "all" ]]; then
-    docker compose logs -f
-elif [[ "$choice" == "clear" ]]; then
-    echo -e "${YELLOW}Recreating all app containers (clears log buffers)...${NC}"
-    SERVICES=(rag-service ingestion-service api-gateway document-service web-ui admin-service analytics-service docintel-actions)
-    for svc in "${SERVICES[@]}"; do
-        cid=$(docker compose ps -q "$svc" 2>/dev/null || true)
-        [[ -n "$cid" ]] && docker rm -f "$cid" 2>/dev/null || true
-    done
-    docker compose up -d
-    echo -e "${GREEN}Done.${NC}"
-else
-    docker compose logs -f "$choice"
-fi
+case "$choice" in
+    debug) follow_logs "rag-service + api-gateway (query path)" rag-service api-gateway ;;
+    all)   follow_logs "all services" ;;
+    clear) clear_logs ;;
+    *)     follow_logs "$choice" "$choice" ;;
+esac
