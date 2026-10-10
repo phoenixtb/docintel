@@ -17,6 +17,7 @@ jobs:
   rag-service:
     name: RAG Service
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: services/rag-service
@@ -51,6 +52,7 @@ jobs:
   analytics-service:
     name: Analytics Service
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: services/analytics-service-py
@@ -76,6 +78,7 @@ jobs:
   docintel-common:
     name: docintel-common
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: lib/docintel-common
@@ -106,6 +109,7 @@ jobs:
   python-locks:
     name: Python lockfiles current
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
@@ -123,15 +127,16 @@ jobs:
           done
 
   # ===========================================================================
-  # Object-store image pin — compose and every test container use one tag
+  # Image pins — compose and every test container use one tag per image
   # ===========================================================================
-  object-store-pin:
-    name: Object-store image pin
+  image-pins:
+    name: Image pins
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - name: Check pins
-        run: scripts/check-object-store-pin.sh
+        run: scripts/check-image-pins.sh
 
   # ===========================================================================
   # Kotlin Services
@@ -139,6 +144,7 @@ jobs:
   kotlin-services:
     name: Kotlin Services
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       # One service's failure must not cancel (and hide) the others' results.
       fail-fast: false
@@ -180,6 +186,7 @@ jobs:
   web-ui:
     name: Web UI
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: services/web-ui
@@ -192,10 +199,10 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: services/web-ui/package.json
+          cache-dependency-path: services/web-ui/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build
         run: npm run build
@@ -203,17 +210,21 @@ jobs:
       - name: Install Playwright
         run: npx playwright install --with-deps chromium
 
+      # The IdP and API gateway are faked with Playwright request routing
+      # (tests/support), so no backend runs here.
       - name: Run Playwright tests
-        run: npx playwright test --reporter=github
+        run: npx playwright test
         env:
           CI: true
-          PUBLIC_API_URL: http://localhost:8080
+
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: playwright-report
-          path: services/web-ui/playwright-report/
+          path: |
+            services/web-ui/playwright-report/
+            services/web-ui/test-results/
 
   # ===========================================================================
   # Docker Build Test — all services
@@ -221,6 +232,7 @@ jobs:
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [rag-service, analytics-service, kotlin-services, web-ui]
     strategy:
       matrix:

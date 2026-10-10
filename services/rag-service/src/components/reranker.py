@@ -8,7 +8,7 @@ LmforgeReranker
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from haystack import Document, component
@@ -45,7 +45,7 @@ class LmforgeReranker:
         self,
         query: str,
         documents: list[Document],
-        top_k: Optional[int] = None,
+        top_k: int | None = None,
     ) -> dict[str, Any]:
         if not documents:
             return {"documents": [], "reranker_degraded": False}

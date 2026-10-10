@@ -36,7 +36,8 @@ Private-symbol dependency:
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Defensive import of Haystack private symbols.
@@ -44,7 +45,8 @@ from typing import Callable, List, Optional
 # startup (import time), not mid-stream during a user query.
 # ---------------------------------------------------------------------------
 try:
-    from haystack.components.generators.chat.openai import (
+    # Private symbol, not re-exported by Haystack; its presence is what this block checks.
+    from haystack.components.generators.chat.openai import (  # type: ignore[attr-defined]
         OpenAIChatGenerator,
         _convert_chat_completion_chunk_to_streaming_chunk,
         _convert_streaming_chunks_to_chat_message,
@@ -64,9 +66,10 @@ from haystack.utils import Secret
 # Older versions don't have it; fall back to storing in chunk.meta.
 try:
     from haystack.dataclasses import ReasoningContent as _ReasoningContent
+
     _REASONING_CONTENT_AVAILABLE = True
 except ImportError:
-    _ReasoningContent = None  # type: ignore[assignment]
+    _ReasoningContent = None  # type: ignore[misc,assignment]
     _REASONING_CONTENT_AVAILABLE = False
 
 
@@ -82,11 +85,13 @@ class ThinkingAwareChatGenerator(OpenAIChatGenerator):
     chunk to the user's callback.
     """
 
-    def _handle_stream_response(self, chat_completion, callback) -> List[ChatMessage]:
+    def _handle_stream_response(
+        self, chat_completion: Any, callback: Callable[[StreamingChunk], None]
+    ) -> list[ChatMessage]:
         from haystack.dataclasses import ComponentInfo
 
         component_info = ComponentInfo.from_component(self)
-        chunks: List[StreamingChunk] = []
+        chunks: list[StreamingChunk] = []
 
         for raw_chunk in chat_completion:
             chunk_delta = _convert_chat_completion_chunk_to_streaming_chunk(
@@ -133,19 +138,19 @@ def build_streaming_generator(
     chat_url: str,
     api_key: str,
     streaming_callback: Callable[[StreamingChunk], None],
-    think: Optional[bool],
+    think: bool | None,
     max_tokens: int,
     temperature: float,
-    top_p: Optional[float] = None,
+    top_p: float | None = None,
     frequency_penalty: float = 0.0,
-    presence_penalty: Optional[float] = None,
-    repetition_penalty: Optional[float] = None,
-    top_k: Optional[int] = None,
-    min_p: Optional[float] = None,
-    thinking_budget: Optional[int] = None,
-    stream_reasoning_deltas: Optional[bool] = None,
-    timeout: Optional[float] = None,
-    max_retries: Optional[int] = None,
+    presence_penalty: float | None = None,
+    repetition_penalty: float | None = None,
+    top_k: int | None = None,
+    min_p: float | None = None,
+    thinking_budget: int | None = None,
+    stream_reasoning_deltas: bool | None = None,
+    timeout: float | None = None,
+    max_retries: int | None = None,
 ) -> ThinkingAwareChatGenerator:
     """
     Return a ThinkingAwareChatGenerator configured for a single streaming request.
@@ -174,7 +179,7 @@ def build_streaming_generator(
         call 1 completes. Non-LMForge engines ignore unknown extra_body keys.
     presence_penalty is OpenAI-standard and goes into generation_kwargs directly.
     """
-    extra: dict = {}
+    extra: dict[str, Any] = {}
     if think is not None:
         extra["think"] = think
     # thinking_budget and stream_reasoning_deltas only relevant in thinking mode
@@ -189,7 +194,7 @@ def build_streaming_generator(
     if repetition_penalty is not None:
         extra["repetition_penalty"] = repetition_penalty
 
-    generation_kwargs: dict = {
+    generation_kwargs: dict[str, Any] = {
         "temperature": temperature,
         "max_tokens": max_tokens,
         # OpenAI-standard: asks the engine to emit a trailing usage-only chunk.
@@ -217,7 +222,7 @@ def build_streaming_generator(
     )
 
 
-def extract_reasoning_content(chunk: StreamingChunk) -> Optional[str]:
+def extract_reasoning_content(chunk: StreamingChunk) -> str | None:
     """
     Extract reasoning content from a StreamingChunk.
 
@@ -227,7 +232,7 @@ def extract_reasoning_content(chunk: StreamingChunk) -> Optional[str]:
     return chunk.meta.get("reasoning_content")
 
 
-def extract_lmforge_status(chunk: StreamingChunk) -> Optional[str]:
+def extract_lmforge_status(chunk: StreamingChunk) -> str | None:
     """
     Extract LMForge lifecycle status from a StreamingChunk.
 
@@ -237,7 +242,7 @@ def extract_lmforge_status(chunk: StreamingChunk) -> Optional[str]:
     return chunk.meta.get("lmforge_status")
 
 
-def extract_usage(chunk: StreamingChunk) -> dict | None:
+def extract_usage(chunk: StreamingChunk) -> dict[str, Any] | None:
     """
     Extract token usage from a StreamingChunk.
 

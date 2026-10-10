@@ -29,19 +29,19 @@ Gradle 8.11.1 does not start on JDK 25 or newer: run `./gradlew` with a JDK 21 `
 | Testcontainers (Java) | 1.21.4 | document-service, admin-service tests (first line with Docker Engine 29 API support) |
 | MockK / springmockk | 1.13.13 / 4.0.2 | Kotlin tests |
 | boto3 | ≥ 1.43.108 (lock: 1.43.108) | `docintel-common[s3]` |
-| testcontainers (Python) | ≥ 4.15.0 | `docintel-common[dev]` |
+| testcontainers (Python) | ≥ 4.15.0 | `docintel-common[dev]`, `rag-service[dev]` |
 | SvelteKit / Svelte | ^2 / ^5 | `services/web-ui/package.json` |
 
 ## Container images (compose and tests)
 
 | Image | Tag | Used by |
 |---|---|---|
-| `versity/versitygw` | v1.8.0 | `object-store` service and object-store integration tests, kept equal by `scripts/check-object-store-pin.sh` |
+| `versity/versitygw` | v1.8.0 | `object-store` service and object-store integration tests, kept equal by `scripts/check-image-pins.sh` |
 | `curlimages/curl` | 8.22.0 | `object-store-init` |
 | `debian` | 13-slim | `scripts/backup.sh` (GNU tar with xattrs) |
 | `postgres` | 18.1-trixie (compose), 15-alpine (Kotlin tests) | |
 | `redis` | 7.4.0-alpine | compose, document-service tests |
-| `qdrant/qdrant` | v1.16.3 | compose |
+| `qdrant/qdrant` | v1.16.3 | compose and rag-service Qdrant tests, kept equal by `scripts/check-image-pins.sh` |
 | `clickhouse/clickhouse-server` | 25.1.3.23 | compose |
 | `ghcr.io/zitadel/zitadel`, `zitadel-login` | v4.12.1 | compose |
 | `langfuse/langfuse` / `langfuse-worker` | 3 / pinned digest | compose |

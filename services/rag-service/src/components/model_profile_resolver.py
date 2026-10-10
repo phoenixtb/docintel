@@ -19,3 +19,15 @@ from docintel_common.model_profile_resolver import (  # noqa: F401
     _row_to_params,
     infer_kind,
 )
+
+__all__ = [
+    "BUILTIN_PROFILES",
+    "ModelProfileResolver",
+    "ModelSamplingParams",
+    "_best_match",
+    "_builtin_for",
+    "_match_pattern",
+    "_merge",
+    "_row_to_params",
+    "infer_kind",
+]

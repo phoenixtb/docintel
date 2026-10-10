@@ -8,12 +8,15 @@ QdrantHybridRetriever for idiomatic Haystack hybrid search.
 """
 
 import logging
+from typing import TYPE_CHECKING, Any
 
 from haystack import Document, component
+from haystack.dataclasses import SparseEmbedding
+
+if TYPE_CHECKING:
+    from fastembed import SparseTextEmbedding
 
 logger = logging.getLogger(__name__)
-from haystack.dataclasses import SparseEmbedding
-from typing import Optional
 
 
 @component
@@ -28,24 +31,29 @@ class BM25SparseDocumentEmbedder:
 
     def __init__(self, model_name: str = "Qdrant/bm25"):
         self.model_name = model_name
-        self._model = None
+        self._model: SparseTextEmbedding | None = None
 
-    def warm_up(self):
-        from fastembed import SparseTextEmbedding
-        self._model = SparseTextEmbedding(model_name=self.model_name)
+    def warm_up(self) -> None:
+        self._loaded_model()
+
+    def _loaded_model(self) -> "SparseTextEmbedding":
+        if self._model is None:
+            from fastembed import SparseTextEmbedding
+
+            self._model = SparseTextEmbedding(model_name=self.model_name)
+        return self._model
 
     @component.output_types(documents=list[Document])
-    def run(self, documents: list[Document]) -> dict:
+    def run(self, documents: list[Document]) -> dict[str, Any]:
         """
         Compute BM25 sparse embeddings for a list of documents.
         Sets doc.sparse_embedding on each; falls back gracefully on error.
         """
-        if self._model is None:
-            self.warm_up()
+        model = self._loaded_model()
 
         texts = [doc.content or "" for doc in documents]
         try:
-            sparse_embeddings = list(self._model.passage_embed(texts))  # type: ignore[union-attr]
+            sparse_embeddings = list(model.passage_embed(texts))
             for doc, se in zip(documents, sparse_embeddings):
                 doc.sparse_embedding = SparseEmbedding(
                     indices=se.indices.tolist(),
@@ -68,23 +76,28 @@ class BM25SparseTextEmbedder:
 
     def __init__(self, model_name: str = "Qdrant/bm25"):
         self.model_name = model_name
-        self._model = None
+        self._model: SparseTextEmbedding | None = None
 
-    def warm_up(self):
-        from fastembed import SparseTextEmbedding
-        self._model = SparseTextEmbedding(model_name=self.model_name)
+    def warm_up(self) -> None:
+        self._loaded_model()
 
-    @component.output_types(sparse_embedding=Optional[SparseEmbedding])
-    def run(self, text: str) -> dict:
+    def _loaded_model(self) -> "SparseTextEmbedding":
+        if self._model is None:
+            from fastembed import SparseTextEmbedding
+
+            self._model = SparseTextEmbedding(model_name=self.model_name)
+        return self._model
+
+    @component.output_types(sparse_embedding=SparseEmbedding | None)
+    def run(self, text: str) -> dict[str, Any]:
         """
         Compute BM25 sparse embedding for a query string.
         Returns None sparse_embedding on failure (falls back to dense-only).
         """
-        if self._model is None:
-            self.warm_up()
+        model = self._loaded_model()
 
         try:
-            result = list(self._model.query_embed([text]))  # type: ignore[union-attr]
+            result = list(model.query_embed([text]))
             if result:
                 se = result[0]
                 return {

@@ -1,93 +1,92 @@
-import { test, expect } from '@playwright/test';
+import { storedDocument } from './support/fakeApi';
+import { expect, expectNoA11yViolations, test } from './support/fixtures';
 
-/**
- * E2E tests for the Documents page.
- * These tests verify basic UI functionality without requiring backend services.
- */
-test.describe('Documents Page', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/documents');
-    await page.waitForLoadState('networkidle');
+const HANDBOOK = new URL('./fixtures/handbook.txt', import.meta.url).pathname;
+
+test.describe('Documents', () => {
+  test('lists the tenant\'s uploaded documents with their status', async ({ page, api, signIn }) => {
+    api.documents = [
+      storedDocument({ id: 'doc-1', filename: 'leave-policy.pdf', status: 'COMPLETED', metadata: { source: 'upload' } }),
+      storedDocument({ id: 'doc-2', filename: 'broken-scan.pdf', status: 'FAILED', metadata: { source: 'upload' } }),
+    ];
+    await signIn('/documents');
+
+    const completed = page.getByRole('row', { name: /leave-policy\.pdf/ });
+    await expect(completed).toBeVisible();
+    await expect(completed).toContainText('COMPLETED');
+    const failed = page.getByRole('row', { name: /broken-scan\.pdf/ });
+    await expect(failed).toBeVisible();
+    await expect(failed).toContainText('FAILED');
   });
 
-  test('should load documents page', async ({ page }) => {
-    // Page should be visible
-    await expect(page.locator('body')).toBeVisible();
-    // Should contain DocIntel branding
-    await expect(page.locator('header')).toBeVisible();
+  test('shows an empty state when the tenant has no documents', async ({ page, signIn }) => {
+    await signIn('/documents');
+
+    await expect(page.getByText('No uploaded documents yet.')).toBeVisible();
+    await expect(page.getByText('Upload a document above to get started.')).toBeVisible();
   });
 
-  test('should have navigation back to chat', async ({ page }) => {
-    // Should have a link to home somewhere on the page
-    const homeLink = page.locator('a[href="/"]').first();
-    await expect(homeLink).toBeAttached();
+  test('keeps the Upload button disabled until a file is chosen', async ({ page, signIn }) => {
+    await signIn('/documents');
+    const upload = page.getByRole('button', { name: 'Upload', exact: true });
+    await expect(upload).toBeDisabled();
+
+    await page.getByLabel('Document file to upload').setInputFiles(HANDBOOK);
+
+    await expect(upload).toBeEnabled();
   });
 
-  test('should navigate back to chat', async ({ page }) => {
-    const homeLink = page.locator('a[href="/"]').first();
-    await homeLink.click();
-    await expect(page).toHaveURL('/');
+  test('uploads the chosen file with the selected domain', async ({ page, api, signIn }) => {
+    await signIn('/documents');
+
+    await page.getByRole('radio', { name: 'HR Policy' }).check();
+    await page.getByLabel('Document file to upload').setInputFiles(HANDBOOK);
+    await page.getByRole('button', { name: 'Upload', exact: true }).click();
+
+    await expect(page.getByText('Uploaded "handbook.txt" successfully')).toBeVisible();
+    const uploads = api.requestsTo('POST', '/api/v1/documents');
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0].body).toContain('filename="handbook.txt"');
+    expect(uploads[0].body).toMatch(/name="domain"\r\n\r\nhr_policy\r\n/);
   });
 
-  test('should display upload section', async ({ page }) => {
-    // Should have file input somewhere on page
-    const fileInput = page.locator('input[type="file"]');
-    await expect(fileInput).toBeAttached();
+  test('shows an error when the upload fails', async ({ page, api, signIn }) => {
+    api.on('POST', '/api/v1/documents', () => ({ status: 500, json: { error: { code: 'INTERNAL' } } }));
+    await signIn('/documents');
+
+    await page.getByLabel('Document file to upload').setInputFiles(HANDBOOK);
+    await page.getByRole('button', { name: 'Upload', exact: true }).click();
+
+    await expect(page.getByText('Upload failed: HTTP 500')).toBeVisible();
+    await expect(page.getByText('Uploaded "handbook.txt" successfully')).toHaveCount(0);
   });
 
-  test('should have domain selection options', async ({ page }) => {
-    // Check for domain-related content (radio buttons or select)
-    const domainOptions = page.locator('input[type="radio"]');
-    const count = await domainOptions.count();
-    expect(count).toBeGreaterThanOrEqual(1);
+  test('shows the indexed vector count from vector-stats', async ({ page, signIn }) => {
+    await signIn('/documents');
+
+    await expect(page.getByText('Total Chunks')).toBeVisible();
+    await expect(page.getByText('HR Policy', { exact: true }).first()).toBeVisible();
+    // total_vectors and the hr_policy tenant stat are both 120
+    await expect(page.getByText('120', { exact: true })).toHaveCount(2);
+    await expect(page.getByText('No documents indexed yet.')).toHaveCount(0);
   });
 
-  test('should be responsive', async ({ page }) => {
-    await page.setViewportSize({ width: 375, height: 667 });
-    
-    // Header should still be visible on mobile
-    await expect(page.locator('header')).toBeVisible();
+  test('has no WCAG 2.1 AA violations on the documents page', async ({ page, api, signIn }) => {
+    api.documents = [storedDocument({ filename: 'leave-policy.pdf', metadata: { source: 'upload' } })];
+    await signIn('/documents');
+    await expect(page.getByRole('row', { name: /leave-policy\.pdf/ })).toBeVisible();
+    await expect(page.getByText('Total Chunks')).toBeVisible();
+
+    await expectNoA11yViolations(page);
   });
 });
 
-test.describe('Document Upload Flow', () => {
-  test('should have file input for upload', async ({ page }) => {
-    await page.goto('/documents');
-    
-    const fileInput = page.locator('input[type="file"]');
-    await expect(fileInput).toBeAttached();
-  });
+test.describe('Landing page', () => {
+  test('has no WCAG 2.1 AA violations when signed out', async ({ page, idp }) => {
+    void idp;
+    await page.goto('/');
+    await expect(page.getByRole('button', { name: 'Sign In' })).toBeVisible();
 
-  test('should enable upload button when file selected', async ({ page }) => {
-    await page.goto('/documents');
-    
-    const fileInput = page.locator('input[type="file"]');
-    
-    // Create a test file and select it
-    await fileInput.setInputFiles({
-      name: 'test-document.txt',
-      mimeType: 'text/plain',
-      buffer: Buffer.from('This is test content for upload.')
-    });
-    
-    // File should be selected (input has files)
-    const files = await fileInput.evaluate((el: HTMLInputElement) => el.files?.length);
-    expect(files).toBe(1);
-  });
-});
-
-test.describe('Page Layout', () => {
-  test('should have proper header structure', async ({ page }) => {
-    await page.goto('/documents');
-    
-    await expect(page.locator('header')).toBeVisible();
-  });
-
-  test('should have main content area', async ({ page }) => {
-    await page.goto('/documents');
-    
-    // Page should have content after header
-    const main = page.locator('main, div.flex.flex-col');
-    await expect(main.first()).toBeVisible();
+    await expectNoA11yViolations(page);
   });
 });

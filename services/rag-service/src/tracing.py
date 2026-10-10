@@ -23,8 +23,9 @@ Usage:
 """
 
 import logging
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator, Optional
+from typing import Any
 
 from .config import Settings, get_settings
 
@@ -37,7 +38,7 @@ class _Span:
     def __init__(self, span: Any | None) -> None:
         self._span = span
 
-    def end(self, output: dict | None = None) -> None:
+    def end(self, output: dict[str, Any] | None = None) -> None:
         if self._span is None:
             return
         if output:
@@ -57,7 +58,7 @@ class _Trace:
         self._client = client
 
     @contextmanager
-    def span(self, name: str, input: dict | None = None) -> Generator[_Span, None, None]:
+    def span(self, name: str, input: dict[str, Any] | None = None) -> Generator[_Span, None, None]:
         if self._trace is None:
             yield _Span(None)
             return
@@ -90,7 +91,7 @@ class _Trace:
             metadata={"latency_ms": latency_ms} if latency_ms else None,
         )
 
-    def update(self, output: dict | None = None, **kwargs: Any) -> None:
+    def update(self, output: dict[str, Any] | None = None, **kwargs: Any) -> None:
         if self._trace:
             self._trace.update(output=output, **kwargs)
 
@@ -134,7 +135,7 @@ class LangfuseTracer:
     def trace(
         self,
         name: str,
-        inputs: dict | None = None,
+        inputs: dict[str, Any] | None = None,
         user_id: str | None = None,
         session_id: str | None = None,
         tags: list[str] | None = None,
@@ -169,7 +170,7 @@ class LangfuseTracer:
         self,
         name: str,
         trace_id: str,
-        inputs: dict | None = None,
+        inputs: dict[str, Any] | None = None,
         user_id: str | None = None,
         session_id: str | None = None,
         tags: list[str] | None = None,

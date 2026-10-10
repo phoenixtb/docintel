@@ -29,8 +29,11 @@ import json
 import logging
 import threading
 import time
-from typing import AsyncIterator, Optional
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
 
+from docintel_common.domain import DOMAIN_LABELS
+from docintel_common.security import UserContext
 from haystack.components.embedders.openai_text_embedder import OpenAITextEmbedder
 from haystack.components.routers import TransformersZeroShotTextRouter
 from haystack.utils import Secret
@@ -50,6 +53,8 @@ from ..components.prompt import PromptBuilder
 from ..components.query_transform import QueryExpander
 from ..components.reranker import LmforgeReranker
 from ..components.retrieval import SecureRetriever
+from ..components.routing import DomainFilterBuilder
+from ..config import Settings, get_settings
 from ..events import (
     ErrorEvent,
     MetadataEvent,
@@ -61,13 +66,11 @@ from ..events import (
     ThinkingTokenEvent,
     TokenEvent,
 )
-from ..utils.asyncio import _run_db
-from docintel_common.domain import DOMAIN_LABELS
-from docintel_common.security import Classification, UserContext
-
-from ..components.routing import DomainFilterBuilder
-from ..config import Settings, get_settings
 from ..tracing import LangfuseTracer
+from ..utils.asyncio import _run_db
+
+if TYPE_CHECKING:
+    from ..components.summarizer import AnchoredSummarizer
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +79,8 @@ logger = logging.getLogger(__name__)
 # Section label helper (for source citations)
 # ---------------------------------------------------------------------------
 
-def _build_section_label(meta: dict, chunk_index: int) -> str:
+
+def _build_section_label(meta: dict[str, Any], chunk_index: int) -> str:
     if meta.get("page") is not None:
         return f"p. {meta['page']}"
     item_idx = meta.get("item_index")
@@ -91,7 +95,8 @@ def _parse_json_answer(raw: str) -> str:
     try:
         parsed = json.loads(raw.strip())
         if isinstance(parsed, dict) and "answer" in parsed:
-            return parsed["answer"]
+            answer: str = parsed["answer"]
+            return answer
     except (json.JSONDecodeError, TypeError):
         pass
     return raw
@@ -111,6 +116,7 @@ def _extract_think(raw: str) -> tuple[str, str]:
       3. No block at all → ("", raw)
     """
     import re
+
     m = re.search(r"<think>(.*?)</think>(.*)", raw, re.DOTALL)
     if m:
         return m.group(1).strip(), m.group(2).strip()
@@ -120,30 +126,33 @@ def _extract_think(raw: str) -> tuple[str, str]:
     return "", raw.strip()
 
 
-def _build_sources(documents: list) -> list[dict]:
+def _build_sources(documents: list[Any]) -> list[dict[str, Any]]:
     """Build the canonical source list from Haystack Document objects."""
     sources = []
     for i, doc in enumerate(documents):
         chunk_idx = doc.meta.get("chunk_index", i)
         content = doc.content or ""
-        sources.append({
-            "ref_id": i + 1,
-            "chunk_id": doc.id,
-            "document_id": doc.meta.get("document_id", ""),
-            "filename": doc.meta.get("filename", "Unknown"),
-            "section": _build_section_label(doc.meta, chunk_idx),
-            "chunk_index": chunk_idx,
-            "score": doc.score or 0.0,
-            "content": content[:600],
-            "domain": doc.meta.get("document_type") or doc.meta.get("domain") or "",
-            "metadata": {k: v for k, v in doc.meta.items() if k != "content"},
-        })
+        sources.append(
+            {
+                "ref_id": i + 1,
+                "chunk_id": doc.id,
+                "document_id": doc.meta.get("document_id", ""),
+                "filename": doc.meta.get("filename", "Unknown"),
+                "section": _build_section_label(doc.meta, chunk_idx),
+                "chunk_index": chunk_idx,
+                "score": doc.score or 0.0,
+                "content": content[:600],
+                "domain": doc.meta.get("document_type") or doc.meta.get("domain") or "",
+                "metadata": {k: v for k, v in doc.meta.items() if k != "content"},
+            }
+        )
     return sources
 
 
 # ---------------------------------------------------------------------------
 # RAGService
 # ---------------------------------------------------------------------------
+
 
 class RAGService:
     """
@@ -170,25 +179,25 @@ class RAGService:
         self._warm_up_lock = threading.Lock()
 
         # Embedders
-        self._dense_embedder: Optional[OpenAITextEmbedder] = None
-        self._sparse_embedder: Optional[BM25SparseTextEmbedder] = None
+        self._dense_embedder: OpenAITextEmbedder | None = None
+        self._sparse_embedder: BM25SparseTextEmbedder | None = None
 
         # Semantic cache
-        self._cache_checker: Optional[SemanticCacheChecker] = None
-        self._cache_writer: Optional[SemanticCacheWriter] = None
+        self._cache_checker: SemanticCacheChecker | None = None
+        self._cache_writer: SemanticCacheWriter | None = None
 
         # Domain routing
-        self._domain_router: Optional[TransformersZeroShotTextRouter] = None
-        self._domain_filter_builder: Optional[DomainFilterBuilder] = None
+        self._domain_router: TransformersZeroShotTextRouter | None = None
+        self._domain_filter_builder: DomainFilterBuilder | None = None
 
         # Core RAG components (direct references, replacing Haystack pipeline)
-        self._retriever: Optional[SecureRetriever] = None
-        self._opa_validator: Optional[OpaChunkValidator] = None
-        self._reranker: Optional[LmforgeReranker] = None
-        self._prompt_builder: Optional[PromptBuilder] = None
+        self._retriever: SecureRetriever | None = None
+        self._opa_validator: OpaChunkValidator | None = None
+        self._reranker: LmforgeReranker | None = None
+        self._prompt_builder: PromptBuilder | None = None
 
         # G2 — query expansion (optional, disabled by default)
-        self._query_expander: Optional[QueryExpander] = None
+        self._query_expander: QueryExpander | None = None
 
         # Cost/token accounting — per-tenant in-memory accumulator
         self._cost_tracker = CostTracker()
@@ -254,7 +263,8 @@ class RAGService:
             self._ready = True
             logger.info(
                 "RAGService ready (cache=%s, domain_routing=%s)",
-                cfg.use_cache, cfg.rag_use_domain_routing,
+                cfg.use_cache,
+                cfg.rag_use_domain_routing,
             )
 
     # ── Conversation helpers ─────────────────────────────────────────────────
@@ -263,7 +273,7 @@ class RAGService:
         self,
         conversation_id: str,
         tenant_id: str,
-    ) -> tuple[list[dict], dict]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """
         Returns (history_messages, context_state).
 
@@ -287,12 +297,14 @@ class RAGService:
 
             recent = get_recent_messages(conversation_id, tenant_id, limit=verbatim)
 
-            history: list[dict] = []
+            history: list[dict[str, Any]] = []
             if session_summary:
-                history.append({
-                    "role": "system",
-                    "content": f"Earlier in this conversation:\n{session_summary}",
-                })
+                history.append(
+                    {
+                        "role": "system",
+                        "content": f"Earlier in this conversation:\n{session_summary}",
+                    }
+                )
 
             history.extend(recent)
 
@@ -316,9 +328,9 @@ class RAGService:
         conversation_id: str,
         question: str,
         answer: str,
-        sources: list[dict],
+        sources: list[dict[str, Any]],
         tenant_id: str = "",
-        summarizer=None,
+        summarizer: "AnchoredSummarizer | None" = None,
     ) -> None:
         try:
             from ..db import add_message
@@ -343,7 +355,7 @@ class RAGService:
         self,
         conversation_id: str,
         tenant_id: str,
-        summarizer,
+        summarizer: "AnchoredSummarizer",
     ) -> None:
         """
         Anchored iterative compression (fire-and-forget).
@@ -357,10 +369,10 @@ class RAGService:
 
         try:
             from ..db import (
+                add_message,
                 get_conversation_summary_state,
                 get_messages_slice,
                 update_conversation_summary,
-                add_message,
             )
 
             state = get_conversation_summary_state(conversation_id, tenant_id)
@@ -380,7 +392,8 @@ class RAGService:
                 return
 
             new_span = get_messages_slice(
-                conversation_id, tenant_id,
+                conversation_id,
+                tenant_id,
                 offset=summary_upto,
                 limit=evictable_count,
             )
@@ -411,7 +424,9 @@ class RAGService:
 
             logger.info(
                 "Conversation %s compressed: %d new turns absorbed (total summarized: %d)",
-                conversation_id, compressed_turns, new_upto // 2,
+                conversation_id,
+                compressed_turns,
+                new_upto // 2,
             )
 
         except Exception as e:
@@ -423,7 +438,7 @@ class RAGService:
         self,
         question: str,
         document_type: str | None,
-    ) -> tuple[str | None, dict | None]:
+    ) -> tuple[str | None, dict[str, Any] | None]:
         """
         Returns (detected_domain, domain_filter).
 
@@ -455,8 +470,8 @@ class RAGService:
         user_context: UserContext,
         user_roles: list[str] | None,
         user_id: str | None,
-        history: list[dict] | None,
-        context_state: dict | None,
+        history: list[dict[str, Any]] | None,
+        context_state: dict[str, Any] | None,
         document_type: str | None,
         top_k: int | None,
         min_score: float | None,
@@ -469,7 +484,7 @@ class RAGService:
         request_id: str,
         model_profile_resolver: ModelProfileResolver | None = None,
         conversation_id: str | None = None,
-        summarizer=None,
+        summarizer: "AnchoredSummarizer | None" = None,
         tracer: LangfuseTracer | None = None,
         retrieve_only: bool = False,
     ) -> AsyncIterator[PipelineEvent]:
@@ -519,7 +534,9 @@ class RAGService:
             self._last_trace_id = ""
 
         # ── 1. Initial metadata ───────────────────────────────────────────────
-        initial_context = context_state if (context_state and context_state.get("has_summary")) else None
+        initial_context = (
+            context_state if (context_state and context_state.get("has_summary")) else None
+        )
         yield MetadataEvent(
             query_id=request_id,
             cache_hit=False,
@@ -529,12 +546,14 @@ class RAGService:
         # ── 2. Embed ──────────────────────────────────────────────────────────
         try:
             embed_result = await loop.run_in_executor(
-                None, lambda: self._dense_embedder.run(text=question)  # type: ignore[union-attr]
+                None,
+                lambda: self._dense_embedder.run(text=question),  # type: ignore[union-attr]
             )
             query_embedding: list[float] = embed_result["embedding"]
 
             sparse_result = await loop.run_in_executor(
-                None, lambda: self._sparse_embedder.run(text=question)  # type: ignore[union-attr]
+                None,
+                lambda: self._sparse_embedder.run(text=question),  # type: ignore[union-attr]
             )
             query_sparse_embedding = sparse_result.get("sparse_embedding")
         except Exception as e:
@@ -559,7 +578,7 @@ class RAGService:
                     chunk_size = cfg.rag_cache_replay_chunk_chars
                     delay_ms = cfg.rag_cache_replay_chunk_delay_ms
                     for i in range(0, len(cached_text), chunk_size):
-                        yield TokenEvent(text=cached_text[i: i + chunk_size])
+                        yield TokenEvent(text=cached_text[i : i + chunk_size])
                         if delay_ms > 0:
                             await asyncio.sleep(delay_ms / 1000)
                     yield SourcesEvent(
@@ -594,16 +613,20 @@ class RAGService:
             if expanded_query and expanded_query.strip() != question.strip():
                 try:
                     exp_embed_result = await loop.run_in_executor(
-                        None, lambda: self._dense_embedder.run(text=expanded_query)  # type: ignore[union-attr]
+                        None,
+                        lambda: self._dense_embedder.run(text=expanded_query),  # type: ignore[union-attr]
                     )
                     exp_sparse_result = await loop.run_in_executor(
-                        None, lambda: self._sparse_embedder.run(text=expanded_query)  # type: ignore[union-attr]
+                        None,
+                        lambda: self._sparse_embedder.run(text=expanded_query),  # type: ignore[union-attr]
                     )
                     expanded_embedding = exp_embed_result["embedding"]
                     expanded_sparse_embedding = exp_sparse_result.get("sparse_embedding")
                     self._last_query_expanded = True
                 except Exception as e:
-                    logger.warning("Embedding expanded query failed, using original candidates only: %s", e)
+                    logger.warning(
+                        "Embedding expanded query failed, using original candidates only: %s", e
+                    )
                     expanded_embedding = None
 
         # ── 4. Route ──────────────────────────────────────────────────────────
@@ -661,7 +684,9 @@ class RAGService:
                         retrieved_docs.append(d)
                         seen_ids.add(d.id)
             except Exception as e:
-                logger.warning("Expanded-query retrieval failed, continuing with original candidates: %s", e)
+                logger.warning(
+                    "Expanded-query retrieval failed, continuing with original candidates: %s", e
+                )
 
         yield MetadataEvent(
             query_id=request_id,
@@ -746,8 +771,11 @@ class RAGService:
 
             logger.info(
                 "rerank_gate mode=%s skipped=%s top_fused=%.4f n_in=%d n_out=%d",
-                self._last_retrieval_mode, self._last_rerank_skipped,
-                top_fused_score, candidates_in, len(documents),
+                self._last_retrieval_mode,
+                self._last_rerank_skipped,
+                top_fused_score,
+                candidates_in,
+                len(documents),
             )
 
             self._last_rerank_candidates_in = candidates_in
@@ -769,7 +797,7 @@ class RAGService:
         if effective_min_score > 0.0 and not self._last_rerank_skipped:
             above = [d for d in documents if (d.score or 0.0) >= effective_min_score]
             if not above and cfg.rag_min_score_fallback_topk > 0:
-                above = documents[:cfg.rag_min_score_fallback_topk]
+                above = documents[: cfg.rag_min_score_fallback_topk]
             documents = above
 
         documents = documents[:effective_top_k]
@@ -785,9 +813,11 @@ class RAGService:
         # ── 9. No-docs branch ─────────────────────────────────────────────────
         if not documents:
             from ..prompts import NO_DOCUMENTS_RESPONSE, NO_RELEVANT_DOCUMENTS_RESPONSE
+
             try:
-                from qdrant_client import QdrantClient as _QC
-                _qc = _QC(url=cfg.qdrant_url)
+                from qdrant_client import QdrantClient
+
+                _qc = QdrantClient(url=cfg.qdrant_url)
                 _count = _qc.count(collection_name=f"documents_{tenant_id}", exact=False).count
                 no_docs_text = (
                     NO_RELEVANT_DOCUMENTS_RESPONSE.format(query=question)
@@ -803,13 +833,25 @@ class RAGService:
                 _t_no_docs = tenant_id
                 _txt_no_docs = no_docs_text
 
-                async def _persist_no_docs():
+                async def _persist_no_docs() -> None:
                     from ..db import add_message as _add
+
                     try:
-                        await _run_db(lambda: _add(_cid_no_docs, "user", _q_no_docs, tenant_id=_t_no_docs))
-                        await _run_db(lambda: _add(_cid_no_docs, "assistant", _txt_no_docs, tenant_id=_t_no_docs, sources=[]))
+                        await _run_db(
+                            lambda: _add(_cid_no_docs, "user", _q_no_docs, tenant_id=_t_no_docs)
+                        )
+                        await _run_db(
+                            lambda: _add(
+                                _cid_no_docs,
+                                "assistant",
+                                _txt_no_docs,
+                                tenant_id=_t_no_docs,
+                                sources=[],
+                            )
+                        )
                     except Exception as _e:
                         logger.warning("Failed to persist no-docs conversation: %s", _e)
+
                 asyncio.create_task(_persist_no_docs())
 
             yield TokenEvent(text=no_docs_text)
@@ -840,39 +882,50 @@ class RAGService:
             profile = await model_profile_resolver.resolve(effective_model, tenant_id)
         else:
             from ..components.model_profile_resolver import ModelSamplingParams
+
             profile = ModelSamplingParams()
 
-        def _p(profile_val, cfg_val):  # noqa: E306 — local helper, not a class
+        def _p(profile_val: Any, cfg_val: Any) -> Any:  # noqa: E306 — local helper, not a class
             return profile_val if profile_val is not None else cfg_val
 
         if effective_thinking:
             llm_temperature = _p(profile.thinking_temperature, cfg.llm_thinking_temperature)
             llm_top_p: float | None = _p(profile.thinking_top_p, cfg.llm_thinking_top_p)
             max_tokens = _p(profile.thinking_max_tokens, cfg.llm_thinking_max_tokens)
-            frequency_penalty_resolved = _p(profile.thinking_frequency_penalty, cfg.llm_thinking_frequency_penalty)
-            presence_penalty_resolved: float | None = _p(profile.thinking_presence_penalty, cfg.llm_thinking_presence_penalty)
-            repetition_penalty_resolved: float | None = _p(profile.thinking_repetition_penalty, cfg.llm_thinking_repetition_penalty)
+            frequency_penalty_resolved = _p(
+                profile.thinking_frequency_penalty, cfg.llm_thinking_frequency_penalty
+            )
+            presence_penalty_resolved: float | None = _p(
+                profile.thinking_presence_penalty, cfg.llm_thinking_presence_penalty
+            )
+            repetition_penalty_resolved: float | None = _p(
+                profile.thinking_repetition_penalty, cfg.llm_thinking_repetition_penalty
+            )
             top_k_resolved: int | None = _p(profile.thinking_top_k, cfg.llm_thinking_top_k)
             min_p_resolved: float | None = _p(profile.thinking_min_p, cfg.llm_thinking_min_p)
-            thinking_budget_resolved: int | None = _p(profile.thinking_budget, cfg.llm_thinking_budget)
+            thinking_budget_resolved: int | None = _p(
+                profile.thinking_budget, cfg.llm_thinking_budget
+            )
             stream_thinking_resolved: bool = _p(profile.stream_thinking, cfg.llm_stream_thinking)
         else:
             llm_temperature = _p(profile.temperature, cfg.llm_temperature)
             llm_top_p = _p(profile.top_p, cfg.llm_top_p)
             max_tokens = _p(profile.max_tokens, cfg.llm_max_tokens)
             frequency_penalty_resolved = _p(profile.frequency_penalty, cfg.llm_frequency_penalty)
-            presence_penalty_resolved = _p(profile.presence_penalty, cfg.llm_presence_penalty) or None
+            presence_penalty_resolved = (
+                _p(profile.presence_penalty, cfg.llm_presence_penalty) or None
+            )
             repetition_penalty_resolved = _p(profile.repetition_penalty, cfg.llm_repetition_penalty)
             top_k_resolved = _p(profile.top_k, cfg.llm_top_k)
             min_p_resolved = _p(profile.min_p, cfg.llm_min_p)
-            thinking_budget_resolved = None   # never sent in non-thinking mode
+            thinking_budget_resolved = None  # never sent in non-thinking mode
             stream_thinking_resolved = False  # never sent in non-thinking mode
 
-        queue: asyncio.Queue = asyncio.Queue()
-        llm_error: list = []
-        usage_holder: dict = {}
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        llm_error: list[Any] = []
+        usage_holder: dict[str, Any] = {}
 
-        def streaming_callback(chunk):
+        def streaming_callback(chunk: Any) -> None:
             # Usage arrives on a trailing chunk with no content when the engine
             # honours stream_options.include_usage (see llm_adapter.extract_usage).
             # Captured unconditionally — this chunk carries no content/reasoning
@@ -920,11 +973,15 @@ class RAGService:
             min_p=min_p_resolved,
             thinking_budget=thinking_budget_resolved,
             stream_reasoning_deltas=stream_thinking_resolved if effective_thinking else None,
-            timeout=cfg.llm_thinking_stream_timeout_s if effective_thinking else cfg.llm_stream_timeout_s,
-            max_retries=cfg.llm_thinking_stream_max_retries if effective_thinking else cfg.llm_stream_max_retries,
+            timeout=cfg.llm_thinking_stream_timeout_s
+            if effective_thinking
+            else cfg.llm_stream_timeout_s,
+            max_retries=cfg.llm_thinking_stream_max_retries
+            if effective_thinking
+            else cfg.llm_stream_max_retries,
         )
 
-        async def run_llm():
+        async def run_llm() -> None:
             async with llm_semaphore:
                 try:
                     await loop.run_in_executor(None, lambda: llm.run(messages=messages))
@@ -952,7 +1009,9 @@ class RAGService:
                 elif kind == "status":
                     # UX-only lifecycle signal — not accumulated into answer/thinking.
                     # "call2_prefill" → LMForge is prefilling Call 2 KV cache.
-                    yield StatusEvent(stage="generating_answer" if text == "call2_prefill" else text)
+                    yield StatusEvent(
+                        stage="generating_answer" if text == "call2_prefill" else text
+                    )
                 else:
                     full_answer_parts.append(text)
                     yield TokenEvent(text=text)
@@ -1008,7 +1067,8 @@ class RAGService:
 
         # ── 14. Cache write (fire-and-forget) ─────────────────────────────────
         if use_cache and self._cache_writer and answer:
-            async def _write_cache():
+
+            async def _write_cache() -> None:
                 try:
                     await loop.run_in_executor(
                         None,
@@ -1022,6 +1082,7 @@ class RAGService:
                     )
                 except Exception as e:
                     logger.warning("Cache write failed: %s", e)
+
             asyncio.create_task(_write_cache())
 
         # ── 15. Persist conversation (fire-and-forget) ────────────────────────
@@ -1033,8 +1094,9 @@ class RAGService:
             _tid = tenant_id
             _summ = summarizer
 
-            async def _persist():
+            async def _persist() -> None:
                 from ..db import add_message as _add
+
                 try:
                     await _run_db(lambda: _add(_cid, "user", _q, tenant_id=_tid))
                     await _run_db(lambda: _add(_cid, "assistant", _a, tenant_id=_tid, sources=_s))
@@ -1042,6 +1104,7 @@ class RAGService:
                         await self._maybe_compress_history(_cid, _tid, _summ)
                 except Exception as e:
                     logger.warning("Failed to persist conversation: %s", e)
+
             asyncio.create_task(_persist())
 
         # ── 16. Sources ───────────────────────────────────────────────────────
@@ -1057,8 +1120,8 @@ class RAGService:
         user_context: UserContext,
         user_roles: list[str] | None = None,
         user_id: str | None = None,
-        history: list[dict] | None = None,
-        context_state: dict | None = None,
+        history: list[dict[str, Any]] | None = None,
+        context_state: dict[str, Any] | None = None,
         document_type: str | None = None,
         top_k: int | None = None,
         min_score: float | None = None,
@@ -1071,17 +1134,17 @@ class RAGService:
         request_id: str,
         model_profile_resolver: ModelProfileResolver | None = None,
         conversation_id: str | None = None,
-        summarizer=None,
+        summarizer: "AnchoredSummarizer | None" = None,
         tracer: LangfuseTracer | None = None,
         retrieve_only: bool = False,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """
         Drain stream() into the legacy dict shape consumed by /query.
         """
         start_time = time.time()
         full_thinking: list[str] = []
         full_answer: list[str] = []
-        sources: list[dict] = []
+        sources: list[dict[str, Any]] = []
         cache_hit = False
         detected_domain: str | None = None
         retrieval_mode: str | None = None
@@ -1116,7 +1179,15 @@ class RAGService:
             retrieve_only=retrieve_only,
         ):
             match event:
-                case MetadataEvent(cache_hit=ch, retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout, reranker_degraded=rd, query_expanded=qe, rerank_skipped=rs):
+                case MetadataEvent(
+                    cache_hit=ch,
+                    retrieval_mode=rm,
+                    rerank_candidates_in=cin,
+                    rerank_candidates_out=cout,
+                    reranker_degraded=rd,
+                    query_expanded=qe,
+                    rerank_skipped=rs,
+                ):
                     cache_hit = ch
                     if rm is not None:
                         retrieval_mode = rm

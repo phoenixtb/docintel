@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app, get_tenant_id, require_internal_token
+from src.config import get_settings
 
 
 # ---------------------------------------------------------------------------
@@ -47,9 +48,26 @@ def test_health_returns_ok(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_ingest_is_disabled_by_default(client: TestClient) -> None:
+    response = client.post(
+        "/ingest",
+        json={
+            "document_id": str(uuid.uuid4()),
+            "bucket": "docintel-test-tenant",
+            "object_path": "docs/abc/original.txt",
+            "filename": "test.txt",
+            "domain_hint": "auto",
+        },
+    )
+    assert response.status_code == 404
+
+
 def test_ingest_returns_202_and_accepted(client: TestClient) -> None:
     doc_id = str(uuid.uuid4())
-    with patch("src.api.main._ingest_document_background", new_callable=AsyncMock):
+    with (
+        patch.object(get_settings(), "ingestion_rest_enabled", True),
+        patch("src.api.main._ingest_document_background", new_callable=AsyncMock),
+    ):
         response = client.post(
             "/ingest",
             json={

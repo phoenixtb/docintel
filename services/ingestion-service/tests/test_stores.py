@@ -103,13 +103,13 @@ def test_creates_only_missing_indexes_when_some_exist() -> None:
 def test_get_document_store_uses_store_client_not_new_qdrant_client() -> None:
     """
     get_document_store() must NOT instantiate a raw QdrantClient to call
-    _ensure_acl_indexes. Instead it reuses store.client (the internal client
-    already open inside QdrantDocumentStore).
+    _ensure_acl_indexes. Instead it reuses store._client (the internal client
+    QdrantDocumentStore opens; qdrant-haystack 10 renamed the public `client`).
     """
     mock_internal_client = _make_mock_client([])  # empty schema → triggers creates
 
     mock_store = MagicMock()
-    mock_store.client = mock_internal_client
+    mock_store._client = mock_internal_client
 
     with patch("src.stores.QdrantDocumentStore", return_value=mock_store) as mock_store_cls, \
          patch("src.stores.QdrantClient") as mock_qdrant_client_cls, \

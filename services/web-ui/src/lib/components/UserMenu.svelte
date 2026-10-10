@@ -67,6 +67,8 @@
 <div class="relative">
   <button
     onclick={() => isOpen = !isOpen}
+    aria-label="Account menu"
+    aria-expanded={isOpen}
     class="flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-white/5 transition-colors group"
   >
     <div class="w-7 h-7 bg-emerald-600 rounded-full flex items-center justify-center text-white font-semibold text-xs
