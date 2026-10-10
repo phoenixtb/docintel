@@ -17,13 +17,12 @@ This prevents cross-user cache leakage of sensitive content.
 
 import os
 import uuid
-from datetime import datetime, timezone
-from typing import Optional
-
-from haystack import component
-from qdrant_client import QdrantClient, models
+from datetime import UTC, datetime
+from typing import Any
 
 from docintel_common.security import CLASSIFICATION_ORDER, Classification, UserContext
+from haystack import component
+from qdrant_client import QdrantClient, models
 
 
 @component
@@ -47,7 +46,7 @@ class SemanticCacheChecker:
         self.threshold = threshold
         self._ensure_collection()
 
-    def _ensure_collection(self):
+    def _ensure_collection(self) -> None:
         collections = self.client.get_collections().collections
         if not any(c.name == self.collection for c in collections):
             self.client.create_collection(
@@ -69,16 +68,16 @@ class SemanticCacheChecker:
 
     @component.output_types(
         cache_hit=bool,
-        cached_response=Optional[str],
-        cached_sources=Optional[list],
+        cached_response=str | None,
+        cached_sources=list | None,
         query_embedding=list[float],
     )
     def run(
         self,
         query_embedding: list[float],
         tenant_id: str,
-        user_context: Optional[UserContext] = None,
-    ) -> dict:
+        user_context: UserContext | None = None,
+    ) -> dict[str, Any]:
         user_clearance_int = (
             CLASSIFICATION_ORDER.get(user_context.clearance, 0)
             if user_context
@@ -152,13 +151,15 @@ class SemanticCacheWriter:
         query: str,
         query_embedding: list[float],
         response: str,
-        sources: list[dict],
+        sources: list[dict[str, Any]],
         tenant_id: str,
         max_classification: str = "internal",
-        required_roles: Optional[list[str]] = None,
-    ) -> dict:
+        required_roles: list[str] | None = None,
+    ) -> dict[str, Any]:
         max_classification_int = CLASSIFICATION_ORDER.get(
-            Classification(max_classification) if max_classification in Classification._value2member_map_ else Classification.INTERNAL,
+            Classification(max_classification)
+            if max_classification in Classification._value2member_map_
+            else Classification.INTERNAL,
             CLASSIFICATION_ORDER[Classification.INTERNAL],
         )
 
@@ -176,7 +177,7 @@ class SemanticCacheWriter:
                         "max_classification": max_classification,
                         "max_classification_level": max_classification_int,
                         "required_roles": required_roles or [],
-                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "created_at": datetime.now(UTC).isoformat(),
                     },
                 )
             ],
@@ -188,7 +189,7 @@ def invalidate_cache_for_tenant(
     tenant_id: str,
     qdrant_url: str | None = None,
     collection: str = "response_cache",
-) -> dict:
+) -> dict[str, Any]:
     """
     Invalidate (delete) all cached responses for a tenant.
 

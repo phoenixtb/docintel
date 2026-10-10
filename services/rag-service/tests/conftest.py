@@ -166,86 +166,43 @@ def test_document_id() -> str:
 # Qdrant Fixtures
 # =============================================================================
 
-@pytest.fixture
-def qdrant_url() -> str:
-    """Qdrant URL for tests. Skips the test if Qdrant is unreachable.
+# Keep in sync with the qdrant service in docker-compose.yml
+# (enforced by scripts/check-image-pins.sh).
+QDRANT_IMAGE = "qdrant/qdrant:v1.16.3"
 
-    Integration tests depend on this fixture so the suite degrades to a
-    skip (not a failure) on a clean checkout with no containers running.
+
+@pytest.fixture(scope="session")
+def qdrant_url() -> Generator[str, None, None]:
+    """A real Qdrant started by Testcontainers for the test session.
+
+    Requires Docker. There is deliberately no skip when Docker is missing:
+    integration tests that silently skip look green in CI while testing nothing.
     """
-    url = os.getenv("QDRANT_URL", "http://localhost:6333")
-    import httpx
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.wait_strategies import HttpWaitStrategy
 
-    try:
-        httpx.get(f"{url}/collections", timeout=1.0)
-    except httpx.HTTPError:
-        pytest.skip(f"Qdrant unreachable at {url} — skipping integration test")
-    return url
-
-
-@pytest.fixture
-def qdrant_client(qdrant_url: str):
-    """Create Qdrant client for tests."""
-    from qdrant_client import QdrantClient
-    return QdrantClient(url=qdrant_url)
+    container = (
+        DockerContainer(QDRANT_IMAGE)
+        .with_exposed_ports(6333)
+        .waiting_for(HttpWaitStrategy(6333, "/readyz").for_status_code(200))
+    )
+    with container:
+        yield f"http://{container.get_container_host_ip()}:{container.get_exposed_port(6333)}"
 
 
 @pytest.fixture
-def test_collection_name() -> str:
-    """Generate unique collection name for test isolation."""
-    return f"test_collection_{uuid.uuid4().hex[:8]}"
+def qdrant_settings(qdrant_url: str):
+    """Settings pointing at the test Qdrant; resets the per-tenant retriever cache.
 
+    SecureRetriever caches retrievers per (tenant, top_k) at module level, so a
+    retriever built by another test against a different store must not leak in.
+    """
+    from src.components import retrieval
+    from src.config import get_settings
 
-@pytest.fixture
-def clean_test_collection(qdrant_client, test_collection_name: str) -> Generator[str, None, None]:
-    """Create and cleanup a test collection."""
-    from qdrant_client.http import models
-    
-    # Create collection
-    try:
-        qdrant_client.create_collection(
-            collection_name=test_collection_name,
-            vectors_config=models.VectorParams(
-                size=768,  # nomic-embed-text-v1.5 dimension
-                distance=models.Distance.COSINE,
-            ),
-        )
-    except Exception:
-        # Collection might already exist
-        pass
-    
-    yield test_collection_name
-    
-    # Cleanup
-    try:
-        qdrant_client.delete_collection(test_collection_name)
-    except Exception:
-        pass
-
-
-@pytest.fixture
-def cleanup_tenant_data(qdrant_client, test_tenant_id: str) -> Generator[str, None, None]:
-    """Cleanup tenant data after test."""
-    yield test_tenant_id
-    
-    # Cleanup documents collection for this tenant
-    from qdrant_client.http import models
-    try:
-        qdrant_client.delete(
-            collection_name="documents",
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="tenant_id",
-                            match=models.MatchValue(value=test_tenant_id),
-                        )
-                    ]
-                )
-            ),
-        )
-    except Exception:
-        pass
+    retrieval._retriever_cache.clear()
+    yield get_settings().model_copy(update={"qdrant_url": qdrant_url})
+    retrieval._retriever_cache.clear()
 
 
 # =============================================================================

@@ -1,9 +1,11 @@
 package com.docintel.gateway.filter
 
+import com.docintel.gateway.error.writeErrorEnvelope
 import org.slf4j.LoggerFactory
 import org.springframework.cloud.gateway.filter.GatewayFilterChain
 import org.springframework.cloud.gateway.filter.GlobalFilter
 import org.springframework.core.Ordered
+import org.springframework.http.HttpStatus
 import org.springframework.security.core.context.ReactiveSecurityContextHolder
 import org.springframework.security.oauth2.jwt.Jwt
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken
@@ -23,8 +25,17 @@ import reactor.core.publisher.Mono
  *   X-User-Roles      — comma-separated list from docintel-actions custom claim "roles"
  *   X-User-Clearance  — from docintel-actions custom claim "clearance"
  *
- * Backend services MUST NOT trust client-supplied X-* headers — they are stripped
- * here and replaced with gateway-authoritative values.
+ * Backend services MUST NOT trust client-supplied X-* headers. Every identity header
+ * above is removed from the incoming request before the gateway sets its own, so a
+ * header the JWT has no claim for (e.g. X-User-Email on a machine token) is absent
+ * downstream rather than client-controlled.
+ *
+ * A validated JWT without a non-blank "tenant_id" claim is rejected with 403
+ * TENANT_CLAIM_MISSING. Falling back to a shared tenant would put every such caller
+ * (e.g. when the Zitadel claims action fails) into the same tenant's data.
+ *
+ * Without a security context (only the "dev" profile, which permits everything), the
+ * request is routed as tenant "default" with no user identity.
  *
  * Execution order: RequestCorrelationFilter (HIGHEST_PRECEDENCE) → this (-100)
  *   → InternalAuthFilter (-99) → OpaAuthorizationFilter (-98)
@@ -43,6 +54,11 @@ class TenantFilter : GlobalFilter, Ordered {
         const val USER_CLEARANCE_HEADER = "X-User-Clearance"
         const val DEFAULT_TENANT   = "default"
         const val DEFAULT_CLEARANCE = "internal"
+        const val TENANT_CLAIM_MISSING = "TENANT_CLAIM_MISSING"
+        private val IDENTITY_HEADERS = listOf(
+            TENANT_HEADER, USER_ID_HEADER, USER_EMAIL_HEADER,
+            USER_NAME_HEADER, USER_ROLES_HEADER, USER_CLEARANCE_HEADER,
+        )
         // Custom claim names injected by docintel-actions
         private const val JWT_TENANT_CLAIM    = "tenant_id"
         private const val JWT_ROLES_CLAIM     = "roles"
@@ -56,7 +72,7 @@ class TenantFilter : GlobalFilter, Ordered {
                 if (authentication is JwtAuthenticationToken) {
                     extractFromJwt(authentication.token)
                 } else {
-                    JwtClaimData(DEFAULT_TENANT, "", "", "", emptyList(), DEFAULT_CLEARANCE)
+                    ANONYMOUS
                 }
             }
             .switchIfEmpty(Mono.fromCallable {
@@ -65,13 +81,28 @@ class TenantFilter : GlobalFilter, Ordered {
                     "Check that this path is in permitAll().",
                     exchange.request.uri.path,
                 )
-                JwtClaimData(DEFAULT_TENANT, "", "", "", emptyList(), DEFAULT_CLEARANCE)
+                ANONYMOUS
             })
-            .flatMap { claims -> continueWithClaims(exchange, chain, claims) }
+            .flatMap { identity ->
+                when (identity) {
+                    is JwtClaimData -> continueWithClaims(exchange, chain, identity)
+                    MissingTenant -> {
+                        log.warn(
+                            "JWT has no tenant_id claim — rejecting (path={})",
+                            exchange.request.uri.path,
+                        )
+                        writeErrorEnvelope(
+                            exchange, HttpStatus.FORBIDDEN, TENANT_CLAIM_MISSING,
+                            "Access token has no tenant.",
+                        )
+                    }
+                }
+            }
     }
 
-    private fun extractFromJwt(jwt: Jwt): JwtClaimData {
-        val tenantId = jwt.getClaimAsString(JWT_TENANT_CLAIM) ?: DEFAULT_TENANT
+    private fun extractFromJwt(jwt: Jwt): Identity {
+        val tenantId = jwt.getClaimAsString(JWT_TENANT_CLAIM)?.takeIf { it.isNotBlank() }
+            ?: return MissingTenant
 
         @Suppress("UNCHECKED_CAST")
         val roles: List<String> = when (val raw = jwt.claims[JWT_ROLES_CLAIM]) {
@@ -101,6 +132,7 @@ class TenantFilter : GlobalFilter, Ordered {
         val rolesHeader = claims.userRoles.joinToString(",")
 
         val mutatedRequest = exchange.request.mutate()
+            .headers { headers -> IDENTITY_HEADERS.forEach(headers::remove) }
             .header(TENANT_HEADER, claims.tenantId)
             .header(USER_ROLES_HEADER, rolesHeader)
             .header(USER_CLEARANCE_HEADER, claims.clearance)
@@ -116,6 +148,14 @@ class TenantFilter : GlobalFilter, Ordered {
 
     override fun getOrder(): Int = -100
 
+    // Request with no security context: "dev" profile only (see class doc).
+    private val ANONYMOUS: Identity =
+        JwtClaimData(DEFAULT_TENANT, "", "", "", emptyList(), DEFAULT_CLEARANCE)
+
+    private sealed interface Identity
+
+    private data object MissingTenant : Identity
+
     private data class JwtClaimData(
         val tenantId: String,
         val userId: String,
@@ -123,5 +163,5 @@ class TenantFilter : GlobalFilter, Ordered {
         val userName: String,
         val userRoles: List<String>,
         val clearance: String,
-    )
+    ) : Identity
 }

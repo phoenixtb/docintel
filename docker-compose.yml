@@ -510,7 +510,7 @@ services:
   # server via OBJECT_STORE_ENDPOINT — nothing else depends on this service.
   # No host ports in base config; dev ports (S3 19000, WebUI 19001) live in
   # docker-compose.override.yml. Image tag pinned in tests too — see
-  # scripts/check-object-store-pin.sh.
+  # scripts/check-image-pins.sh.
   object-store:
     image: versity/versitygw:v1.8.0
     environment:

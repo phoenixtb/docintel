@@ -8,6 +8,8 @@ Pipeline flow:
   Query → TransformersZeroShotTextRouter → DomainFilterBuilder → SecureRetriever
 """
 
+from typing import Any
+
 from docintel_common.domain import DOMAIN_LABELS
 from haystack import component
 
@@ -34,7 +36,7 @@ class DomainFilterBuilder:
         contracts: str | None = None,
         general: str | None = None,
         explicit_domain: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """
         TransformersZeroShotTextRouter routes query text to exactly one label output.
         DomainFilterBuilder determines which label fired and builds a Qdrant filter.

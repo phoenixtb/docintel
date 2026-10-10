@@ -14,9 +14,12 @@ See: Factory.ai "Evaluating Context Compression for AI Agents" (2025)
 """
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,7 @@ Preserve:
 Return ONLY the updated summary. No preamble, no explanation."""
 
 
-def _format_span(messages: list[dict]) -> str:
+def _format_span(messages: list[dict[str, Any]]) -> str:
     lines = []
     for m in messages:
         role = "User" if m["role"] == "user" else "Assistant"
@@ -61,7 +64,7 @@ class AnchoredSummarizer:
         self._model = model
         self._api_key = api_key
 
-    def _compress_sync(self, existing_summary: Optional[str], new_span: list[dict]) -> str:
+    def _compress_sync(self, existing_summary: str | None, new_span: list[dict[str, Any]]) -> str:
         """Synchronous HTTP call to the chat completions endpoint — runs inside run_in_executor."""
         prompt = _COMPRESS_PROMPT.format(
             existing_summary=existing_summary or "No summary yet.",
@@ -89,7 +92,7 @@ class AnchoredSummarizer:
             )
             resp.raise_for_status()
             result = resp.json()
-            summary = result["choices"][0]["message"]["content"].strip()
+            summary: str = result["choices"][0]["message"]["content"].strip()
             if not summary:
                 raise ValueError("Empty response from summarizer model")
             return summary
@@ -99,12 +102,13 @@ class AnchoredSummarizer:
 
     async def compress(
         self,
-        existing_summary: Optional[str],
-        new_span: list[dict],
-        loop=None,
+        existing_summary: str | None,
+        new_span: list[dict[str, Any]],
+        loop: "asyncio.AbstractEventLoop | None" = None,
     ) -> str:
         """Async entry point — offloads sync HTTP to thread pool."""
         import asyncio
+
         _loop = loop or asyncio.get_running_loop()
         return await _loop.run_in_executor(
             None, lambda: self._compress_sync(existing_summary, new_span)

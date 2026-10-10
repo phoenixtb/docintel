@@ -4,10 +4,13 @@ Async utilities shared across RAGService and API handlers.
 
 import asyncio
 import contextvars
-from typing import Callable
+from collections.abc import Callable
+from typing import TypeVar
+
+T = TypeVar("T")
 
 
-async def _run_db(fn: Callable):
+async def _run_db(fn: Callable[[], T]) -> T:
     """Run a synchronous DB call in the default executor, preserving contextvars for RLS."""
     ctx = contextvars.copy_context()
     loop = asyncio.get_running_loop()

@@ -8,6 +8,7 @@ Usage: wire CostTracker after the LLM component to accumulate per-tenant spend.
 """
 
 import logging
+from typing import Any
 
 import litellm
 from haystack import component
@@ -24,7 +25,7 @@ class CostTracker:
     """
 
     def __init__(self) -> None:
-        self._costs: dict[str, dict] = {}
+        self._costs: dict[str, dict[str, Any]] = {}
 
     @component.output_types(
         response=str,
@@ -35,10 +36,10 @@ class CostTracker:
         self,
         response: str,
         tenant_id: str,
-        litellm_response: dict | None = None,
-    ) -> dict:
+        litellm_response: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         cost = 0.0
-        tokens: dict = {"prompt": 0, "completion": 0}
+        tokens: dict[str, Any] = {"prompt": 0, "completion": 0}
 
         if litellm_response:
             usage = litellm_response.get("usage", {})
@@ -57,7 +58,7 @@ class CostTracker:
 
         return {"response": response, "cost_usd": cost, "tokens_used": tokens}
 
-    def get_tenant_costs(self, tenant_id: str) -> dict:
+    def get_tenant_costs(self, tenant_id: str) -> dict[str, Any]:
         return self._costs.get(tenant_id, {"total_cost": 0.0, "query_count": 0})
 
 

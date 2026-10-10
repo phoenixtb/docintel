@@ -135,7 +135,7 @@ Answer from the retrieved context only. Cite chunks as [1], [2], etc. matching t
 # No Documents Response
 # =============================================================================
 
-NO_DOCUMENTS_RESPONSE = """I don't have any documents to search through yet. 
+NO_DOCUMENTS_RESPONSE = """I don't have any documents to search through yet.
 
 To get started:
 1. Go to the **Documents** page (link in the header)
@@ -144,7 +144,7 @@ To get started:
 
 Sample datasets include:
 - **TechQA**: Technical documentation
-- **HR Policies**: Employee policies and procedures  
+- **HR Policies**: Employee policies and procedures
 - **CUAD Contracts**: Legal contract samples"""
 
 NO_RELEVANT_DOCUMENTS_RESPONSE = """I couldn't find relevant information in the uploaded documents to answer your question.
@@ -169,11 +169,3 @@ QUERY_EXPANSION_PROMPT = """Add 2-3 alternative terms or synonyms that might app
 
 Query: {query}
 Terms:"""
-
-# =============================================================================
-# Domain Classification Labels
-# =============================================================================
-
-# Single source of truth lives in docintel_common; re-exported here for
-# backwards-compatibility with any local imports that reference ..prompts.
-from docintel_common.domain import DOMAIN_DESCRIPTIONS, DOMAIN_LABELS  # noqa: F401

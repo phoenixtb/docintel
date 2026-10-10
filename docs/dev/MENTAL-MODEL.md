@@ -91,7 +91,7 @@ The idea to own: **the S3 API is the contract; the server is configuration**
 | `services/data-loader/src/storage.py` | hash, key and upload for sample datasets |
 | `services/ingestion-service/src/adapters/object_store_adapter.py` | download one object to a temp file; cleans up on failure |
 | `docker-compose.yml` (`object-store`, `object-store-init`) | server, healthcheck, Langfuse bucket bootstrap |
-| `scripts/check-object-store-pin.sh` | keeps the VersityGW tag in compose and tests identical |
+| `scripts/check-image-pins.sh` | keeps each image tag (VersityGW, Qdrant) identical in compose and the tests that start their own container |
 
 Errors are typed at the edge:
 - Python callers see `ObjectNotFoundError` (missing bucket or key: terminal) or `ObjectStoreError`
@@ -116,12 +116,38 @@ Settings come from the environment. `.env.example` holds labelled dev defaults, 
 
 ### Tenancy and internal auth
 
-- Per-tenant isolation:
-  - PostgreSQL row-level security, with session variables set by `TenantAwareDataSource`;
-  - per-tenant Qdrant collections;
-  - per-tenant buckets.
-- Service-to-service HTTP carries `X-Internal-Service-Token`, an HMAC checked by
-  `InternalAuthFilter`.
+The idea to own: **identity is decided once, at the gateway, from the validated JWT; backends trust
+only headers the gateway signed.**
+
+Gateway filter chain for a routed request (order values in brackets):
+1. Spring Security verifies the bearer JWT against the IdP's JWKS (`jwk-set-uri`); none or
+   invalid → 401 `UNAUTHORIZED`.
+2. `RequestCorrelationFilter` [`HIGHEST_PRECEDENCE`] sets `X-Request-Id`.
+3. `TenantFilter` [-100] removes every client-supplied identity header (`X-Tenant-Id`,
+   `X-User-Id/-Email/-Name/-Roles/-Clearance`) and sets them from the claims `tenant_id`, `sub`,
+   `email`, `name`, `roles`, `clearance`. A JWT without a non-blank `tenant_id` gets 403
+   `TENANT_CLAIM_MISSING`: a fallback tenant would pool every such caller into one tenant's data.
+4. `InternalAuthFilter` [-99] adds `X-Internal-Service-Token` = HMAC-SHA256 of
+   `{requestId}:{tenantId}:{userId}` keyed with `INTERNAL_GATEWAY_SECRET`; without the secret
+   every request gets 503 (fail-secure).
+5. `OpaAuthorizationFilter` [-98] asks OPA (decisions cached 60 s); a denial or an OPA outage → 403.
+6. `QuotaEnforcementFilter` [-97] checks Redis quotas on uploads and queries → 429.
+
+The `dev` profile permits every request without a JWT; requests then carry tenant `default` and
+no user identity. Per-tenant isolation behind the gateway:
+- PostgreSQL row-level security, with session variables set by `TenantAwareDataSource`;
+- per-tenant Qdrant collections (`documents_{tenant}`);
+- per-tenant buckets.
+
+| File | Role |
+|---|---|
+| `services/api-gateway/.../config/SecurityConfig.kt` | JWT resource-server chain (`!dev`), permit-all chain (`dev`), CORS |
+| `services/api-gateway/.../config/JwtDecoderConfig.kt` | Nimbus decoder with a Caffeine cache keyed by token hash |
+| `services/api-gateway/.../filter/TenantFilter.kt` | claims → identity headers; header stripping; `TENANT_CLAIM_MISSING` |
+| `services/api-gateway/.../filter/InternalAuthFilter.kt` | HMAC service token |
+| `services/api-gateway/.../error/ErrorEnvelope.kt` | `{"error":{"code","message","request_id"}}` for every gateway-emitted error |
+| `lib/docintel-common/docintel_common/internal_auth.py` | Python side: verifies the HMAC |
+| `config/zitadel/actions-v2/main.py` | Zitadel action that puts `tenant_id`, `role`, `roles`, `clearance` into every token |
 
 ## 4. Flows
 
@@ -244,6 +270,32 @@ A stale lock fails the image build (`uv export --locked`) and the CI job `python
 
 Use the tag from compose; CI fails otherwise.
 
+**Write a rag-service test that needs Qdrant:** take the `qdrant_settings` fixture
+(`services/rag-service/tests/conftest.py`). It points `Settings` at a session-wide Testcontainers
+Qdrant and clears the per-tenant retriever cache. Size vectors with
+`qdrant_settings.qdrant_embedding_dim`. Example: `TestSecureRetriever` in `tests/test_components.py`.
+
+**Write an api-gateway integration test:** annotate `@SpringBootTest(RANDOM_PORT)`,
+`@ActiveProfiles("test")`, and call `GatewayTestInfra.registerProperties` from a
+`@DynamicPropertySource`. Then:
+- sign tokens with `GatewayTestInfra.token(tenantId = …)`;
+- stub the backend path on `GatewayTestInfra.wireMock`, which also serves the JWKS and OPA;
+- call `resetStubs()` in `@BeforeEach`.
+
+The routes are the real ones from `application.yml`. Example: `GatewayIntegrationTest`.
+
+**Write a web-ui e2e test:** import `test`/`expect` from `tests/support/fixtures.ts`. Then:
+- `await signIn('/path')` drives the real OIDC login against the fake IdP;
+- `api.on(method, path, handler)` overrides a gateway response, and `api.requestsTo(...)`
+  returns what the UI sent;
+- end the page test with `expectNoA11yViolations(page)`;
+- `test.use({ user: userWithRole('platform_admin') })` switches role.
+
+Examples: `tests/chat.spec.ts`, `tests/auth.spec.ts`.
+
+**Keep rag-service CI green locally** (CI runs exactly these):
+`uv run ruff check src/ && uv run ruff format --check src/ && uv run mypy src/ --ignore-missing-imports && uv run pytest tests/`.
+
 ## 7. What proves what
 
 | Claim | Test |
@@ -257,6 +309,17 @@ Use the tag from compose; CI fails otherwise.
 | Missing source object is terminal; outages are retried | `test_missing_source_object_fails_document_and_acks_without_retry`, `test_object_store_outage_fails_document_but_leaves_message_for_redelivery` |
 | `files.available` carries `objectPath` end to end | `test_publishes_object_path_of_the_uploaded_file`; `StreamConsumerTest` "FilesAvailableConsumer should carry the data-loader objectPath …" |
 | Retired MinIO entries are dropped from OpenTofu state, nothing else | `tests/scripts/test_start_helpers_minio_state.bats` |
+| The gateway verifies JWT signatures against the JWKS; no token or a forged one gets 401 | `GatewayIntegrationTest` "rejects a request without a bearer token with 401", "rejects a token whose signature does not match the published key with 401" |
+| A JWT without `tenant_id` never reaches a backend | `GatewayIntegrationTest` "rejects a token without a tenant_id claim with 403 before reaching any backend"; `TenantFilterTest` "rejects a JWT …" (two) |
+| Client-supplied identity headers never reach a backend | `TenantFilterTest` "overwrites a client-supplied X-Tenant-Id …", "drops client-supplied identity headers …", "replaces every client-supplied identity header …"; `GatewayIntegrationTest` "does not forward a client-supplied X-User-Email …" |
+| Backends can verify the gateway's HMAC | `GatewayIntegrationTest` "signs forwarded requests with an HMAC …"; `InternalAuthFilterTest` |
+| OPA denial blocks the request | `GatewayIntegrationTest` "returns 403 when OPA denies the request" |
+| The web UI logs in with PKCE (S256 verifier checked by the fake IdP) and sends the token and tenant | `tests/auth.spec.ts` "sends a visitor to a protected page …", "returns the user to the page they asked for …", "sends the access token and tenant on API calls" |
+| Role guards hide and block admin pages | `tests/auth.spec.ts` "Role guards" |
+| Chat streams an answer with cited sources from the SSE wire format rag-service emits | `tests/chat.spec.ts` "streams an answer with its cited source" |
+| Pages meet WCAG 2.1 AA except colour contrast | `expectNoA11yViolations` in `tests/chat.spec.ts`, `tests/documents.spec.ts` |
+| Tenant retrieval works against a real Qdrant at the configured dimension | `test_components.py::TestSecureRetriever*` |
+| Every rag-service module imports (no runtime-evaluated `TYPE_CHECKING` names) | `tests/test_imports.py` |
 | Menus survive ↑/↓/Esc at both ends on bash 3.2 and 5, cancel with q/Esc, restore the terminal; docintel.sh returns to its menu after in-process actions | `tests/scripts/test_menus.py` |
 | "Clear logs" recreates only running app services, with the full compose chain | `test_logs_clear_recreates_only_running_app_services_with_the_full_compose_chain` |
 | A reranker outage, error code, unknown score scale or `use_reranking: false` never turns answers into abstentions; tau applies only to reranker probabilities | `tests/test_reranker.py`; `test_degraded_reranker_answers_from_retrieval_order_without_tau`, `test_reranker_exception_also_answers_from_retrieval_order`, `test_reranking_disabled_does_not_apply_tau_to_fused_scores` |
@@ -283,6 +346,10 @@ Open decisions:
   so the document survives. A guarded status transition (only `PENDING → PROCESSING`) would fix it.
 - **Shared Kotlin config.** `ObjectStoreProperties`/`ObjectStoreConfig` are duplicated in
   document-service and admin-service because there is no shared Kotlin module yet.
+- **Web UI tokens in `localStorage`.** `auth.ts` stores OIDC tokens in `localStorage`, which the
+  Svelte security checklist forbids. Moving to memory plus refresh (or a BFF) is undecided.
+- **Colour contrast.** The glass theme's muted text fails WCAG AA contrast on every page; the
+  e2e axe gate excludes only that rule until the palette is revisited.
 
 ## 9. Gotchas and runbook
 
@@ -330,6 +397,31 @@ Open decisions:
 - **Retired MinIO OpenTofu state.** `removed {}` blocks cannot drop `minio_s3_bucket` entries,
   because OpenTofu still configures the provider. `forget_retired_minio_state` in `start.sh` runs
   `tofu state rm` once instead.
+- **A secret read with `System.getenv` cannot be set by a test.** The gateway's
+  `InternalAuthFilter` did this, so every routed request in tests got its fail-secure 503. Read
+  secrets through `@Value("\${NAME:}")`; the env var still feeds it in deployments.
+- **Annotating a FastAPI route changes its serialization.** A return annotation (even `-> Any`)
+  makes FastAPI build a response model and validate through pydantic instead of
+  `jsonable_encoder`. rag-service routes without a `response_model` therefore declare
+  `response_model=None` explicitly.
+- **`TYPE_CHECKING` imports in runtime annotations.** rag-service modules mostly lack
+  `from __future__ import annotations`, so a function annotation naming a `TYPE_CHECKING`-only
+  import raises `NameError` at import time; quote it. `tests/test_imports.py` catches this.
+- **mypy targets 3.12, the image runs 3.11.** numpy's stubs use 3.12-only syntax that mypy rejects
+  under `python_version = "3.11"`. ruff's `target-version = "py311"` still guards syntax until the
+  image moves to 3.12.
+- **`env-config.js` is only filled in by the container.** `docker-entrypoint.sh` substitutes the
+  `__PUBLIC_*__` placeholders at nginx start. Under `vite preview` (and so in Playwright) the SPA
+  sees the literal placeholders and OIDC discovery 404s; the e2e fixture routes `/env-config.js`.
+- **Retries turned failures into a "hang".** 54 failing Playwright specs × 3 attempts × a 30 s
+  timeout ran the Web UI job for 47 minutes. Playwright now runs with `retries: 0`, a 20 s test
+  timeout, and the job with `timeout-minutes: 15`.
+- **A red first step hides the steps after it.** RAG CI stopped at lint for months, so its mypy
+  step (188 errors), its tests and `rag-service.yml`'s Docker build (wrong build context) were
+  broken without anyone seeing it. After fixing a gate, check that every later step really ran.
+- **A skipping fixture hid broken tests.** rag-service's old `qdrant_url` fixture skipped when
+  Qdrant was unreachable, which was always the case in CI. The tests had been sending 768-dim
+  vectors to 1024-dim collections. Integration fixtures now start their dependency or fail.
 - **document-service tests and the JDBC URL.** `TenantDataSourceConfig.flyway()` strips
   `user`/`password` with a regex that also eats the `?` when other parameters follow them.
   `BaseIntegrationTest` appends credentials after the container's own parameters for this reason.
@@ -354,6 +446,10 @@ Runbook:
 | Path-style addressing | `http://host/bucket/key` rather than `http://bucket.host/key` |
 | Outbox (deletion task) | `deletion_tasks` row written with the state change and driven later by a worker |
 | Tenant bucket | `docintel-{tenantId}` |
+| PKCE | Proof Key for Code Exchange: the SPA sends `S256(code_verifier)` with the authorization request and the verifier with the code exchange |
+| JWKS | the IdP's published public keys; the gateway verifies JWT signatures against it |
+| OPA | Open Policy Agent; answers the gateway's per-request allow/deny question |
+| Identity headers | `X-Tenant-Id` and `X-User-*`, set only by the gateway's `TenantFilter` |
 
 ## 11. Changelog
 
@@ -365,7 +461,20 @@ Runbook:
   - Docs bootstrap: ADR folder, contracts, versions, this file.
   - rag-service pins its Postgres driver to psycopg2. Python images now build from `uv.lock`
     (ADR-0002), with CI `python-locks`.
-- **PR-02/03 (2026-10-10, one PR):**
+- **PR #6 — CI green (2026-10-11):**
+  - api-gateway tests run through the production JWT chain and route table (signed tokens, JWKS
+    and OPA on WireMock, Redis on Testcontainers). The gateway now rejects a JWT without
+    `tenant_id` (403 `TENANT_CLAIM_MISSING`) and strips client-supplied identity headers.
+    `INTERNAL_GATEWAY_SECRET` is read through `@Value`.
+  - rag-service passes ruff and strict mypy. The Qdrant tests use a real Qdrant, and
+    `test_imports.py` guards module imports.
+  - The web UI e2e suite was rewritten around a fake IdP and gateway, with an axe gate; a11y
+    defects axe found are fixed.
+  - Every CI job has a timeout. `check-object-store-pin.sh` became `check-image-pins.sh`, which
+    also pins Qdrant.
+  - ingestion-service's three failing tests are fixed.
+  - `rag-service.yml` now builds its image with the repo root as the build context.
+- **PR #5 — scripts and the crypto-question incident (2026-10-11):**
   - Scripts:
     - one shared menu library (`scripts/lib/menu.sh`) for docintel.sh, logs.sh, test.sh and
       build.sh, fixing crashes on ↓/Esc under bash 5;

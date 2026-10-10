@@ -11,6 +11,7 @@ Pipeline position:
 
 import logging
 import os
+from typing import Any
 
 import litellm
 from haystack import component
@@ -38,8 +39,11 @@ class QueryExpander:
 
     def __init__(self, llm_model: str | None = None, enabled: bool = True):
         # Use openai/ prefix — LiteLLM routes to any OpenAI-compatible base URL
-        base_model = llm_model or os.getenv("LLM_EXPANSION_MODEL", "qwen3:1.7b:4bit")
-        self.llm_model = f"openai/{base_model}" if not base_model.startswith("openai/") else base_model
+        env_model = os.getenv("LLM_EXPANSION_MODEL", "qwen3:1.7b:4bit")
+        base_model = llm_model or env_model
+        self.llm_model = (
+            f"openai/{base_model}" if not base_model.startswith("openai/") else base_model
+        )
         self.enabled = enabled
         self.api_base = os.getenv("LLM_CHAT_URL", "http://host.docker.internal:11434/v1")
         # LiteLLM's OpenAI-compatible client requires a non-empty api_key even
@@ -52,7 +56,7 @@ class QueryExpander:
         expanded_query=str,
         search_terms=list[str],
     )
-    def run(self, query: str) -> dict:
+    def run(self, query: str) -> dict[str, Any]:
         if not self.enabled:
             return {
                 "original_query": query,

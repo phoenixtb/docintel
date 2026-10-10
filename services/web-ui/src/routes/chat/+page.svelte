@@ -510,16 +510,20 @@
             </div>
           {:else}
             {#each conversations as conv (conv.id)}
+              <!-- Select and delete are sibling buttons: a button inside a role="button"
+                   row is a nested-interactive control screen readers can't reach. -->
               <div
-                onclick={() => loadConversation(conv.id)}
-                onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); loadConversation(conv.id); } }}
-                role="button"
-                tabindex="0"
-                class="group flex items-start gap-2 mx-1.5 px-2.5 py-2 rounded-lg cursor-pointer transition-all
+                class="group flex items-start gap-2 mx-1.5 px-2.5 py-2 rounded-lg transition-all
                   {activeConversationId === conv.id
                     ? 'bg-emerald-500/10 border-l-2 border-emerald-400 text-emerald-300'
                     : 'hover:bg-white/5 text-slate-400 hover:text-slate-200'}"
               >
+                <button
+                  type="button"
+                  onclick={() => loadConversation(conv.id)}
+                  aria-current={activeConversationId === conv.id ? 'true' : undefined}
+                  class="flex flex-1 min-w-0 items-start gap-2 text-left cursor-pointer"
+                >
                 <svg class="w-3.5 h-3.5 mt-0.5 flex-shrink-0 {activeConversationId === conv.id ? 'text-emerald-400' : 'text-slate-600'}"
                   fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -529,10 +533,13 @@
                   <p class="text-xs font-medium truncate">{conv.title}</p>
                   <p class="text-[10px] text-slate-600 mt-0.5">{formatDate(conv.updated_at)}</p>
                 </div>
+                </button>
                 <button
+                  type="button"
                   onclick={(e) => deleteConversation(conv.id, e)}
-                  class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-500/10 transition-all flex-shrink-0"
+                  class="opacity-0 group-hover:opacity-100 focus:opacity-100 p-0.5 rounded hover:bg-red-500/10 transition-all flex-shrink-0"
                   title="Delete"
+                  aria-label="Delete conversation {conv.title}"
                 >
                   <svg class="w-3 h-3 text-slate-500 hover:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -707,6 +714,7 @@
           <textarea
             bind:value={input}
             onkeydown={handleKeydown}
+            aria-label="Question"
             placeholder="Ask a question about your documents..."
             rows="1"
             class="flex-1 bg-transparent text-slate-200 placeholder-slate-600
@@ -718,6 +726,7 @@
           <button
             onclick={() => sendMessage()}
             disabled={isStreaming || !input.trim()}
+            aria-label="Send question"
             class="flex-shrink-0 p-2.5 rounded-xl transition-all duration-200
               {isStreaming || !input.trim()
                 ? 'bg-white/5 text-slate-600 cursor-not-allowed'

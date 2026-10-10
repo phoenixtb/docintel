@@ -4,11 +4,10 @@ Uses SQLAlchemy with psycopg2 for PostgreSQL access.
 """
 
 import uuid
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
-    Column,
     DateTime,
     ForeignKey,
     Integer,
@@ -22,10 +21,17 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    Session,
+    mapped_column,
+    relationship,
+    sessionmaker,
+)
 
 from .config import get_settings as _get_settings
-from .context import _tenant_ctx, _role_ctx
+from .context import _role_ctx, _tenant_ctx
 
 
 def psycopg2_url(url: str) -> URL:
@@ -52,8 +58,12 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
+
+
 @event.listens_for(engine, "begin")
-def _set_rls_on_begin(conn):
+def _set_rls_on_begin(conn: "Connection") -> None:
     """Set PostgreSQL RLS session variables at the start of each transaction."""
     tenant_id = _tenant_ctx.get()
     role = _role_ctx.get()
@@ -69,36 +79,52 @@ class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = {"schema": "conversations"}
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id = Column(String(64), nullable=False)
-    user_id = Column(String(64))
-    title = Column(String(500), nullable=False, default="New Conversation")
-    session_summary = Column(Text, nullable=True)
-    summary_upto_count = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, default="New Conversation")
+    session_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_upto_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=func.now(), onupdate=func.now()
+    )
 
-    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at")
+    messages: Mapped[list["Message"]] = relationship(
+        "Message",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="Message.created_at",
+    )
 
 
 class Message(Base):
     __tablename__ = "messages"
     __table_args__ = {"schema": "conversations"}
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.conversations.id", ondelete="CASCADE"), nullable=False)
-    role = Column(String(20), nullable=False)  # user, assistant, system
-    content = Column(Text, nullable=False)
-    sources = Column(JSONB, nullable=True)
-    metadata_ = Column("metadata", JSONB, default=dict)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # user, assistant, system
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sources: Mapped[Any] = mapped_column(JSONB, nullable=True)
+    metadata_: Mapped[Any] = mapped_column("metadata", JSONB, nullable=True, default=dict)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=func.now()
+    )
 
-    conversation = relationship("Conversation", back_populates="messages")
+    conversation: Mapped["Conversation"] = relationship("Conversation", back_populates="messages")
 
 
 # =============================================================================
 # Repository functions
 # =============================================================================
+
 
 def get_db() -> Session:
     """Get a database session."""
@@ -107,9 +133,9 @@ def get_db() -> Session:
 
 def create_conversation(
     tenant_id: str,
-    user_id: Optional[str] = None,
+    user_id: str | None = None,
     title: str = "New Conversation",
-) -> dict:
+) -> dict[str, Any]:
     """Create a new conversation."""
     with get_db() as db:
         conv = Conversation(tenant_id=tenant_id, user_id=user_id, title=title)
@@ -121,10 +147,10 @@ def create_conversation(
 
 def list_conversations(
     tenant_id: str,
-    user_id: Optional[str] = None,
+    user_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """List conversations for a tenant/user, most recent first."""
     with get_db() as db:
         q = db.query(Conversation).filter(Conversation.tenant_id == tenant_id)
@@ -134,7 +160,7 @@ def list_conversations(
         return [_conv_to_dict(c, include_messages=False) for c in convs]
 
 
-def get_conversation(conversation_id: str, tenant_id: str) -> Optional[dict]:
+def get_conversation(conversation_id: str, tenant_id: str) -> dict[str, Any] | None:
     """Get a conversation with all its messages."""
     with get_db() as db:
         conv = (
@@ -166,10 +192,10 @@ def add_message(
     conversation_id: str,
     role: str,
     content: str,
-    tenant_id: Optional[str] = None,
-    sources: Optional[list[dict]] = None,
-    metadata: Optional[dict] = None,
-) -> dict:
+    tenant_id: str | None = None,
+    sources: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Add a message to a conversation. Also updates conversation title and updated_at."""
     with get_db() as db:
         msg = Message(
@@ -187,7 +213,7 @@ def add_message(
             query = query.filter(Conversation.tenant_id == tenant_id)
         conv = query.first()
         if conv:
-            conv.updated_at = datetime.now(timezone.utc)
+            conv.updated_at = datetime.now(UTC)
             # Auto-title from first user message
             if role == "user" and conv.title == "New Conversation":
                 conv.title = content[:100] + ("..." if len(content) > 100 else "")
@@ -197,7 +223,7 @@ def add_message(
         return _msg_to_dict(msg)
 
 
-def get_conversation_summary_state(conversation_id: str, tenant_id: str) -> dict:
+def get_conversation_summary_state(conversation_id: str, tenant_id: str) -> dict[str, Any]:
     """
     Lightweight fetch: returns summary state + total user/assistant message count.
     Does NOT load all message content — avoids the N+1 problem on large conversations.
@@ -232,7 +258,7 @@ def get_messages_slice(
     tenant_id: str,
     offset: int,
     limit: int,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Fetch a slice of user/assistant messages by position (oldest-first)."""
     with get_db() as db:
         conv = (
@@ -279,7 +305,7 @@ def get_recent_messages(
     conversation_id: str,
     tenant_id: str,
     limit: int,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Fetch the most recent N user/assistant messages (newest-last order)."""
     with get_db() as db:
         conv = (
@@ -302,7 +328,9 @@ def get_recent_messages(
         return [{"role": m.role, "content": m.content} for m in reversed(msgs)]
 
 
-def update_conversation_title(conversation_id: str, tenant_id: str, title: str) -> Optional[dict]:
+def update_conversation_title(
+    conversation_id: str, tenant_id: str, title: str
+) -> dict[str, Any] | None:
     """Update a conversation's title."""
     with get_db() as db:
         conv = (
@@ -322,8 +350,9 @@ def update_conversation_title(conversation_id: str, tenant_id: str, title: str) 
 # Serialization helpers
 # =============================================================================
 
-def _conv_to_dict(conv: Conversation, include_messages: bool = False) -> dict:
-    d = {
+
+def _conv_to_dict(conv: Conversation, include_messages: bool = False) -> dict[str, Any]:
+    d: dict[str, Any] = {
         "id": str(conv.id),
         "tenant_id": conv.tenant_id,
         "user_id": conv.user_id,
@@ -337,7 +366,7 @@ def _conv_to_dict(conv: Conversation, include_messages: bool = False) -> dict:
     return d
 
 
-def _msg_to_dict(msg: Message) -> dict:
+def _msg_to_dict(msg: Message) -> dict[str, Any]:
     return {
         "id": str(msg.id),
         "conversation_id": str(msg.conversation_id),

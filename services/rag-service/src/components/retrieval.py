@@ -15,6 +15,7 @@ Pipeline position:
 """
 
 from threading import Lock
+from typing import Any
 
 from cachetools import LRUCache
 from haystack import Document, component
@@ -29,7 +30,9 @@ from ..config import Settings, get_settings
 from ..stores import create_document_store
 
 # LRU cache with a 100-tenant cap to prevent unbounded memory growth.
-_retriever_cache: LRUCache = LRUCache(maxsize=100)
+_retriever_cache: "LRUCache[str, tuple[QdrantHybridRetriever, QdrantEmbeddingRetriever]]" = (
+    LRUCache(maxsize=100)
+)
 _cache_lock = Lock()
 
 
@@ -50,7 +53,10 @@ def _get_tenant_retrievers(
                 QdrantHybridRetriever(document_store=store, top_k=top_k),
                 QdrantEmbeddingRetriever(document_store=store, top_k=top_k),
             )
-        return _retriever_cache[cache_key]
+        retrievers: tuple[QdrantHybridRetriever, QdrantEmbeddingRetriever] = _retriever_cache[
+            cache_key
+        ]
+        return retrievers
 
 
 @component
@@ -78,7 +84,7 @@ class SecureRetriever:
         self,
         user_roles: list[str] | None,
         user_id: str | None,
-        domain_filter: dict | None,
+        domain_filter: dict[str, Any] | None,
     ) -> models.Filter:
         must: list[models.Condition] = []
 
@@ -126,19 +132,20 @@ class SecureRetriever:
         tenant_id: str,
         user_roles: list[str] | None = None,
         user_id: str | None = None,
-        domain_filter: dict | None = None,
+        domain_filter: dict[str, Any] | None = None,
         query_sparse_embedding: SparseEmbedding | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         hybrid_retriever, dense_retriever = _get_tenant_retrievers(
             tenant_id, self._settings, self._top_k
         )
         acl_filter = self._build_acl_filter(user_roles, user_id, domain_filter)
 
-        use_hybrid = self._use_hybrid and query_sparse_embedding is not None
-        if use_hybrid:
+        sparse = query_sparse_embedding if self._use_hybrid else None
+        use_hybrid = sparse is not None
+        if sparse is not None:
             result = hybrid_retriever.run(
                 query_embedding=query_embedding,
-                query_sparse_embedding=query_sparse_embedding,
+                query_sparse_embedding=sparse,
                 filters=acl_filter,
             )
         else:

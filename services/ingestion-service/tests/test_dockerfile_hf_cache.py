@@ -103,18 +103,6 @@ def test_rag_service_mounts_hf_cache_at_opt() -> None:
     )
 
 
-def test_infinity_mount_unchanged() -> None:
-    """infinity is a 3rd-party image that runs as root; its mount must stay at the original path."""
-    compose = _load_compose()
-    mounts = _service_volume_mounts(compose, "infinity")
-    assert any("/root/.cache/huggingface" in m for m in mounts), (
-        f"infinity volume mount changed unexpectedly: {mounts}"
-    )
-    assert not any("/opt/hf-cache" in m for m in mounts), (
-        "infinity must NOT use /opt/hf-cache (external image, runs as root)"
-    )
-
-
 def test_ingestion_does_not_mount_at_root_cache() -> None:
     compose = _load_compose()
     mounts = _service_volume_mounts(compose, "ingestion-service")

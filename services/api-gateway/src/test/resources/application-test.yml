@@ -1,38 +1,16 @@
+# Test profile. Routes are the production ones from application.yml; tests point
+# their *_SERVICE_URL placeholders, the OPA URL, the JWKS URI, Redis and
+# INTERNAL_GATEWAY_SECRET at WireMock / Testcontainers via @DynamicPropertySource
+# (see support/GatewayTestInfra.kt).
 spring:
-  cloud:
-    gateway:
-      routes:
-        - id: test-document-service
-          uri: http://localhost:${wiremock.server.port:8089}
-          predicates:
-            - Path=/api/v1/documents, /api/v1/documents/**
-          filters:
-            - RewritePath=/api/v1/documents(?<segment>/?.*), /internal/documents${segment}
-        
-        - id: test-rag-service
-          uri: http://localhost:${wiremock.server.port:8089}
-          predicates:
-            - Path=/api/v1/query/**
-          filters:
-            - RewritePath=/api/v1/query(?<segment>/?.*), /query${segment}
-
-  # Disable security for tests. jwk-set-uri is required (not just issuer-uri) —
-  # both SecurityConfig.reactiveJwtDecoder and JwtDecoderConfig.jwtDecoder are
-  # @Profile("!dev") and read it directly via @Value, so it must resolve even
-  # though nothing in this suite exercises real JWT verification.
   security:
     oauth2:
       resourceserver:
         jwt:
+          # Overridden per test class; the JWT-chain beans read jwk-set-uri at startup.
           issuer-uri: http://localhost:9999
           jwk-set-uri: http://localhost:9999/oauth/v2/keys
 
-  data:
-    redis:
-      host: localhost
-      port: 6379
-
-# Disable Redis for tests
 management:
   health:
     redis:
@@ -41,4 +19,4 @@ management:
 logging:
   level:
     com.docintel: DEBUG
-    org.springframework.cloud.gateway: DEBUG
+    org.springframework.cloud.gateway: INFO

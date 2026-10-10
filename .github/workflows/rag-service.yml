@@ -19,6 +19,7 @@ jobs:
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: services/rag-service
@@ -45,5 +46,8 @@ jobs:
       - name: Run tests
         run: uv run pytest tests/ -v --cov=src --cov-report=xml
 
+      # The Dockerfile copies lib/docintel-common, so the build context is the
+      # repo root (same as ci.yml's docker-build matrix).
       - name: Build Docker image
-        run: docker build -t docintel/rag-service:${{ github.sha }} .
+        working-directory: .
+        run: docker build -f services/rag-service/Dockerfile -t docintel/rag-service:${{ github.sha }} .

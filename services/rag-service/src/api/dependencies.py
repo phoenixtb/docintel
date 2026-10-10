@@ -7,12 +7,11 @@ via Depends() rather than reaching into global state directly.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Annotated, Optional
-
-from fastapi import Depends, Header, HTTPException, Request
+from typing import Annotated, Any
 
 from docintel_common.internal_auth import verify_internal_token
 from docintel_common.security import UserContext
+from fastapi import Depends, Header, HTTPException, Request
 
 from ..config import Settings
 from ..pipelines.query import RAGService
@@ -25,26 +24,32 @@ logger = logging.getLogger(__name__)
 
 def get_settings(request: Request) -> Settings:
     """Return the Settings instance stored on app.state."""
-    return request.app.state.settings
+    settings: Settings = request.app.state.settings
+    return settings
 
 
 def get_rag_service(request: Request) -> RAGService:
     """Return the RAGService instance stored on app.state."""
-    return request.app.state.rag_service
+    rag_service: RAGService = request.app.state.rag_service
+    return rag_service
 
 
 def get_tracer(request: Request) -> LangfuseTracer:
     """Return the LangfuseTracer instance stored on app.state."""
-    return request.app.state.tracer
+    tracer: LangfuseTracer = request.app.state.tracer
+    return tracer
 
 
 # ---------------------------------------------------------------------------
 # Inter-service authentication + claim extraction
 # ---------------------------------------------------------------------------
 
+
 def require_internal_token(
     request: Request,
-    x_internal_service_token: Annotated[str | None, Header(alias="X-Internal-Service-Token")] = None,
+    x_internal_service_token: Annotated[
+        str | None, Header(alias="X-Internal-Service-Token")
+    ] = None,
     x_request_id: Annotated[str | None, Header(alias="X-Request-Id")] = None,
     x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-Id")] = None,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
@@ -75,11 +80,16 @@ def require_internal_token(
         logger.warning(
             "Invalid X-Internal-Service-Token — request may have bypassed the gateway "
             "(request_id=%s, tenant=%s, user=%s)",
-            x_request_id, x_tenant_id, x_user_id,
+            x_request_id,
+            x_tenant_id,
+            x_user_id,
         )
         raise HTTPException(
             status_code=403,
-            detail="Missing or invalid internal service token. All requests must pass through the API Gateway.",
+            detail=(
+                "Missing or invalid internal service token. "
+                "All requests must pass through the API Gateway."
+            ),
         )
 
 
@@ -123,10 +133,11 @@ UserContextDep = Annotated[UserContext, Depends(extract_user_context)]
 # Conversation history dependency
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class LoadedHistory:
-    messages: list[dict] = field(default_factory=list)
-    context_state: dict = field(default_factory=dict)
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    context_state: dict[str, Any] = field(default_factory=dict)
 
 
 async def get_conversation_history(
@@ -140,13 +151,12 @@ async def get_conversation_history(
     Returns an empty LoadedHistory when no conversation_id is provided.
     DB errors are propagated as 500 HTTPException so the caller can handle them.
     """
-    if not request.conversation_id:
+    conversation_id = request.conversation_id
+    if not conversation_id:
         return LoadedHistory()
     try:
         messages, context_state = await _run_db(
-            lambda: rag_service._load_conversation_history(
-                request.conversation_id, user_ctx.tenant_id
-            )
+            lambda: rag_service._load_conversation_history(conversation_id, user_ctx.tenant_id)
         )
         return LoadedHistory(messages=messages, context_state=context_state)
     except Exception as e:

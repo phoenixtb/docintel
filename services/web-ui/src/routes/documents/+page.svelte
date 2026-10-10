@@ -1053,6 +1053,7 @@
         <input
           id="file-upload"
           type="file"
+          aria-label="Document file to upload"
           onchange={handleFileChange}
           disabled={isUploading}
           accept=".txt,.pdf,.docx,.md"
