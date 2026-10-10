@@ -123,15 +123,15 @@ jobs:
           done
 
   # ===========================================================================
-  # Object-store image pin — compose and every test container use one tag
+  # Image pins — compose and every test container use one tag per image
   # ===========================================================================
-  object-store-pin:
-    name: Object-store image pin
+  image-pins:
+    name: Image pins
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Check pins
-        run: scripts/check-object-store-pin.sh
+        run: scripts/check-image-pins.sh
 
   # ===========================================================================
   # Kotlin Services

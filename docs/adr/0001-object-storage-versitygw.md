@@ -68,6 +68,6 @@ calls the app makes with minio-py and boto3 (default checksums):
 - **The data directory must be dedicated.** Every top-level directory under the POSIX root is
   served as a bucket.
 - **One image tag, four copies.** The VersityGW tag is pinned in compose and in three test suites,
-  kept equal by `scripts/check-object-store-pin.sh` (CI job `object-store-pin`).
+  kept equal by `scripts/check-image-pins.sh` (CI job `image-pins`).
 - **Upgrading the server** means bumping that tag; switching servers means changing
   `OBJECT_STORE_*`.

@@ -20,7 +20,7 @@ from docintel_common.object_store import (
 )
 
 # Keep in sync with the object-store service in docker-compose.yml
-# (enforced by scripts/check-object-store-pin.sh).
+# (enforced by scripts/check-image-pins.sh).
 VERSITYGW_IMAGE = "versity/versitygw:v1.8.0"
 ACCESS_KEY = "test-access"
 SECRET_KEY = "test-secret-key"

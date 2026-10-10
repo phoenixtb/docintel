@@ -215,20 +215,20 @@ class TestDomainFilterBuilder:
 class TestSecureRetriever:
     """Tests for SecureRetriever component."""
 
-    def test_retriever_initialization(self, qdrant_url: str):
-        """Retriever initializes with top_k config."""
+    def test_retriever_initialization(self):
+        """Retriever initializes with top_k config (no Qdrant call at construction)."""
         from src.components.retrieval import SecureRetriever
         retriever = SecureRetriever(top_k=10)
 
         assert retriever is not None
         assert retriever._top_k == 10
 
-    def test_retriever_requires_tenant_id(self, qdrant_url: str):
+    def test_retriever_requires_tenant_id(self, qdrant_settings):
         """Retriever requires tenant_id for isolation."""
         from src.components.retrieval import SecureRetriever
-        retriever = SecureRetriever()
+        retriever = SecureRetriever(settings=qdrant_settings)
 
-        fake_embedding = [0.1] * 768
+        fake_embedding = [0.1] * qdrant_settings.qdrant_embedding_dim
 
         result = retriever.run(
             query_embedding=fake_embedding,
@@ -237,12 +237,12 @@ class TestSecureRetriever:
 
         assert "documents" in result
 
-    def test_retriever_returns_documents(self, qdrant_url: str):
+    def test_retriever_returns_documents(self, qdrant_settings):
         """Retriever returns list of documents."""
         from src.components.retrieval import SecureRetriever
-        retriever = SecureRetriever()
+        retriever = SecureRetriever(settings=qdrant_settings)
 
-        fake_embedding = [0.1] * 768
+        fake_embedding = [0.1] * qdrant_settings.qdrant_embedding_dim
 
         result = retriever.run(
             query_embedding=fake_embedding,
@@ -258,12 +258,12 @@ class TestSecureRetriever:
 class TestSecureRetrieverFiltering:
     """Tests for retriever filtering capabilities."""
 
-    def test_retriever_domain_filter(self, qdrant_url: str):
+    def test_retriever_domain_filter(self, qdrant_settings):
         """Retriever applies domain filter."""
         from src.components.retrieval import SecureRetriever
-        retriever = SecureRetriever()
+        retriever = SecureRetriever(settings=qdrant_settings)
 
-        fake_embedding = [0.1] * 768
+        fake_embedding = [0.1] * qdrant_settings.qdrant_embedding_dim
         domain_filter = {
             "key": "document_type",
             "match": {"value": "hr_policy"},
@@ -277,12 +277,12 @@ class TestSecureRetrieverFiltering:
 
         assert "documents" in result
 
-    def test_retriever_role_filter(self, qdrant_url: str):
+    def test_retriever_role_filter(self, qdrant_settings):
         """Retriever applies role-based filter."""
         from src.components.retrieval import SecureRetriever
-        retriever = SecureRetriever()
+        retriever = SecureRetriever(settings=qdrant_settings)
 
-        fake_embedding = [0.1] * 768
+        fake_embedding = [0.1] * qdrant_settings.qdrant_embedding_dim
 
         result = retriever.run(
             query_embedding=fake_embedding,
@@ -292,12 +292,12 @@ class TestSecureRetrieverFiltering:
 
         assert "documents" in result
 
-    def test_retriever_user_filter(self, qdrant_url: str):
+    def test_retriever_user_filter(self, qdrant_settings):
         """Retriever applies user-based filter."""
         from src.components.retrieval import SecureRetriever
-        retriever = SecureRetriever()
+        retriever = SecureRetriever(settings=qdrant_settings)
 
-        fake_embedding = [0.1] * 768
+        fake_embedding = [0.1] * qdrant_settings.qdrant_embedding_dim
 
         result = retriever.run(
             query_embedding=fake_embedding,

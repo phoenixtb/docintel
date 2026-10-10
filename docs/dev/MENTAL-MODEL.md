@@ -91,7 +91,7 @@ The idea to own: **the S3 API is the contract; the server is configuration**
 | `services/data-loader/src/storage.py` | hash, key and upload for sample datasets |
 | `services/ingestion-service/src/adapters/object_store_adapter.py` | download one object to a temp file; cleans up on failure |
 | `docker-compose.yml` (`object-store`, `object-store-init`) | server, healthcheck, Langfuse bucket bootstrap |
-| `scripts/check-object-store-pin.sh` | keeps the VersityGW tag in compose and tests identical |
+| `scripts/check-image-pins.sh` | keeps each image tag (VersityGW, Qdrant) identical in compose and the tests that start their own container |
 
 Errors are typed at the edge:
 - Python callers see `ObjectNotFoundError` (missing bucket or key: terminal) or `ObjectStoreError`

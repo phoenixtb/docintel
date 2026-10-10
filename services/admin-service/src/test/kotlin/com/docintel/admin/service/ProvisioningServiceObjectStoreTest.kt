@@ -22,7 +22,7 @@ class ProvisioningServiceObjectStoreTest {
 
     companion object {
         // Keep in sync with the object-store service in docker-compose.yml
-        // (enforced by scripts/check-object-store-pin.sh).
+        // (enforced by scripts/check-image-pins.sh).
         private val objectStore: GenericContainer<*> =
             GenericContainer(DockerImageName.parse("versity/versitygw:v1.8.0"))
                 .withExposedPorts(7070)
