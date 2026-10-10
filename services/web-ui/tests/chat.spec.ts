@@ -1,99 +1,106 @@
-import { test, expect } from '@playwright/test';
+import { answerEvents, sseBody } from './support/fakeApi';
+import { expect, expectNoA11yViolations, test } from './support/fixtures';
 
-/**
- * E2E tests for the Chat page (main page).
- * These tests verify basic UI functionality without requiring backend services.
- */
-test.describe('Chat Page', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
+test.describe('Chat', () => {
+  test('streams an answer with its cited source', async ({ page, api, signIn }) => {
+    await signIn('/chat');
+
+    await page.getByRole('textbox', { name: 'Question' }).fill('How many days of annual leave do I get?');
+    await page.getByRole('button', { name: 'Send question' }).click();
+
+    await expect(page.getByText('Employees get 25 days of annual leave')).toBeVisible();
+    const source = page.getByRole('button', { name: /leave-policy\.pdf/ });
+    await expect(source).toBeVisible();
+    await expect(source).toContainText('91% relevance');
+
+    await source.click();
+    await expect(page.getByText('Employees accrue 25 days of annual leave per year.')).toBeVisible();
   });
 
-  test('should display the DocIntel header', async ({ page }) => {
-    await expect(page.locator('header')).toBeVisible();
+  test('sends the question in a new conversation for the signed-in tenant', async ({ page, api, signIn }) => {
+    await signIn('/chat');
+
+    await page.getByRole('textbox', { name: 'Question' }).fill('How many days of annual leave do I get?');
+    await page.keyboard.press('Enter');
+    await expect(page.getByText('Employees get 25 days of annual leave')).toBeVisible();
+
+    expect(api.requestsTo('POST', '/api/v1/conversations')).toHaveLength(1);
+    const [query] = api.requestsTo('POST', '/api/v1/query/stream');
+    expect(JSON.parse(query.body ?? '{}')).toMatchObject({
+      question: 'How many days of annual leave do I get?',
+      tenant_id: 'acme',
+      conversation_id: 'conv-1',
+    });
+    await expect(page).toHaveURL('/chat?id=conv-1');
   });
 
-  test('should have input field for questions', async ({ page }) => {
-    const textarea = page.locator('textarea');
-    await expect(textarea).toBeVisible();
+  test('shows an error message when the stream reports an error', async ({ page, api, signIn }) => {
+    api.on('POST', '/api/v1/query/stream', () => ({
+      contentType: 'text/event-stream',
+      body: sseBody([{ metadata: { query_id: 'q-err', cache_hit: false } }, { error: 'LLM unavailable' }]),
+    }));
+    await signIn('/chat');
+
+    await page.getByRole('textbox', { name: 'Question' }).fill('Anything?');
+    await page.getByRole('button', { name: 'Send question' }).click();
+
+    await expect(page.getByText('Sorry, an error occurred. Please try again.')).toBeVisible();
   });
 
-  test('should have link to documents page', async ({ page }) => {
-    const docsLink = page.locator('a[href="/documents"]');
-    await expect(docsLink).toBeVisible();
+  test('shows an error message when the gateway rejects the query', async ({ page, api, signIn }) => {
+    api.on('POST', '/api/v1/query/stream', () => ({
+      status: 403,
+      json: { error: { code: 'TENANT_CLAIM_MISSING', message: 'Access token has no tenant.' } },
+    }));
+    await signIn('/chat');
+
+    await page.getByRole('textbox', { name: 'Question' }).fill('Anything?');
+    await page.getByRole('button', { name: 'Send question' }).click();
+
+    await expect(page.getByText('Sorry, an error occurred. Please try again.')).toBeVisible();
   });
 
-  test('should navigate to documents page', async ({ page }) => {
-    await page.click('a[href="/documents"]');
-    await expect(page).toHaveURL('/documents');
+  test('keeps the send button disabled until a question is typed', async ({ page, signIn }) => {
+    await signIn('/chat');
+
+    const send = page.getByRole('button', { name: 'Send question' });
+    await expect(send).toBeDisabled();
+    await page.getByRole('textbox', { name: 'Question' }).fill('Hello');
+    await expect(send).toBeEnabled();
   });
 
-  test('should allow typing in textarea', async ({ page }) => {
-    const textarea = page.locator('textarea');
-    
-    await textarea.fill('What is the leave policy?');
-    await expect(textarea).toHaveValue('What is the leave policy?');
+  test('reopens a conversation from the sidebar with its history', async ({ page, api, signIn }) => {
+    api.on('GET', '/api/v1/conversations', () => ({
+      json: [{ id: 'conv-9', title: 'Leave policy', updated_at: '2026-10-01T09:00:00Z' }],
+    }));
+    api.on('GET', '/api/v1/conversations/conv-9', () => ({
+      json: {
+        id: 'conv-9',
+        title: 'Leave policy',
+        summary_upto_count: 0,
+        messages: [
+          { id: 'm1', role: 'user', content: 'How long is parental leave?' },
+          { id: 'm2', role: 'assistant', content: 'Parental leave is 16 weeks [1].', sources: [] },
+        ],
+      },
+    }));
+    await signIn('/chat');
+
+    await page.getByRole('button', { name: /^Leave policy/ }).click();
+
+    await expect(page.getByText('Parental leave is 16 weeks')).toBeVisible();
+    await expect(page).toHaveURL('/chat?id=conv-9');
   });
 
-  test('should have submit button or form', async ({ page }) => {
-    // Check for either a button or form to submit
-    const submitButton = page.locator('button').last();
-    await expect(submitButton).toBeVisible();
-  });
+  test('has no WCAG 2.1 AA violations before and after an answer', async ({ page, api, signIn }) => {
+    api.queryEvents = answerEvents('Employees get 25 days of annual leave [1].');
+    await signIn('/chat');
+    await expectNoA11yViolations(page);
 
-  test('should be responsive on mobile', async ({ page }) => {
-    await page.setViewportSize({ width: 375, height: 667 });
-    
-    // Header should still be visible
-    await expect(page.locator('header')).toBeVisible();
-    
-    // Input should be visible
-    await expect(page.locator('textarea')).toBeVisible();
-  });
-});
+    await page.getByRole('textbox', { name: 'Question' }).fill('How many days of annual leave do I get?');
+    await page.getByRole('button', { name: 'Send question' }).click();
+    await expect(page.getByRole('button', { name: /leave-policy\.pdf/ })).toBeVisible();
 
-test.describe('Chat Interaction', () => {
-  test('textarea should be clearable', async ({ page }) => {
-    await page.goto('/');
-    
-    const textarea = page.locator('textarea');
-    await textarea.fill('Test message');
-    await expect(textarea).toHaveValue('Test message');
-    
-    await textarea.fill('');
-    await expect(textarea).toHaveValue('');
-  });
-
-  test('should support multi-line input with Shift+Enter', async ({ page }) => {
-    await page.goto('/');
-    
-    const textarea = page.locator('textarea');
-    await textarea.focus();
-    await textarea.fill('Line 1');
-    // Shift+Enter should allow new line without submitting
-    await textarea.press('Shift+Enter');
-    // Textarea should still be visible (not submitted)
-    await expect(textarea).toBeVisible();
-  });
-});
-
-test.describe('Navigation', () => {
-  test('should have home link in header', async ({ page }) => {
-    await page.goto('/');
-    
-    // Should have DocIntel logo/link
-    const logoLink = page.locator('header a').first();
-    await expect(logoLink).toBeVisible();
-  });
-
-  test('should maintain header on scroll', async ({ page }) => {
-    await page.goto('/');
-    
-    // Scroll down
-    await page.evaluate(() => window.scrollTo(0, 500));
-    
-    // Header should still be visible
-    await expect(page.locator('header')).toBeVisible();
+    await expectNoA11yViolations(page);
   });
 });
