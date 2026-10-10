@@ -261,6 +261,7 @@ Use the tag from compose; CI fails otherwise.
 | "Clear logs" recreates only running app services, with the full compose chain | `test_logs_clear_recreates_only_running_app_services_with_the_full_compose_chain` |
 | A reranker outage, error code, unknown score scale or `use_reranking: false` never turns answers into abstentions; tau applies only to reranker probabilities | `tests/test_reranker.py`; `test_degraded_reranker_answers_from_retrieval_order_without_tau`, `test_reranker_exception_also_answers_from_retrieval_order`, `test_reranking_disabled_does_not_apply_tau_to_fused_scores` |
 | An answerable query keeps its supporting chunks down to the context floor; a weak top chunk abstains even when others clear the floor | `test_answerable_query_keeps_supporting_chunks_down_to_the_context_floor`, `test_query_abstains_when_the_top_chunk_is_below_tau_even_above_the_floor` |
+| The generation prompt asks for a partial answer before refusing | `test_system_prompt_asks_for_partial_answers_before_abstaining` |
 
 ## 8. Decisions index
 
@@ -295,6 +296,14 @@ Open decisions:
     then abstained on multi-clause answers.
   - The same model gives different probability scales on llama.cpp (GGUF) and oMLX (mxfp8), so
     calibrate on both ([contract](../contracts/reranker.md)).
+- **Small generation models read a refusal rule as all-or-nothing.**
+  - With "say *I don't have that information* if not found", `qwen3.5:2b` refused when the
+    context held a related but not literal answer (a blockchain-administrator fee for "crypto
+    payment provisions").
+  - `SYSTEM_PROMPT_SECURE` therefore asks for what the context covers and what it does not, and
+    keeps the refusal for contexts with nothing relevant.
+  - The integration harness detects abstention by phrase (`tests/integration/metrics.py`), so
+    a prompt change needs a full-generation run, not only `--retrieval-only`.
 - **Images ignore `pyproject.toml` ranges.**
   - What a Python image contains is exactly `uv.lock`, so a dependency added without `uv lock`
     fails the build.
@@ -373,3 +382,4 @@ Runbook:
       (`docs/contracts/reranker.md`);
     - tau applies to the top chunk, with a new `rag_min_context_score` (0.20) floor for
       supporting chunks.
+  - Generation prompt: partial answers (what the context covers and lacks) instead of refusing.
