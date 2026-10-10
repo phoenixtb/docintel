@@ -98,6 +98,7 @@ class StatusEvent:
                             will arrive for several seconds. The UI should show an
                             indicator so users know the request is still active.
     """
+
     stage: str
 
 

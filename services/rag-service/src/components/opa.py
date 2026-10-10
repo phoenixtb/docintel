@@ -71,13 +71,13 @@ class OpaChunkValidator:
         doc_ids: list[str] = []
 
         user_dict = {
-            "user_id":    user_context.user_id,
-            "org_id":     user_context.org_id,
-            "tenant_id":  user_context.tenant_id,
-            "roles":      user_context.roles,
-            "clearance":  user_context.clearance.value,
+            "user_id": user_context.user_id,
+            "org_id": user_context.org_id,
+            "tenant_id": user_context.tenant_id,
+            "roles": user_context.roles,
+            "clearance": user_context.clearance.value,
             "department": user_context.department,
-            "region":     user_context.region,
+            "region": user_context.region,
         }
 
         for doc in documents:
@@ -89,14 +89,14 @@ class OpaChunkValidator:
             try:
                 payload = {
                     "input": {
-                        "user":  user_dict,
+                        "user": user_dict,
                         "chunk": {
                             "classification": chunk_meta.get("classification", "internal"),
-                            "allowed_roles":  chunk_meta.get("allowed_roles", []),
-                            "allowed_users":  chunk_meta.get("allowed_users", []),
-                            "department":     chunk_meta.get("department"),
-                            "region":         chunk_meta.get("region", "global"),
-                            "expires_at":     chunk_meta.get("expires_at"),
+                            "allowed_roles": chunk_meta.get("allowed_roles", []),
+                            "allowed_users": chunk_meta.get("allowed_users", []),
+                            "department": chunk_meta.get("department"),
+                            "region": chunk_meta.get("region", "global"),
+                            "expires_at": chunk_meta.get("expires_at"),
                         },
                     }
                 }
@@ -107,7 +107,9 @@ class OpaChunkValidator:
                     denied_ids.append(doc.id or "")
                     logger.debug(
                         "OPA denied chunk: doc_id=%s chunk_id=%s classification=%s",
-                        doc_id, doc.id, chunk_meta.get("classification"),
+                        doc_id,
+                        doc.id,
+                        chunk_meta.get("classification"),
                     )
             except Exception as exc:
                 # Fail-closed: network error / timeout → deny chunk

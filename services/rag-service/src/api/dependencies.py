@@ -42,9 +42,12 @@ def get_tracer(request: Request) -> LangfuseTracer:
 # Inter-service authentication + claim extraction
 # ---------------------------------------------------------------------------
 
+
 def require_internal_token(
     request: Request,
-    x_internal_service_token: Annotated[str | None, Header(alias="X-Internal-Service-Token")] = None,
+    x_internal_service_token: Annotated[
+        str | None, Header(alias="X-Internal-Service-Token")
+    ] = None,
     x_request_id: Annotated[str | None, Header(alias="X-Request-Id")] = None,
     x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-Id")] = None,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
@@ -75,7 +78,9 @@ def require_internal_token(
         logger.warning(
             "Invalid X-Internal-Service-Token — request may have bypassed the gateway "
             "(request_id=%s, tenant=%s, user=%s)",
-            x_request_id, x_tenant_id, x_user_id,
+            x_request_id,
+            x_tenant_id,
+            x_user_id,
         )
         raise HTTPException(
             status_code=403,
@@ -122,6 +127,7 @@ UserContextDep = Annotated[UserContext, Depends(extract_user_context)]
 # ---------------------------------------------------------------------------
 # Conversation history dependency
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class LoadedHistory:

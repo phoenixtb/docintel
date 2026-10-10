@@ -41,7 +41,13 @@ from ..events import (
 from ..pipelines import RAGService
 from ..tracing import LangfuseTracer
 from ..utils.asyncio import _run_db
-from .dependencies import ConversationHistoryDep, RAGServiceDep, SettingsDep, TracerDep, UserContextDep
+from .dependencies import (
+    ConversationHistoryDep,
+    RAGServiceDep,
+    SettingsDep,
+    TracerDep,
+    UserContextDep,
+)
 from .schemas import QueryRequest, QueryResponse
 
 logger = logging.getLogger(__name__)
@@ -163,6 +169,7 @@ async def _with_heartbeat(source, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S)
 # Lifespan
 # =============================================================================
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_trace_logging()
@@ -216,6 +223,7 @@ async def lifespan(app: FastAPI):
     # Anchored iterative summarizer — compresses evicted conversation turns using the
     # fast expansion model. Runs async fire-and-forget after each conversation persist.
     from ..components.summarizer import AnchoredSummarizer
+
     app.state.summarizer = AnchoredSummarizer(
         llm_chat_url=settings.llm_chat_url,
         model=settings.llm_expansion_model,
@@ -289,7 +297,9 @@ async def _probe_llm_engine(settings: Settings) -> None:
                     model_ids = [m.get("id", "") for m in r.json().get("data", [])]
                     logger.info("LLM engine [%s] ready at %s — models: %s", label, url, model_ids)
                 else:
-                    logger.warning("LLM engine [%s] at %s returned HTTP %s", label, url, r.status_code)
+                    logger.warning(
+                        "LLM engine [%s] at %s returned HTTP %s", label, url, r.status_code
+                    )
             except Exception as e:
                 logger.warning("LLM engine [%s] not reachable at %s (non-fatal): %s", label, url, e)
 
@@ -344,7 +354,9 @@ def _ensure_qdrant_ready(settings: Settings) -> None:
     client = QdrantClient(url=settings.qdrant_url)
     try:
         client.get_collections()
-        logger.info("Qdrant reachable at %s — per-tenant collections created on demand", settings.qdrant_url)
+        logger.info(
+            "Qdrant reachable at %s — per-tenant collections created on demand", settings.qdrant_url
+        )
     except Exception as e:
         logger.error("Qdrant not reachable: %s", e)
 
@@ -362,8 +374,8 @@ install_error_handlers(app)
 async def tenant_context_middleware(request: Request, call_next):
     """Set tenant ContextVars and distributed trace context for every request."""
     request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
-    tenant_id  = request.headers.get("X-Tenant-Id", "default")
-    user_id    = request.headers.get("X-User-Id", "")
+    tenant_id = request.headers.get("X-Tenant-Id", "default")
+    user_id = request.headers.get("X-User-Id", "")
 
     TraceContext.set(request_id, tenant_id, user_id)
 
@@ -447,9 +459,9 @@ _THINKING_MODEL_FAMILIES = {"qwen3", "qwq", "deepseek-r1", "marco-o1", "skywork-
 
 # Substring rules for capability inference when LMForge does not return a
 # `capabilities` block. Keep these in lockstep with the UI's `inferKind`.
-_VISION_KEYWORDS  = ("-vl", ":vl", "vision", "llava", "moondream", "internvl")
-_RERANK_KEYWORDS  = ("rerank", "reranker")
-_EMBED_KEYWORDS   = ("embed", "nomic", "mxbai", "bge", "gte", "e5-")
+_VISION_KEYWORDS = ("-vl", ":vl", "vision", "llava", "moondream", "internvl")
+_RERANK_KEYWORDS = ("rerank", "reranker")
+_EMBED_KEYWORDS = ("embed", "nomic", "mxbai", "bge", "gte", "e5-")
 
 
 def _model_supports_thinking(model_name: str) -> bool:
@@ -498,6 +510,7 @@ class VectorStatsResponse(BaseModel):
 # Health
 # =============================================================================
 
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check(settings: SettingsDep, http_request: Request):
     qdrant_status = "unknown"
@@ -505,6 +518,7 @@ async def health_check(settings: SettingsDep, http_request: Request):
 
     try:
         from qdrant_client import QdrantClient
+
         QdrantClient(url=settings.qdrant_url).get_collections()
         qdrant_status = "connected"
     except Exception as e:
@@ -538,6 +552,7 @@ async def root():
 # Model list (for dynamic model selection UI)
 # =============================================================================
 
+
 @app.get("/models", response_model=ModelListResponse)
 async def list_models(
     settings: SettingsDep,
@@ -565,18 +580,20 @@ async def list_models(
                 # when present, fall back to substring inference otherwise.
                 capabilities: dict = m.get("capabilities", {})
                 supports_thinking = capabilities.get("thinking", _model_supports_thinking(name))
-                supports_vision   = capabilities.get("vision",   _model_supports_vision(name))
-                is_reranker       = capabilities.get("rerank",   _model_is_reranker(name))
-                is_embed          = capabilities.get("embed",    _model_is_embed(name))
-                models.append(ModelInfo(
-                    name=name,
-                    size=m.get("size"),
-                    modified_at=m.get("modified_at") or m.get("created"),
-                    supports_thinking=supports_thinking,
-                    supports_vision=supports_vision,
-                    is_reranker=is_reranker,
-                    is_embed=is_embed,
-                ))
+                supports_vision = capabilities.get("vision", _model_supports_vision(name))
+                is_reranker = capabilities.get("rerank", _model_is_reranker(name))
+                is_embed = capabilities.get("embed", _model_is_embed(name))
+                models.append(
+                    ModelInfo(
+                        name=name,
+                        size=m.get("size"),
+                        modified_at=m.get("modified_at") or m.get("created"),
+                        supports_thinking=supports_thinking,
+                        supports_vision=supports_vision,
+                        is_reranker=is_reranker,
+                        is_embed=is_embed,
+                    )
+                )
     except Exception as exc:
         logger.warning("Failed to fetch model list from %s: %s", settings.llm_chat_url, exc)
 
@@ -600,6 +617,7 @@ async def list_models(
 # =============================================================================
 # Settings cache invalidation
 # =============================================================================
+
 
 @app.delete("/internal/settings-cache/{tenant_id}", status_code=204)
 async def invalidate_settings_cache(tenant_id: str, http_request: Request):
@@ -633,6 +651,7 @@ async def invalidate_user_settings_cache(
 # Model profile cache invalidation
 # =============================================================================
 
+
 @app.get("/internal/model-profiles/resolve/{tenant_id}")
 async def resolve_model_profile(tenant_id: str, model: str, http_request: Request):
     """
@@ -663,9 +682,15 @@ async def resolve_model_profile(tenant_id: str, model: str, http_request: Reques
         "thinking_temperature": _v(params.thinking_temperature, settings.llm_thinking_temperature),
         "thinking_top_p": _v(params.thinking_top_p, settings.llm_thinking_top_p),
         "thinking_max_tokens": _v(params.thinking_max_tokens, settings.llm_thinking_max_tokens),
-        "thinking_frequency_penalty": _v(params.thinking_frequency_penalty, settings.llm_thinking_frequency_penalty),
-        "thinking_presence_penalty": _v(params.thinking_presence_penalty, settings.llm_thinking_presence_penalty),
-        "thinking_repetition_penalty": _v(params.thinking_repetition_penalty, settings.llm_thinking_repetition_penalty),
+        "thinking_frequency_penalty": _v(
+            params.thinking_frequency_penalty, settings.llm_thinking_frequency_penalty
+        ),
+        "thinking_presence_penalty": _v(
+            params.thinking_presence_penalty, settings.llm_thinking_presence_penalty
+        ),
+        "thinking_repetition_penalty": _v(
+            params.thinking_repetition_penalty, settings.llm_thinking_repetition_penalty
+        ),
         "thinking_top_k": _v(params.thinking_top_k, settings.llm_thinking_top_k),
         "thinking_min_p": _v(params.thinking_min_p, settings.llm_thinking_min_p),
         "thinking_budget": _v(params.thinking_budget, settings.llm_thinking_budget),
@@ -698,6 +723,7 @@ async def invalidate_model_profiles_cache_tenant(tenant_id: str, http_request: R
 # Vector stats
 # =============================================================================
 
+
 @app.get("/vector-stats", response_model=VectorStatsResponse)
 async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep):
     from qdrant_client import QdrantClient
@@ -719,19 +745,23 @@ async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep):
             try:
                 result = client.count(
                     collection_name=collection,
-                    count_filter=models.Filter(must=[
-                        models.FieldCondition(
-                            key="meta.document_type",
-                            match=models.MatchValue(value=domain),
-                        ),
-                    ]),
+                    count_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="meta.document_type",
+                                match=models.MatchValue(value=domain),
+                            ),
+                        ]
+                    ),
                 )
                 if result.count > 0:
                     tenant_stats[domain] = result.count
             except Exception:
                 pass
     except Exception as e:
-        logger.warning("Error getting vector stats for tenant %s (collection may not exist): %s", tenant_id, e)
+        logger.warning(
+            "Error getting vector stats for tenant %s (collection may not exist): %s", tenant_id, e
+        )
 
     return VectorStatsResponse(
         total_vectors=sum(collections.values()),
@@ -740,18 +770,24 @@ async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep):
     )
 
 
-
 # =============================================================================
 # SSE serialiser
 # =============================================================================
+
 
 def _serialize_sse(event: PipelineEvent, tenant_id: str = "") -> str:
     """Convert a typed PipelineEvent into an SSE data line, preserving wire format."""
     match event:
         case MetadataEvent(
-            query_id=qid, cache_hit=ch, context_state=cs, reranker_degraded=rd,
-            retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout,
-            query_expanded=qe, rerank_skipped=rs,
+            query_id=qid,
+            cache_hit=ch,
+            context_state=cs,
+            reranker_degraded=rd,
+            retrieval_mode=rm,
+            rerank_candidates_in=cin,
+            rerank_candidates_out=cout,
+            query_expanded=qe,
+            rerank_skipped=rs,
         ):
             payload: dict = {"metadata": {"query_id": qid, "cache_hit": ch}}
             if cs:
@@ -794,6 +830,7 @@ def _serialize_sse(event: PipelineEvent, tenant_id: str = "") -> str:
 # =============================================================================
 # Query endpoints
 # =============================================================================
+
 
 def _resolve_effective_model_and_thinking(
     request: QueryRequest,
@@ -860,37 +897,39 @@ async def query_documents(
         if _METRICS_ENABLED:
             tenant_label = user_ctx.tenant_id or "unknown"
             if tokens_used.get("prompt"):
-                RAG_LLM_TOKENS.labels(
-                    tenant=tenant_label, model=model_used, kind="prompt"
-                ).inc(tokens_used["prompt"])
+                RAG_LLM_TOKENS.labels(tenant=tenant_label, model=model_used, kind="prompt").inc(
+                    tokens_used["prompt"]
+                )
             if tokens_used.get("completion"):
-                RAG_LLM_TOKENS.labels(
-                    tenant=tenant_label, model=model_used, kind="completion"
-                ).inc(tokens_used["completion"])
+                RAG_LLM_TOKENS.labels(tenant=tenant_label, model=model_used, kind="completion").inc(
+                    tokens_used["completion"]
+                )
             if cost_usd:
                 RAG_LLM_COST_USD.labels(tenant=tenant_label, model=model_used).inc(cost_usd)
-        _fire_and_forget(_publish_query_event(
-            http_request.app.state.analytics_bus,
-            query_id=request_id,
-            tenant_id=user_ctx.tenant_id,
-            user_id=user_ctx.user_id or "",
-            latency_ms=result["latency_ms"],
-            model_used=model_used,
-            cache_hit=result["cache_hit"],
-            source_count=len(result["sources"]),
-            thinking_truncated=result.get("thinking_truncated", False),
-            prompt_tokens=tokens_used.get("prompt", 0),
-            completion_tokens=tokens_used.get("completion", 0),
-            cost_usd=cost_usd,
-            query_text=request.question,
-            retrieval_mode=result.get("retrieval_mode", ""),
-            rerank_candidates_in=result.get("rerank_candidates_in", 0),
-            rerank_candidates_out=result.get("rerank_candidates_out", 0),
-            reranker_degraded=result.get("reranker_degraded", False),
-            trace_id=result.get("trace_id", ""),
-            query_expanded=result.get("query_expanded", False),
-            rerank_skipped=result.get("rerank_skipped", False),
-        ))
+        _fire_and_forget(
+            _publish_query_event(
+                http_request.app.state.analytics_bus,
+                query_id=request_id,
+                tenant_id=user_ctx.tenant_id,
+                user_id=user_ctx.user_id or "",
+                latency_ms=result["latency_ms"],
+                model_used=model_used,
+                cache_hit=result["cache_hit"],
+                source_count=len(result["sources"]),
+                thinking_truncated=result.get("thinking_truncated", False),
+                prompt_tokens=tokens_used.get("prompt", 0),
+                completion_tokens=tokens_used.get("completion", 0),
+                cost_usd=cost_usd,
+                query_text=request.question,
+                retrieval_mode=result.get("retrieval_mode", ""),
+                rerank_candidates_in=result.get("rerank_candidates_in", 0),
+                rerank_candidates_out=result.get("rerank_candidates_out", 0),
+                reranker_degraded=result.get("reranker_degraded", False),
+                trace_id=result.get("trace_id", ""),
+                query_expanded=result.get("query_expanded", False),
+                rerank_skipped=result.get("rerank_skipped", False),
+            )
+        )
         return QueryResponse(
             answer=result["answer"],
             thinking=result.get("thinking", ""),
@@ -924,7 +963,9 @@ async def query_documents_stream(
     )
     logger.info(
         "Stream query — tenant=%s model=%s thinking=%s",
-        user_ctx.tenant_id, effective_model, effective_thinking,
+        user_ctx.tenant_id,
+        effective_model,
+        effective_thinking,
     )
     request_id = str(uuid.uuid4())
 
@@ -938,30 +979,32 @@ async def query_documents_stream(
         query_expanded = False
         rerank_skipped = False
         try:
-            async for event in _with_heartbeat(rag_service.stream(
-                question=request.question,
-                tenant_id=user_ctx.tenant_id,
-                user_context=user_ctx,
-                user_roles=user_ctx.roles or None,
-                user_id=user_ctx.user_id,
-                history=history.messages,
-                context_state=history.context_state,
-                document_type=request.document_type,
-                top_k=request.top_k,
-                min_score=request.min_score,
-                use_cache=request.use_cache,
-                use_reranking=request.use_reranking,
-                effective_model=effective_model,
-                effective_thinking=effective_thinking,
-                settings=settings,
-                llm_semaphore=llm_semaphore,
-                request_id=request_id,
-                model_profile_resolver=http_request.app.state.model_profile_resolver,
-                conversation_id=request.conversation_id,
-                summarizer=http_request.app.state.summarizer,
-                tracer=tracer,
-                retrieve_only=request.retrieve_only,
-            )):
+            async for event in _with_heartbeat(
+                rag_service.stream(
+                    question=request.question,
+                    tenant_id=user_ctx.tenant_id,
+                    user_context=user_ctx,
+                    user_roles=user_ctx.roles or None,
+                    user_id=user_ctx.user_id,
+                    history=history.messages,
+                    context_state=history.context_state,
+                    document_type=request.document_type,
+                    top_k=request.top_k,
+                    min_score=request.min_score,
+                    use_cache=request.use_cache,
+                    use_reranking=request.use_reranking,
+                    effective_model=effective_model,
+                    effective_thinking=effective_thinking,
+                    settings=settings,
+                    llm_semaphore=llm_semaphore,
+                    request_id=request_id,
+                    model_profile_resolver=http_request.app.state.model_profile_resolver,
+                    conversation_id=request.conversation_id,
+                    summarizer=http_request.app.state.summarizer,
+                    tracer=tracer,
+                    retrieve_only=request.retrieve_only,
+                )
+            ):
                 if event is _SSE_HEARTBEAT_SENTINEL:
                     yield ": keepalive\n\n"
                     continue
@@ -1002,28 +1045,30 @@ async def query_documents_stream(
             if cost_usd:
                 RAG_LLM_COST_USD.labels(tenant=tenant_label, model=effective_model).inc(cost_usd)
 
-        _fire_and_forget(_publish_query_event(
-            http_request.app.state.analytics_bus,
-            query_id=request_id,
-            tenant_id=user_ctx.tenant_id,
-            user_id=user_ctx.user_id or "",
-            latency_ms=0,
-            model_used=effective_model,
-            cache_hit=cache_hit,
-            source_count=source_count,
-            thinking_truncated=getattr(rag_service, "_last_thinking_truncated", False),
-            prompt_tokens=tokens_used.get("prompt", 0),
-            completion_tokens=tokens_used.get("completion", 0),
-            cost_usd=cost_usd,
-            query_text=request.question,
-            retrieval_mode=retrieval_mode,
-            rerank_candidates_in=rerank_candidates_in,
-            rerank_candidates_out=rerank_candidates_out,
-            reranker_degraded=reranker_degraded,
-            trace_id=getattr(rag_service, "_last_trace_id", ""),
-            query_expanded=query_expanded,
-            rerank_skipped=rerank_skipped,
-        ))
+        _fire_and_forget(
+            _publish_query_event(
+                http_request.app.state.analytics_bus,
+                query_id=request_id,
+                tenant_id=user_ctx.tenant_id,
+                user_id=user_ctx.user_id or "",
+                latency_ms=0,
+                model_used=effective_model,
+                cache_hit=cache_hit,
+                source_count=source_count,
+                thinking_truncated=getattr(rag_service, "_last_thinking_truncated", False),
+                prompt_tokens=tokens_used.get("prompt", 0),
+                completion_tokens=tokens_used.get("completion", 0),
+                cost_usd=cost_usd,
+                query_text=request.question,
+                retrieval_mode=retrieval_mode,
+                rerank_candidates_in=rerank_candidates_in,
+                rerank_candidates_out=rerank_candidates_out,
+                reranker_degraded=reranker_degraded,
+                trace_id=getattr(rag_service, "_last_trace_id", ""),
+                query_expanded=query_expanded,
+                rerank_skipped=rerank_skipped,
+            )
+        )
 
     return StreamingResponse(
         sse_iter(),
@@ -1035,6 +1080,7 @@ async def query_documents_stream(
 # =============================================================================
 # Conversation endpoints
 # =============================================================================
+
 
 class CreateConversationRequest(BaseModel):
     tenant_id: str = Field(default="default")
@@ -1049,9 +1095,12 @@ class UpdateConversationRequest(BaseModel):
 @app.post("/conversations")
 async def create_conversation(request: CreateConversationRequest, user_ctx: UserContextDep):
     from ..db import create_conversation as _create
+
     tenant_id = user_ctx.tenant_id
     return await _run_db(
-        lambda: _create(tenant_id=tenant_id, user_id=user_ctx.user_id or request.user_id, title=request.title)
+        lambda: _create(
+            tenant_id=tenant_id, user_id=user_ctx.user_id or request.user_id, title=request.title
+        )
     )
 
 
@@ -1062,14 +1111,18 @@ async def list_conversations(
     offset: int = 0,
 ):
     from ..db import list_conversations as _list
+
     return await _run_db(
-        lambda: _list(tenant_id=user_ctx.tenant_id, user_id=user_ctx.user_id, limit=limit, offset=offset)
+        lambda: _list(
+            tenant_id=user_ctx.tenant_id, user_id=user_ctx.user_id, limit=limit, offset=offset
+        )
     )
 
 
 @app.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str, user_ctx: UserContextDep):
     from ..db import get_conversation as _get
+
     conv = await _run_db(lambda: _get(conversation_id, user_ctx.tenant_id))
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1083,7 +1136,10 @@ async def update_conversation(
     user_ctx: UserContextDep,
 ):
     from ..db import update_conversation_title
-    conv = await _run_db(lambda: update_conversation_title(conversation_id, user_ctx.tenant_id, request.title))
+
+    conv = await _run_db(
+        lambda: update_conversation_title(conversation_id, user_ctx.tenant_id, request.title)
+    )
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conv
@@ -1092,6 +1148,7 @@ async def update_conversation(
 @app.delete("/conversations/{conversation_id}")
 async def delete_conversation_endpoint(conversation_id: str, user_ctx: UserContextDep):
     from ..db import delete_conversation
+
     deleted = await _run_db(lambda: delete_conversation(conversation_id, user_ctx.tenant_id))
     if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1101,6 +1158,7 @@ async def delete_conversation_endpoint(conversation_id: str, user_ctx: UserConte
 # =============================================================================
 # Internal service-to-service endpoints — no JWT, HMAC token only
 # =============================================================================
+
 
 @app.delete("/internal/conversations/tenant")
 async def delete_tenant_conversations(
@@ -1113,6 +1171,7 @@ async def delete_tenant_conversations(
     Auth: X-Internal-Service-Token (shared HMAC secret).
     """
     import os
+
     secret = os.environ.get("INTERNAL_GATEWAY_SECRET", "")
     if secret and x_internal_service_token != secret:
         raise HTTPException(status_code=403, detail="Invalid internal service token")
@@ -1129,9 +1188,7 @@ async def delete_tenant_conversations(
             db.execute(text("SET LOCAL app.user_role = 'platform_admin'"))
             db.execute(text("SET LOCAL app.current_tenant = :tid"), {"tid": x_tenant_id})
             result = db.execute(
-                text(
-                    "DELETE FROM conversations WHERE tenant_id = :tid"
-                ),
+                text("DELETE FROM conversations WHERE tenant_id = :tid"),
                 {"tid": x_tenant_id},
             )
             db.commit()

@@ -105,6 +105,7 @@ class AnchoredSummarizer:
     ) -> str:
         """Async entry point — offloads sync HTTP to thread pool."""
         import asyncio
+
         _loop = loop or asyncio.get_running_loop()
         return await _loop.run_in_executor(
             None, lambda: self._compress_sync(existing_summary, new_span)

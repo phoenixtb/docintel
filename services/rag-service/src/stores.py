@@ -41,5 +41,7 @@ def create_document_store(
                 "quantile": 0.99,
                 "always_ram": True,
             }
-        } if cfg.qdrant_quantization else None,
+        }
+        if cfg.qdrant_quantization
+        else None,
     )

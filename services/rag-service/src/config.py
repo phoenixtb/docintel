@@ -29,7 +29,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
-        env_ignore_empty=True,   # LLM_TOP_P="" → None, not a parse error
+        env_ignore_empty=True,  # LLM_TOP_P="" → None, not a parse error
     )
 
     # ── Qdrant ───────────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     #   tenant DB profile → platform DB profile → built-in code defaults → these values.
     # Override in .env (generated from config/defaults.env) to change the baseline.
     llm_temperature: float = 0.1
-    llm_top_p: float | None = None        # LLM_TOP_P="" in defaults.env → use model default
+    llm_top_p: float | None = None  # LLM_TOP_P="" in defaults.env → use model default
     llm_max_tokens: int = 1024
     llm_frequency_penalty: float = 0.3
     llm_presence_penalty: float = 0.0
@@ -71,18 +71,18 @@ class Settings(BaseSettings):
     llm_thinking_top_p: float = 0.95
     llm_thinking_max_tokens: int = 6144
     llm_thinking_frequency_penalty: float = 0.0  # Qwen3 spec: 0 in thinking mode
-    llm_thinking_presence_penalty: float = 0.3   # Qwen3 spec
+    llm_thinking_presence_penalty: float = 0.3  # Qwen3 spec
     llm_thinking_repetition_penalty: float = 1.2  # explicit; wins over oMLX derived value
-    llm_thinking_top_k: int = 20                 # Qwen3 spec
-    llm_thinking_min_p: float = 0.0              # Qwen3 spec
-    llm_thinking_budget: int = 4096              # LMForge two-call hard cap on reasoning tokens
-    llm_stream_thinking: bool = True             # send stream_reasoning_deltas to LMForge
+    llm_thinking_top_k: int = 20  # Qwen3 spec
+    llm_thinking_min_p: float = 0.0  # Qwen3 spec
+    llm_thinking_budget: int = 4096  # LMForge two-call hard cap on reasoning tokens
+    llm_stream_thinking: bool = True  # send stream_reasoning_deltas to LMForge
     # HTTP stream timeout (seconds). Haystack/OpenAI client default is 30s which
     # is far too short for thinking mode where the first token may take >60s.
-    llm_stream_timeout_s: float = 120.0          # normal mode
-    llm_thinking_stream_timeout_s: float = 360.0 # thinking mode (6 min for complex reasoning)
-    llm_stream_max_retries: int = 1              # retries for normal mode
-    llm_thinking_stream_max_retries: int = 0     # no retry for thinking — already waited long
+    llm_stream_timeout_s: float = 120.0  # normal mode
+    llm_thinking_stream_timeout_s: float = 360.0  # thinking mode (6 min for complex reasoning)
+    llm_stream_max_retries: int = 1  # retries for normal mode
+    llm_thinking_stream_max_retries: int = 0  # no retry for thinking — already waited long
     # Fast model used for async conversation summarization AND query expansion
     # (G2). Must be a chat model actually served by the engine — "qwen3:1.7b"
     # (no quant suffix) 404s against LMForge, which serves "qwen3:1.7b:4bit".
@@ -91,8 +91,8 @@ class Settings(BaseSettings):
     # ── Conversation context compression ──────────────────────────────────────
     # Anchored iterative summarization — compresses evicted turns into a rolling
     # summary, keeping only the last N messages verbatim for the LLM.
-    conversation_summary_threshold: int = 8   # compress when total messages exceed this
-    conversation_verbatim_recent: int = 4     # always keep last N messages verbatim
+    conversation_summary_threshold: int = 8  # compress when total messages exceed this
+    conversation_verbatim_recent: int = 4  # always keep last N messages verbatim
 
     # ── Reranker — LMForge /v1/rerank (oMLX on Mac; replaces Infinity sidecar) ─
     # Qwen3-Reranker cross-encoder (MLX). 0.6b:8bit = fast on-device default;

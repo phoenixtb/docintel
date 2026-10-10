@@ -64,6 +64,7 @@ from haystack.utils import Secret
 # Older versions don't have it; fall back to storing in chunk.meta.
 try:
     from haystack.dataclasses import ReasoningContent as _ReasoningContent
+
     _REASONING_CONTENT_AVAILABLE = True
 except ImportError:
     _ReasoningContent = None  # type: ignore[assignment]

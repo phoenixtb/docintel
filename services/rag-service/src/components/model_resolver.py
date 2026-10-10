@@ -118,7 +118,10 @@ class TenantModelResolver:
         result = await asyncio.get_running_loop().run_in_executor(
             None, self._fetch_platform_model_sync
         )
-        self.__class__._platform_cache = (result if result is not None else None, time.monotonic() + self.TTL)
+        self.__class__._platform_cache = (
+            result if result is not None else None,
+            time.monotonic() + self.TTL,
+        )
         return result
 
     def _fetch_platform_model_sync(self) -> Optional[str]:
@@ -126,9 +129,7 @@ class TenantModelResolver:
             with psycopg2.connect(self._postgres_url) as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                     cur.execute("SET LOCAL app.user_role = 'platform_admin'")
-                    cur.execute(
-                        "SELECT value FROM admin.platform_settings WHERE key = 'llm_model'"
-                    )
+                    cur.execute("SELECT value FROM admin.platform_settings WHERE key = 'llm_model'")
                     row = cur.fetchone()
                     if row is None:
                         return None
@@ -183,6 +184,8 @@ class TenantModelResolver:
         except Exception as exc:
             logger.warning(
                 "Failed to fetch user preferences for user=%s tenant=%s: %s — defaulting thinking_mode=False",
-                user_id, tenant_id, exc,
+                user_id,
+                tenant_id,
+                exc,
             )
             return False

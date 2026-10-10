@@ -32,6 +32,7 @@ class BM25SparseDocumentEmbedder:
 
     def warm_up(self):
         from fastembed import SparseTextEmbedding
+
         self._model = SparseTextEmbedding(model_name=self.model_name)
 
     @component.output_types(documents=list[Document])
@@ -72,6 +73,7 @@ class BM25SparseTextEmbedder:
 
     def warm_up(self):
         from fastembed import SparseTextEmbedding
+
         self._model = SparseTextEmbedding(model_name=self.model_name)
 
     @component.output_types(sparse_embedding=Optional[SparseEmbedding])

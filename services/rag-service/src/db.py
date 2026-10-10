@@ -78,7 +78,12 @@ class Conversation(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at")
+    messages = relationship(
+        "Message",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="Message.created_at",
+    )
 
 
 class Message(Base):
@@ -86,7 +91,11 @@ class Message(Base):
     __table_args__ = {"schema": "conversations"}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.conversations.id", ondelete="CASCADE"), nullable=False)
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     role = Column(String(20), nullable=False)  # user, assistant, system
     content = Column(Text, nullable=False)
     sources = Column(JSONB, nullable=True)
@@ -99,6 +108,7 @@ class Message(Base):
 # =============================================================================
 # Repository functions
 # =============================================================================
+
 
 def get_db() -> Session:
     """Get a database session."""
@@ -321,6 +331,7 @@ def update_conversation_title(conversation_id: str, tenant_id: str, title: str) 
 # =============================================================================
 # Serialization helpers
 # =============================================================================
+
 
 def _conv_to_dict(conv: Conversation, include_messages: bool = False) -> dict:
     d = {

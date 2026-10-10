@@ -41,7 +41,9 @@ class LiteLLMStreamingGenerator:
         self.model = f"openai/{base_model}" if not base_model.startswith("openai/") else base_model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.api_base = api_base or os.getenv("LLM_CHAT_URL", "http://host.docker.internal:11434/v1")
+        self.api_base = api_base or os.getenv(
+            "LLM_CHAT_URL", "http://host.docker.internal:11434/v1"
+        )
 
     async def stream(self, prompt: str):
         """Async generator that yields tokens."""

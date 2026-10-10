@@ -76,6 +76,7 @@ logger = logging.getLogger(__name__)
 # Section label helper (for source citations)
 # ---------------------------------------------------------------------------
 
+
 def _build_section_label(meta: dict, chunk_index: int) -> str:
     if meta.get("page") is not None:
         return f"p. {meta['page']}"
@@ -111,6 +112,7 @@ def _extract_think(raw: str) -> tuple[str, str]:
       3. No block at all → ("", raw)
     """
     import re
+
     m = re.search(r"<think>(.*?)</think>(.*)", raw, re.DOTALL)
     if m:
         return m.group(1).strip(), m.group(2).strip()
@@ -126,24 +128,27 @@ def _build_sources(documents: list) -> list[dict]:
     for i, doc in enumerate(documents):
         chunk_idx = doc.meta.get("chunk_index", i)
         content = doc.content or ""
-        sources.append({
-            "ref_id": i + 1,
-            "chunk_id": doc.id,
-            "document_id": doc.meta.get("document_id", ""),
-            "filename": doc.meta.get("filename", "Unknown"),
-            "section": _build_section_label(doc.meta, chunk_idx),
-            "chunk_index": chunk_idx,
-            "score": doc.score or 0.0,
-            "content": content[:600],
-            "domain": doc.meta.get("document_type") or doc.meta.get("domain") or "",
-            "metadata": {k: v for k, v in doc.meta.items() if k != "content"},
-        })
+        sources.append(
+            {
+                "ref_id": i + 1,
+                "chunk_id": doc.id,
+                "document_id": doc.meta.get("document_id", ""),
+                "filename": doc.meta.get("filename", "Unknown"),
+                "section": _build_section_label(doc.meta, chunk_idx),
+                "chunk_index": chunk_idx,
+                "score": doc.score or 0.0,
+                "content": content[:600],
+                "domain": doc.meta.get("document_type") or doc.meta.get("domain") or "",
+                "metadata": {k: v for k, v in doc.meta.items() if k != "content"},
+            }
+        )
     return sources
 
 
 # ---------------------------------------------------------------------------
 # RAGService
 # ---------------------------------------------------------------------------
+
 
 class RAGService:
     """
@@ -254,7 +259,8 @@ class RAGService:
             self._ready = True
             logger.info(
                 "RAGService ready (cache=%s, domain_routing=%s)",
-                cfg.use_cache, cfg.rag_use_domain_routing,
+                cfg.use_cache,
+                cfg.rag_use_domain_routing,
             )
 
     # ── Conversation helpers ─────────────────────────────────────────────────
@@ -289,10 +295,12 @@ class RAGService:
 
             history: list[dict] = []
             if session_summary:
-                history.append({
-                    "role": "system",
-                    "content": f"Earlier in this conversation:\n{session_summary}",
-                })
+                history.append(
+                    {
+                        "role": "system",
+                        "content": f"Earlier in this conversation:\n{session_summary}",
+                    }
+                )
 
             history.extend(recent)
 
@@ -380,7 +388,8 @@ class RAGService:
                 return
 
             new_span = get_messages_slice(
-                conversation_id, tenant_id,
+                conversation_id,
+                tenant_id,
                 offset=summary_upto,
                 limit=evictable_count,
             )
@@ -411,7 +420,9 @@ class RAGService:
 
             logger.info(
                 "Conversation %s compressed: %d new turns absorbed (total summarized: %d)",
-                conversation_id, compressed_turns, new_upto // 2,
+                conversation_id,
+                compressed_turns,
+                new_upto // 2,
             )
 
         except Exception as e:
@@ -519,7 +530,9 @@ class RAGService:
             self._last_trace_id = ""
 
         # ── 1. Initial metadata ───────────────────────────────────────────────
-        initial_context = context_state if (context_state and context_state.get("has_summary")) else None
+        initial_context = (
+            context_state if (context_state and context_state.get("has_summary")) else None
+        )
         yield MetadataEvent(
             query_id=request_id,
             cache_hit=False,
@@ -529,12 +542,14 @@ class RAGService:
         # ── 2. Embed ──────────────────────────────────────────────────────────
         try:
             embed_result = await loop.run_in_executor(
-                None, lambda: self._dense_embedder.run(text=question)  # type: ignore[union-attr]
+                None,
+                lambda: self._dense_embedder.run(text=question),  # type: ignore[union-attr]
             )
             query_embedding: list[float] = embed_result["embedding"]
 
             sparse_result = await loop.run_in_executor(
-                None, lambda: self._sparse_embedder.run(text=question)  # type: ignore[union-attr]
+                None,
+                lambda: self._sparse_embedder.run(text=question),  # type: ignore[union-attr]
             )
             query_sparse_embedding = sparse_result.get("sparse_embedding")
         except Exception as e:
@@ -559,7 +574,7 @@ class RAGService:
                     chunk_size = cfg.rag_cache_replay_chunk_chars
                     delay_ms = cfg.rag_cache_replay_chunk_delay_ms
                     for i in range(0, len(cached_text), chunk_size):
-                        yield TokenEvent(text=cached_text[i: i + chunk_size])
+                        yield TokenEvent(text=cached_text[i : i + chunk_size])
                         if delay_ms > 0:
                             await asyncio.sleep(delay_ms / 1000)
                     yield SourcesEvent(
@@ -594,16 +609,20 @@ class RAGService:
             if expanded_query and expanded_query.strip() != question.strip():
                 try:
                     exp_embed_result = await loop.run_in_executor(
-                        None, lambda: self._dense_embedder.run(text=expanded_query)  # type: ignore[union-attr]
+                        None,
+                        lambda: self._dense_embedder.run(text=expanded_query),  # type: ignore[union-attr]
                     )
                     exp_sparse_result = await loop.run_in_executor(
-                        None, lambda: self._sparse_embedder.run(text=expanded_query)  # type: ignore[union-attr]
+                        None,
+                        lambda: self._sparse_embedder.run(text=expanded_query),  # type: ignore[union-attr]
                     )
                     expanded_embedding = exp_embed_result["embedding"]
                     expanded_sparse_embedding = exp_sparse_result.get("sparse_embedding")
                     self._last_query_expanded = True
                 except Exception as e:
-                    logger.warning("Embedding expanded query failed, using original candidates only: %s", e)
+                    logger.warning(
+                        "Embedding expanded query failed, using original candidates only: %s", e
+                    )
                     expanded_embedding = None
 
         # ── 4. Route ──────────────────────────────────────────────────────────
@@ -661,7 +680,9 @@ class RAGService:
                         retrieved_docs.append(d)
                         seen_ids.add(d.id)
             except Exception as e:
-                logger.warning("Expanded-query retrieval failed, continuing with original candidates: %s", e)
+                logger.warning(
+                    "Expanded-query retrieval failed, continuing with original candidates: %s", e
+                )
 
         yield MetadataEvent(
             query_id=request_id,
@@ -746,8 +767,11 @@ class RAGService:
 
             logger.info(
                 "rerank_gate mode=%s skipped=%s top_fused=%.4f n_in=%d n_out=%d",
-                self._last_retrieval_mode, self._last_rerank_skipped,
-                top_fused_score, candidates_in, len(documents),
+                self._last_retrieval_mode,
+                self._last_rerank_skipped,
+                top_fused_score,
+                candidates_in,
+                len(documents),
             )
 
             self._last_rerank_candidates_in = candidates_in
@@ -769,7 +793,7 @@ class RAGService:
         if effective_min_score > 0.0 and not self._last_rerank_skipped:
             above = [d for d in documents if (d.score or 0.0) >= effective_min_score]
             if not above and cfg.rag_min_score_fallback_topk > 0:
-                above = documents[:cfg.rag_min_score_fallback_topk]
+                above = documents[: cfg.rag_min_score_fallback_topk]
             documents = above
 
         documents = documents[:effective_top_k]
@@ -785,8 +809,10 @@ class RAGService:
         # ── 9. No-docs branch ─────────────────────────────────────────────────
         if not documents:
             from ..prompts import NO_DOCUMENTS_RESPONSE, NO_RELEVANT_DOCUMENTS_RESPONSE
+
             try:
                 from qdrant_client import QdrantClient as _QC
+
                 _qc = _QC(url=cfg.qdrant_url)
                 _count = _qc.count(collection_name=f"documents_{tenant_id}", exact=False).count
                 no_docs_text = (
@@ -805,11 +831,23 @@ class RAGService:
 
                 async def _persist_no_docs():
                     from ..db import add_message as _add
+
                     try:
-                        await _run_db(lambda: _add(_cid_no_docs, "user", _q_no_docs, tenant_id=_t_no_docs))
-                        await _run_db(lambda: _add(_cid_no_docs, "assistant", _txt_no_docs, tenant_id=_t_no_docs, sources=[]))
+                        await _run_db(
+                            lambda: _add(_cid_no_docs, "user", _q_no_docs, tenant_id=_t_no_docs)
+                        )
+                        await _run_db(
+                            lambda: _add(
+                                _cid_no_docs,
+                                "assistant",
+                                _txt_no_docs,
+                                tenant_id=_t_no_docs,
+                                sources=[],
+                            )
+                        )
                     except Exception as _e:
                         logger.warning("Failed to persist no-docs conversation: %s", _e)
+
                 asyncio.create_task(_persist_no_docs())
 
             yield TokenEvent(text=no_docs_text)
@@ -840,6 +878,7 @@ class RAGService:
             profile = await model_profile_resolver.resolve(effective_model, tenant_id)
         else:
             from ..components.model_profile_resolver import ModelSamplingParams
+
             profile = ModelSamplingParams()
 
         def _p(profile_val, cfg_val):  # noqa: E306 — local helper, not a class
@@ -849,23 +888,33 @@ class RAGService:
             llm_temperature = _p(profile.thinking_temperature, cfg.llm_thinking_temperature)
             llm_top_p: float | None = _p(profile.thinking_top_p, cfg.llm_thinking_top_p)
             max_tokens = _p(profile.thinking_max_tokens, cfg.llm_thinking_max_tokens)
-            frequency_penalty_resolved = _p(profile.thinking_frequency_penalty, cfg.llm_thinking_frequency_penalty)
-            presence_penalty_resolved: float | None = _p(profile.thinking_presence_penalty, cfg.llm_thinking_presence_penalty)
-            repetition_penalty_resolved: float | None = _p(profile.thinking_repetition_penalty, cfg.llm_thinking_repetition_penalty)
+            frequency_penalty_resolved = _p(
+                profile.thinking_frequency_penalty, cfg.llm_thinking_frequency_penalty
+            )
+            presence_penalty_resolved: float | None = _p(
+                profile.thinking_presence_penalty, cfg.llm_thinking_presence_penalty
+            )
+            repetition_penalty_resolved: float | None = _p(
+                profile.thinking_repetition_penalty, cfg.llm_thinking_repetition_penalty
+            )
             top_k_resolved: int | None = _p(profile.thinking_top_k, cfg.llm_thinking_top_k)
             min_p_resolved: float | None = _p(profile.thinking_min_p, cfg.llm_thinking_min_p)
-            thinking_budget_resolved: int | None = _p(profile.thinking_budget, cfg.llm_thinking_budget)
+            thinking_budget_resolved: int | None = _p(
+                profile.thinking_budget, cfg.llm_thinking_budget
+            )
             stream_thinking_resolved: bool = _p(profile.stream_thinking, cfg.llm_stream_thinking)
         else:
             llm_temperature = _p(profile.temperature, cfg.llm_temperature)
             llm_top_p = _p(profile.top_p, cfg.llm_top_p)
             max_tokens = _p(profile.max_tokens, cfg.llm_max_tokens)
             frequency_penalty_resolved = _p(profile.frequency_penalty, cfg.llm_frequency_penalty)
-            presence_penalty_resolved = _p(profile.presence_penalty, cfg.llm_presence_penalty) or None
+            presence_penalty_resolved = (
+                _p(profile.presence_penalty, cfg.llm_presence_penalty) or None
+            )
             repetition_penalty_resolved = _p(profile.repetition_penalty, cfg.llm_repetition_penalty)
             top_k_resolved = _p(profile.top_k, cfg.llm_top_k)
             min_p_resolved = _p(profile.min_p, cfg.llm_min_p)
-            thinking_budget_resolved = None   # never sent in non-thinking mode
+            thinking_budget_resolved = None  # never sent in non-thinking mode
             stream_thinking_resolved = False  # never sent in non-thinking mode
 
         queue: asyncio.Queue = asyncio.Queue()
@@ -920,8 +969,12 @@ class RAGService:
             min_p=min_p_resolved,
             thinking_budget=thinking_budget_resolved,
             stream_reasoning_deltas=stream_thinking_resolved if effective_thinking else None,
-            timeout=cfg.llm_thinking_stream_timeout_s if effective_thinking else cfg.llm_stream_timeout_s,
-            max_retries=cfg.llm_thinking_stream_max_retries if effective_thinking else cfg.llm_stream_max_retries,
+            timeout=cfg.llm_thinking_stream_timeout_s
+            if effective_thinking
+            else cfg.llm_stream_timeout_s,
+            max_retries=cfg.llm_thinking_stream_max_retries
+            if effective_thinking
+            else cfg.llm_stream_max_retries,
         )
 
         async def run_llm():
@@ -952,7 +1005,9 @@ class RAGService:
                 elif kind == "status":
                     # UX-only lifecycle signal — not accumulated into answer/thinking.
                     # "call2_prefill" → LMForge is prefilling Call 2 KV cache.
-                    yield StatusEvent(stage="generating_answer" if text == "call2_prefill" else text)
+                    yield StatusEvent(
+                        stage="generating_answer" if text == "call2_prefill" else text
+                    )
                 else:
                     full_answer_parts.append(text)
                     yield TokenEvent(text=text)
@@ -1008,6 +1063,7 @@ class RAGService:
 
         # ── 14. Cache write (fire-and-forget) ─────────────────────────────────
         if use_cache and self._cache_writer and answer:
+
             async def _write_cache():
                 try:
                     await loop.run_in_executor(
@@ -1022,6 +1078,7 @@ class RAGService:
                     )
                 except Exception as e:
                     logger.warning("Cache write failed: %s", e)
+
             asyncio.create_task(_write_cache())
 
         # ── 15. Persist conversation (fire-and-forget) ────────────────────────
@@ -1035,6 +1092,7 @@ class RAGService:
 
             async def _persist():
                 from ..db import add_message as _add
+
                 try:
                     await _run_db(lambda: _add(_cid, "user", _q, tenant_id=_tid))
                     await _run_db(lambda: _add(_cid, "assistant", _a, tenant_id=_tid, sources=_s))
@@ -1042,6 +1100,7 @@ class RAGService:
                         await self._maybe_compress_history(_cid, _tid, _summ)
                 except Exception as e:
                     logger.warning("Failed to persist conversation: %s", e)
+
             asyncio.create_task(_persist())
 
         # ── 16. Sources ───────────────────────────────────────────────────────
@@ -1116,7 +1175,15 @@ class RAGService:
             retrieve_only=retrieve_only,
         ):
             match event:
-                case MetadataEvent(cache_hit=ch, retrieval_mode=rm, rerank_candidates_in=cin, rerank_candidates_out=cout, reranker_degraded=rd, query_expanded=qe, rerank_skipped=rs):
+                case MetadataEvent(
+                    cache_hit=ch,
+                    retrieval_mode=rm,
+                    rerank_candidates_in=cin,
+                    rerank_candidates_out=cout,
+                    reranker_degraded=rd,
+                    query_expanded=qe,
+                    rerank_skipped=rs,
+                ):
                     cache_hit = ch
                     if rm is not None:
                         retrieval_mode = rm

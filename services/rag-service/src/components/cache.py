@@ -158,7 +158,9 @@ class SemanticCacheWriter:
         required_roles: Optional[list[str]] = None,
     ) -> dict:
         max_classification_int = CLASSIFICATION_ORDER.get(
-            Classification(max_classification) if max_classification in Classification._value2member_map_ else Classification.INTERNAL,
+            Classification(max_classification)
+            if max_classification in Classification._value2member_map_
+            else Classification.INTERNAL,
             CLASSIFICATION_ORDER[Classification.INTERNAL],
         )
 
