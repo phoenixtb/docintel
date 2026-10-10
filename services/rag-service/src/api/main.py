@@ -11,8 +11,9 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 from docintel_common.errors import install_error_handlers
@@ -48,6 +49,9 @@ from .dependencies import (
     UserContextDep,
 )
 from .schemas import QueryRequest, QueryResponse
+
+if TYPE_CHECKING:
+    from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
@@ -115,11 +119,11 @@ async def _publish_query_event(
         logger.debug("Query telemetry publish failed (non-fatal): %s", e)
 
 
-def _fire_and_forget(coro) -> asyncio.Task:
+def _fire_and_forget(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
     """Create a task with an error-logging callback so exceptions are never silently dropped."""
     task = asyncio.ensure_future(coro)
 
-    def _on_done(t: asyncio.Task):
+    def _on_done(t: asyncio.Task[Any]) -> None:
         if not t.cancelled() and t.exception():
             logger.warning("Background task raised an exception: %s", t.exception())
 
@@ -131,7 +135,9 @@ _SSE_HEARTBEAT_SENTINEL = object()
 _SSE_HEARTBEAT_INTERVAL_S = 20.0
 
 
-async def _with_heartbeat(source, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S):
+async def _with_heartbeat(
+    source: AsyncIterator[Any], interval_s: float = _SSE_HEARTBEAT_INTERVAL_S
+) -> AsyncIterator[Any]:
     """
     Wrap an async generator, yielding _SSE_HEARTBEAT_SENTINEL if no item arrives
     within `interval_s`. Idle mobile/corporate proxies drop silent SSE connections
@@ -170,7 +176,7 @@ async def _with_heartbeat(source, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_trace_logging()
     settings = Settings()
     app.state.settings = settings
@@ -306,7 +312,7 @@ async def _probe_llm_engine(settings: Settings) -> None:
                 logger.warning("LLM engine [%s] not reachable at %s (non-fatal): %s", label, url, e)
 
 
-async def _prewarm_rag_service(rag_service) -> None:
+async def _prewarm_rag_service(rag_service: RAGService) -> None:
     """
     Run RAGService.warm_up() in a thread so the cross-encoder JIT compilation
     (60-120 s on CPU) happens during startup instead of blocking the first query.
@@ -373,7 +379,9 @@ install_error_handlers(app)
 
 
 @app.middleware("http")
-async def tenant_context_middleware(request: Request, call_next):
+async def tenant_context_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable["Response"]]
+) -> "Response":
     """Set tenant ContextVars and distributed trace context for every request."""
     request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
     tenant_id = request.headers.get("X-Tenant-Id", "default")
@@ -515,7 +523,7 @@ class VectorStatsResponse(BaseModel):
 
 
 @app.get("/health", response_model=HealthResponse)
-async def health_check(settings: SettingsDep, http_request: Request):
+async def health_check(settings: SettingsDep, http_request: Request) -> Any:
     qdrant_status = "unknown"
     llm_status = "unknown"
 
@@ -541,8 +549,8 @@ async def health_check(settings: SettingsDep, http_request: Request):
     )
 
 
-@app.get("/")
-async def root():
+@app.get("/", response_model=None)
+async def root() -> Any:
     return {
         "service": "DocIntel RAG Service",
         "version": "0.1.0",
@@ -561,7 +569,7 @@ async def list_models(
     settings: SettingsDep,
     http_request: Request,
     x_tenant_id: str | None = Header(None),
-):
+) -> Any:
     """
     List all models available from the configured LLM engine, with capability
     flags so the UI can filter per-kind dropdowns (chat / vlm / rerank).
@@ -581,7 +589,7 @@ async def list_models(
                     continue
                 # LMForge optionally returns a `capabilities` block — use it
                 # when present, fall back to substring inference otherwise.
-                capabilities: dict = m.get("capabilities", {})
+                capabilities: dict[str, Any] = m.get("capabilities", {})
                 supports_thinking = capabilities.get("thinking", _model_supports_thinking(name))
                 supports_vision = capabilities.get("vision", _model_supports_vision(name))
                 is_reranker = capabilities.get("rerank", _model_is_reranker(name))
@@ -623,7 +631,7 @@ async def list_models(
 
 
 @app.delete("/internal/settings-cache/{tenant_id}", status_code=204)
-async def invalidate_settings_cache(tenant_id: str, http_request: Request):
+async def invalidate_settings_cache(tenant_id: str, http_request: Request) -> None:
     """
     Invalidate the in-process TenantModelResolver cache for all users in a tenant.
     Called by the UI after tenant model settings change.
@@ -638,7 +646,7 @@ async def invalidate_user_settings_cache(
     http_request: Request,
     x_tenant_id: str = Header(alias="X-Tenant-Id", default=""),
     x_user_id: str = Header(alias="X-User-Id", default=""),
-):
+) -> None:
     """
     Invalidate the in-process TenantModelResolver cache for a specific user.
     Called by the UI immediately after user preferences are saved.
@@ -655,8 +663,8 @@ async def invalidate_user_settings_cache(
 # =============================================================================
 
 
-@app.get("/internal/model-profiles/resolve/{tenant_id}")
-async def resolve_model_profile(tenant_id: str, model: str, http_request: Request):
+@app.get("/internal/model-profiles/resolve/{tenant_id}", response_model=None)
+async def resolve_model_profile(tenant_id: str, model: str, http_request: Request) -> Any:
     """
     Return fully-resolved effective sampling parameters for a (tenant, model) pair.
     Resolution chain: tenant DB → platform DB → built-in defaults → env var fallbacks.
@@ -666,7 +674,7 @@ async def resolve_model_profile(tenant_id: str, model: str, http_request: Reques
     settings: Settings = http_request.app.state.settings
     params = await resolver.resolve(model, tenant_id)
 
-    def _v(resolved, fallback):
+    def _v(resolved: Any, fallback: Any) -> Any:
         return resolved if resolved is not None else fallback
 
     return {
@@ -701,7 +709,7 @@ async def resolve_model_profile(tenant_id: str, model: str, http_request: Reques
 
 
 @app.delete("/internal/model-profiles-cache", status_code=204)
-async def invalidate_model_profiles_cache_global(http_request: Request):
+async def invalidate_model_profiles_cache_global(http_request: Request) -> None:
     """
     Flush the entire ModelProfileResolver cache (platform profiles changed).
     Called by the UI after platform-scope model profile CRUD.
@@ -712,7 +720,7 @@ async def invalidate_model_profiles_cache_global(http_request: Request):
 
 
 @app.delete("/internal/model-profiles-cache/{tenant_id}", status_code=204)
-async def invalidate_model_profiles_cache_tenant(tenant_id: str, http_request: Request):
+async def invalidate_model_profiles_cache_tenant(tenant_id: str, http_request: Request) -> None:
     """
     Flush ModelProfileResolver cache entries for a specific tenant.
     Called by the UI after tenant-scope model profile CRUD.
@@ -728,7 +736,7 @@ async def invalidate_model_profiles_cache_tenant(tenant_id: str, http_request: R
 
 
 @app.get("/vector-stats", response_model=VectorStatsResponse)
-async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep):
+async def get_vector_stats(settings: SettingsDep, user_ctx: UserContextDep) -> Any:
     from qdrant_client import QdrantClient
     from qdrant_client.http import models
 
@@ -792,7 +800,7 @@ def _serialize_sse(event: PipelineEvent, tenant_id: str = "") -> str:
             query_expanded=qe,
             rerank_skipped=rs,
         ):
-            payload: dict = {"metadata": {"query_id": qid, "cache_hit": ch}}
+            payload: dict[str, Any] = {"metadata": {"query_id": qid, "cache_hit": ch}}
             if cs:
                 payload["metadata"]["context_state"] = cs
             if rd is not None:
@@ -837,7 +845,7 @@ def _serialize_sse(event: PipelineEvent, tenant_id: str = "") -> str:
 
 def _resolve_effective_model_and_thinking(
     request: QueryRequest,
-    resolved,
+    resolved: Any,
     effective_model_name: str,
 ) -> tuple[str, bool]:
     """Compute effective_model and effective_thinking from resolver + request override."""
@@ -856,7 +864,7 @@ async def query_documents(
     history: ConversationHistoryDep,
     http_request: Request,
     tracer: TracerDep,
-):
+) -> Any:
     """
     RAG query with tenant isolation and RBAC.
     Gateway claims always take precedence — clients cannot override tenant_id.
@@ -956,7 +964,7 @@ async def query_documents_stream(
     history: ConversationHistoryDep,
     http_request: Request,
     tracer: TracerDep,
-):
+) -> StreamingResponse:
     """Thin streaming handler — delegates all orchestration to RAGService.stream()."""
     llm_semaphore: asyncio.Semaphore = http_request.app.state.llm_semaphore
     model_resolver: TenantModelResolver = http_request.app.state.model_resolver
@@ -972,7 +980,7 @@ async def query_documents_stream(
     )
     request_id = str(uuid.uuid4())
 
-    async def sse_iter():
+    async def sse_iter() -> AsyncIterator[str]:
         cache_hit = False
         source_count = 0
         retrieval_mode = ""
@@ -1095,8 +1103,8 @@ class UpdateConversationRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
 
 
-@app.post("/conversations")
-async def create_conversation(request: CreateConversationRequest, user_ctx: UserContextDep):
+@app.post("/conversations", response_model=None)
+async def create_conversation(request: CreateConversationRequest, user_ctx: UserContextDep) -> Any:
     from ..db import create_conversation as _create
 
     tenant_id = user_ctx.tenant_id
@@ -1107,12 +1115,12 @@ async def create_conversation(request: CreateConversationRequest, user_ctx: User
     )
 
 
-@app.get("/conversations")
+@app.get("/conversations", response_model=None)
 async def list_conversations(
     user_ctx: UserContextDep,
     limit: int = 50,
     offset: int = 0,
-):
+) -> Any:
     from ..db import list_conversations as _list
 
     return await _run_db(
@@ -1122,8 +1130,8 @@ async def list_conversations(
     )
 
 
-@app.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str, user_ctx: UserContextDep):
+@app.get("/conversations/{conversation_id}", response_model=None)
+async def get_conversation(conversation_id: str, user_ctx: UserContextDep) -> Any:
     from ..db import get_conversation as _get
 
     conv = await _run_db(lambda: _get(conversation_id, user_ctx.tenant_id))
@@ -1132,12 +1140,12 @@ async def get_conversation(conversation_id: str, user_ctx: UserContextDep):
     return conv
 
 
-@app.patch("/conversations/{conversation_id}")
+@app.patch("/conversations/{conversation_id}", response_model=None)
 async def update_conversation(
     conversation_id: str,
     request: UpdateConversationRequest,
     user_ctx: UserContextDep,
-):
+) -> Any:
     from ..db import update_conversation_title
 
     conv = await _run_db(
@@ -1148,8 +1156,8 @@ async def update_conversation(
     return conv
 
 
-@app.delete("/conversations/{conversation_id}")
-async def delete_conversation_endpoint(conversation_id: str, user_ctx: UserContextDep):
+@app.delete("/conversations/{conversation_id}", response_model=None)
+async def delete_conversation_endpoint(conversation_id: str, user_ctx: UserContextDep) -> Any:
     from ..db import delete_conversation
 
     deleted = await _run_db(lambda: delete_conversation(conversation_id, user_ctx.tenant_id))
@@ -1163,11 +1171,11 @@ async def delete_conversation_endpoint(conversation_id: str, user_ctx: UserConte
 # =============================================================================
 
 
-@app.delete("/internal/conversations/tenant")
+@app.delete("/internal/conversations/tenant", response_model=None)
 async def delete_tenant_conversations(
     x_tenant_id: str = Header(alias="X-Tenant-Id", default=""),
     x_internal_service_token: str = Header(alias="X-Internal-Service-Token", default=""),
-):
+) -> Any:
     """
     Delete all conversations and messages for a tenant.
     Called by admin-service during tenant deletion.
@@ -1186,7 +1194,7 @@ async def delete_tenant_conversations(
 
     from ..db import SessionLocal
 
-    def _delete_all():
+    def _delete_all() -> int:
         with SessionLocal() as db:
             # platform_admin role to bypass RLS for cross-tenant admin operation
             db.execute(text("SET LOCAL app.user_role = 'platform_admin'"))

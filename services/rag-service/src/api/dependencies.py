@@ -7,7 +7,7 @@ via Depends() rather than reaching into global state directly.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Any
 
 from docintel_common.internal_auth import verify_internal_token
 from docintel_common.security import UserContext
@@ -136,8 +136,8 @@ UserContextDep = Annotated[UserContext, Depends(extract_user_context)]
 
 @dataclass
 class LoadedHistory:
-    messages: list[dict] = field(default_factory=list)
-    context_state: dict = field(default_factory=dict)
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    context_state: dict[str, Any] = field(default_factory=dict)
 
 
 async def get_conversation_history(

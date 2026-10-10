@@ -15,6 +15,7 @@ Pipeline position:
 """
 
 from threading import Lock
+from typing import Any
 
 from cachetools import LRUCache
 from haystack import Document, component
@@ -29,7 +30,9 @@ from ..config import Settings, get_settings
 from ..stores import create_document_store
 
 # LRU cache with a 100-tenant cap to prevent unbounded memory growth.
-_retriever_cache: LRUCache = LRUCache(maxsize=100)
+_retriever_cache: "LRUCache[str, tuple[QdrantHybridRetriever, QdrantEmbeddingRetriever]]" = (
+    LRUCache(maxsize=100)
+)
 _cache_lock = Lock()
 
 
@@ -81,7 +84,7 @@ class SecureRetriever:
         self,
         user_roles: list[str] | None,
         user_id: str | None,
-        domain_filter: dict | None,
+        domain_filter: dict[str, Any] | None,
     ) -> models.Filter:
         must: list[models.Condition] = []
 
@@ -129,9 +132,9 @@ class SecureRetriever:
         tenant_id: str,
         user_roles: list[str] | None = None,
         user_id: str | None = None,
-        domain_filter: dict | None = None,
+        domain_filter: dict[str, Any] | None = None,
         query_sparse_embedding: SparseEmbedding | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         hybrid_retriever, dense_retriever = _get_tenant_retrievers(
             tenant_id, self._settings, self._top_k
         )

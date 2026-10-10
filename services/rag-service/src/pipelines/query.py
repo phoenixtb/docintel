@@ -30,6 +30,7 @@ import logging
 import threading
 import time
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 from docintel_common.domain import DOMAIN_LABELS
 from docintel_common.security import UserContext
@@ -68,6 +69,9 @@ from ..events import (
 from ..tracing import LangfuseTracer
 from ..utils.asyncio import _run_db
 
+if TYPE_CHECKING:
+    from ..components.summarizer import AnchoredSummarizer
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,7 +80,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _build_section_label(meta: dict, chunk_index: int) -> str:
+def _build_section_label(meta: dict[str, Any], chunk_index: int) -> str:
     if meta.get("page") is not None:
         return f"p. {meta['page']}"
     item_idx = meta.get("item_index")
@@ -122,7 +126,7 @@ def _extract_think(raw: str) -> tuple[str, str]:
     return "", raw.strip()
 
 
-def _build_sources(documents: list) -> list[dict]:
+def _build_sources(documents: list[Any]) -> list[dict[str, Any]]:
     """Build the canonical source list from Haystack Document objects."""
     sources = []
     for i, doc in enumerate(documents):
@@ -269,7 +273,7 @@ class RAGService:
         self,
         conversation_id: str,
         tenant_id: str,
-    ) -> tuple[list[dict], dict]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """
         Returns (history_messages, context_state).
 
@@ -293,7 +297,7 @@ class RAGService:
 
             recent = get_recent_messages(conversation_id, tenant_id, limit=verbatim)
 
-            history: list[dict] = []
+            history: list[dict[str, Any]] = []
             if session_summary:
                 history.append(
                     {
@@ -324,9 +328,9 @@ class RAGService:
         conversation_id: str,
         question: str,
         answer: str,
-        sources: list[dict],
+        sources: list[dict[str, Any]],
         tenant_id: str = "",
-        summarizer=None,
+        summarizer: "AnchoredSummarizer | None" = None,
     ) -> None:
         try:
             from ..db import add_message
@@ -351,7 +355,7 @@ class RAGService:
         self,
         conversation_id: str,
         tenant_id: str,
-        summarizer,
+        summarizer: "AnchoredSummarizer",
     ) -> None:
         """
         Anchored iterative compression (fire-and-forget).
@@ -434,7 +438,7 @@ class RAGService:
         self,
         question: str,
         document_type: str | None,
-    ) -> tuple[str | None, dict | None]:
+    ) -> tuple[str | None, dict[str, Any] | None]:
         """
         Returns (detected_domain, domain_filter).
 
@@ -466,8 +470,8 @@ class RAGService:
         user_context: UserContext,
         user_roles: list[str] | None,
         user_id: str | None,
-        history: list[dict] | None,
-        context_state: dict | None,
+        history: list[dict[str, Any]] | None,
+        context_state: dict[str, Any] | None,
         document_type: str | None,
         top_k: int | None,
         min_score: float | None,
@@ -480,7 +484,7 @@ class RAGService:
         request_id: str,
         model_profile_resolver: ModelProfileResolver | None = None,
         conversation_id: str | None = None,
-        summarizer=None,
+        summarizer: "AnchoredSummarizer | None" = None,
         tracer: LangfuseTracer | None = None,
         retrieve_only: bool = False,
     ) -> AsyncIterator[PipelineEvent]:
@@ -829,7 +833,7 @@ class RAGService:
                 _t_no_docs = tenant_id
                 _txt_no_docs = no_docs_text
 
-                async def _persist_no_docs():
+                async def _persist_no_docs() -> None:
                     from ..db import add_message as _add
 
                     try:
@@ -881,7 +885,7 @@ class RAGService:
 
             profile = ModelSamplingParams()
 
-        def _p(profile_val, cfg_val):  # noqa: E306 — local helper, not a class
+        def _p(profile_val: Any, cfg_val: Any) -> Any:  # noqa: E306 — local helper, not a class
             return profile_val if profile_val is not None else cfg_val
 
         if effective_thinking:
@@ -917,11 +921,11 @@ class RAGService:
             thinking_budget_resolved = None  # never sent in non-thinking mode
             stream_thinking_resolved = False  # never sent in non-thinking mode
 
-        queue: asyncio.Queue = asyncio.Queue()
-        llm_error: list = []
-        usage_holder: dict = {}
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        llm_error: list[Any] = []
+        usage_holder: dict[str, Any] = {}
 
-        def streaming_callback(chunk):
+        def streaming_callback(chunk: Any) -> None:
             # Usage arrives on a trailing chunk with no content when the engine
             # honours stream_options.include_usage (see llm_adapter.extract_usage).
             # Captured unconditionally — this chunk carries no content/reasoning
@@ -977,7 +981,7 @@ class RAGService:
             else cfg.llm_stream_max_retries,
         )
 
-        async def run_llm():
+        async def run_llm() -> None:
             async with llm_semaphore:
                 try:
                     await loop.run_in_executor(None, lambda: llm.run(messages=messages))
@@ -1064,7 +1068,7 @@ class RAGService:
         # ── 14. Cache write (fire-and-forget) ─────────────────────────────────
         if use_cache and self._cache_writer and answer:
 
-            async def _write_cache():
+            async def _write_cache() -> None:
                 try:
                     await loop.run_in_executor(
                         None,
@@ -1090,7 +1094,7 @@ class RAGService:
             _tid = tenant_id
             _summ = summarizer
 
-            async def _persist():
+            async def _persist() -> None:
                 from ..db import add_message as _add
 
                 try:
@@ -1116,8 +1120,8 @@ class RAGService:
         user_context: UserContext,
         user_roles: list[str] | None = None,
         user_id: str | None = None,
-        history: list[dict] | None = None,
-        context_state: dict | None = None,
+        history: list[dict[str, Any]] | None = None,
+        context_state: dict[str, Any] | None = None,
         document_type: str | None = None,
         top_k: int | None = None,
         min_score: float | None = None,
@@ -1130,17 +1134,17 @@ class RAGService:
         request_id: str,
         model_profile_resolver: ModelProfileResolver | None = None,
         conversation_id: str | None = None,
-        summarizer=None,
+        summarizer: "AnchoredSummarizer | None" = None,
         tracer: LangfuseTracer | None = None,
         retrieve_only: bool = False,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """
         Drain stream() into the legacy dict shape consumed by /query.
         """
         start_time = time.time()
         full_thinking: list[str] = []
         full_answer: list[str] = []
-        sources: list[dict] = []
+        sources: list[dict[str, Any]] = []
         cache_hit = False
         detected_domain: str | None = None
         retrieval_mode: str | None = None

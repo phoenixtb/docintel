@@ -5,7 +5,7 @@ Uses SQLAlchemy with psycopg2 for PostgreSQL access.
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     DateTime,
@@ -58,8 +58,12 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
+
+
 @event.listens_for(engine, "begin")
-def _set_rls_on_begin(conn):
+def _set_rls_on_begin(conn: "Connection") -> None:
     """Set PostgreSQL RLS session variables at the start of each transaction."""
     tenant_id = _tenant_ctx.get()
     role = _role_ctx.get()
@@ -131,7 +135,7 @@ def create_conversation(
     tenant_id: str,
     user_id: str | None = None,
     title: str = "New Conversation",
-) -> dict:
+) -> dict[str, Any]:
     """Create a new conversation."""
     with get_db() as db:
         conv = Conversation(tenant_id=tenant_id, user_id=user_id, title=title)
@@ -146,7 +150,7 @@ def list_conversations(
     user_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """List conversations for a tenant/user, most recent first."""
     with get_db() as db:
         q = db.query(Conversation).filter(Conversation.tenant_id == tenant_id)
@@ -156,7 +160,7 @@ def list_conversations(
         return [_conv_to_dict(c, include_messages=False) for c in convs]
 
 
-def get_conversation(conversation_id: str, tenant_id: str) -> dict | None:
+def get_conversation(conversation_id: str, tenant_id: str) -> dict[str, Any] | None:
     """Get a conversation with all its messages."""
     with get_db() as db:
         conv = (
@@ -189,9 +193,9 @@ def add_message(
     role: str,
     content: str,
     tenant_id: str | None = None,
-    sources: list[dict] | None = None,
-    metadata: dict | None = None,
-) -> dict:
+    sources: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Add a message to a conversation. Also updates conversation title and updated_at."""
     with get_db() as db:
         msg = Message(
@@ -219,7 +223,7 @@ def add_message(
         return _msg_to_dict(msg)
 
 
-def get_conversation_summary_state(conversation_id: str, tenant_id: str) -> dict:
+def get_conversation_summary_state(conversation_id: str, tenant_id: str) -> dict[str, Any]:
     """
     Lightweight fetch: returns summary state + total user/assistant message count.
     Does NOT load all message content — avoids the N+1 problem on large conversations.
@@ -254,7 +258,7 @@ def get_messages_slice(
     tenant_id: str,
     offset: int,
     limit: int,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Fetch a slice of user/assistant messages by position (oldest-first)."""
     with get_db() as db:
         conv = (
@@ -301,7 +305,7 @@ def get_recent_messages(
     conversation_id: str,
     tenant_id: str,
     limit: int,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Fetch the most recent N user/assistant messages (newest-last order)."""
     with get_db() as db:
         conv = (
@@ -324,7 +328,9 @@ def get_recent_messages(
         return [{"role": m.role, "content": m.content} for m in reversed(msgs)]
 
 
-def update_conversation_title(conversation_id: str, tenant_id: str, title: str) -> dict | None:
+def update_conversation_title(
+    conversation_id: str, tenant_id: str, title: str
+) -> dict[str, Any] | None:
     """Update a conversation's title."""
     with get_db() as db:
         conv = (
@@ -360,7 +366,7 @@ def _conv_to_dict(conv: Conversation, include_messages: bool = False) -> dict[st
     return d
 
 
-def _msg_to_dict(msg: Message) -> dict:
+def _msg_to_dict(msg: Message) -> dict[str, Any]:
     return {
         "id": str(msg.id),
         "conversation_id": str(msg.conversation_id),

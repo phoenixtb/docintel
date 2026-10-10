@@ -32,13 +32,14 @@ Error path:
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
 class MetadataEvent:
     query_id: str
     cache_hit: bool
-    context_state: dict | None = None
+    context_state: dict[str, Any] | None = None
     reranker_degraded: bool | None = None
     # B3 — per-answer transparency ("Why this answer" panel). Emitted
     # incrementally as each pipeline stage completes; the UI merges fields
@@ -78,7 +79,7 @@ class TokenEvent:
 
 @dataclass(frozen=True)
 class SourcesEvent:
-    sources: list
+    sources: list[Any]
     done: bool = True
 
 

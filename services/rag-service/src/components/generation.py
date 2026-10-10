@@ -12,6 +12,7 @@ async generator semantics that don't fit Haystack's synchronous Pipeline model.
 
 import logging
 import os
+from collections.abc import AsyncIterator
 
 import litellm
 
@@ -45,7 +46,7 @@ class LiteLLMStreamingGenerator:
             "LLM_CHAT_URL", "http://host.docker.internal:11434/v1"
         )
 
-    async def stream(self, prompt: str):
+    async def stream(self, prompt: str) -> AsyncIterator[str]:
         """Async generator that yields tokens."""
         response = await litellm.acompletion(
             model=self.model,

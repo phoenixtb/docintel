@@ -20,6 +20,7 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from docintel_common.security import RetrievalAuditEvent, UserContext
@@ -49,7 +50,7 @@ class OpaChunkValidator:
         documents: list[Document],
         user_context: UserContext,
         request_id: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """
         Evaluate chunk access for each document in the list.
 

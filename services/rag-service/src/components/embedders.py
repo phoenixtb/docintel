@@ -8,7 +8,7 @@ QdrantHybridRetriever for idiomatic Haystack hybrid search.
 """
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from haystack import Document, component
 from haystack.dataclasses import SparseEmbedding
@@ -44,7 +44,7 @@ class BM25SparseDocumentEmbedder:
         return self._model
 
     @component.output_types(documents=list[Document])
-    def run(self, documents: list[Document]) -> dict:
+    def run(self, documents: list[Document]) -> dict[str, Any]:
         """
         Compute BM25 sparse embeddings for a list of documents.
         Sets doc.sparse_embedding on each; falls back gracefully on error.
@@ -89,7 +89,7 @@ class BM25SparseTextEmbedder:
         return self._model
 
     @component.output_types(sparse_embedding=SparseEmbedding | None)
-    def run(self, text: str) -> dict:
+    def run(self, text: str) -> dict[str, Any]:
         """
         Compute BM25 sparse embedding for a query string.
         Returns None sparse_embedding on failure (falls back to dense-only).

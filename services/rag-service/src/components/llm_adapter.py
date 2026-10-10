@@ -37,6 +37,7 @@ Private-symbol dependency:
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Defensive import of Haystack private symbols.
@@ -84,7 +85,9 @@ class ThinkingAwareChatGenerator(OpenAIChatGenerator):
     chunk to the user's callback.
     """
 
-    def _handle_stream_response(self, chat_completion, callback) -> list[ChatMessage]:
+    def _handle_stream_response(
+        self, chat_completion: Any, callback: Callable[[StreamingChunk], None]
+    ) -> list[ChatMessage]:
         from haystack.dataclasses import ComponentInfo
 
         component_info = ComponentInfo.from_component(self)
@@ -176,7 +179,7 @@ def build_streaming_generator(
         call 1 completes. Non-LMForge engines ignore unknown extra_body keys.
     presence_penalty is OpenAI-standard and goes into generation_kwargs directly.
     """
-    extra: dict = {}
+    extra: dict[str, Any] = {}
     if think is not None:
         extra["think"] = think
     # thinking_budget and stream_reasoning_deltas only relevant in thinking mode
@@ -191,7 +194,7 @@ def build_streaming_generator(
     if repetition_penalty is not None:
         extra["repetition_penalty"] = repetition_penalty
 
-    generation_kwargs: dict = {
+    generation_kwargs: dict[str, Any] = {
         "temperature": temperature,
         "max_tokens": max_tokens,
         # OpenAI-standard: asks the engine to emit a trailing usage-only chunk.
@@ -239,7 +242,7 @@ def extract_lmforge_status(chunk: StreamingChunk) -> str | None:
     return chunk.meta.get("lmforge_status")
 
 
-def extract_usage(chunk: StreamingChunk) -> dict | None:
+def extract_usage(chunk: StreamingChunk) -> dict[str, Any] | None:
     """
     Extract token usage from a StreamingChunk.
 

@@ -11,6 +11,7 @@ Pipeline position:
 
 import logging
 import os
+from typing import Any
 
 import litellm
 from haystack import component
@@ -55,7 +56,7 @@ class QueryExpander:
         expanded_query=str,
         search_terms=list[str],
     )
-    def run(self, query: str) -> dict:
+    def run(self, query: str) -> dict[str, Any]:
         if not self.enabled:
             return {
                 "original_query": query,

@@ -5,6 +5,8 @@ Defined here (rather than main.py) so they can be imported by both
 main.py and dependencies.py without circular imports.
 """
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -30,7 +32,7 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     answer: str
     thinking: str = ""
-    sources: list[dict]
+    sources: list[dict[str, Any]]
     cache_hit: bool
     latency_ms: int
     model_used: str
