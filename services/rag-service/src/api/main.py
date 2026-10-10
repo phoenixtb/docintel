@@ -12,13 +12,11 @@ import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional
-
-from docintel_common.messaging import RedisStreamBus, TOPIC_ANALYTICS_QUERY
-from docintel_common.tracing import TraceContext, configure_trace_logging
-from docintel_common.errors import install_error_handlers
 
 import httpx
+from docintel_common.errors import install_error_handlers
+from docintel_common.messaging import TOPIC_ANALYTICS_QUERY, RedisStreamBus
+from docintel_common.tracing import TraceContext, configure_trace_logging
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -26,7 +24,7 @@ from pydantic import BaseModel, Field
 from ..components.model_profile_resolver import ModelProfileResolver
 from ..components.model_resolver import TenantModelResolver
 from ..config import Settings
-from ..context import _tenant_ctx, _role_ctx
+from ..context import _role_ctx, _tenant_ctx
 from ..events import (
     ErrorEvent,
     MetadataEvent,
@@ -117,7 +115,7 @@ async def _publish_query_event(
 
 
 def _fire_and_forget(coro) -> asyncio.Task:
-    """Create a task and attach an error-logging callback so exceptions are never silently dropped."""
+    """Create a task with an error-logging callback so exceptions are never silently dropped."""
     task = asyncio.ensure_future(coro)
 
     def _on_done(t: asyncio.Task):
@@ -266,8 +264,11 @@ def _selftest_thinking_adapter() -> None:
     still exist. Fails loudly at startup so broken Haystack upgrades are caught
     before any user query rather than mid-stream.
     """
-    from ..components.llm_adapter import ThinkingAwareChatGenerator
+    # Imported for its side effect: llm_adapter's module-level import of Haystack
+    # private symbols raises here if they moved, which is what this self-test checks.
     from haystack.components.generators.chat.openai import OpenAIChatGenerator
+
+    from ..components.llm_adapter import ThinkingAwareChatGenerator  # noqa: F401
 
     if not hasattr(OpenAIChatGenerator, "_handle_stream_response"):
         raise RuntimeError(
@@ -419,7 +420,8 @@ try:
     )
     RAG_RERANK_SKIPPED = Counter(
         "rag_rerank_skipped_total",
-        "G5 — rerank round-trips skipped because the top fused hybrid score cleared rag_rerank_skip_min_score",
+        "G5 — rerank round-trips skipped because the top fused hybrid score cleared "
+        "rag_rerank_skip_min_score",
         ["tenant"],
     )
     RAG_LLM_TOKENS = Counter(
@@ -486,8 +488,8 @@ def _model_is_embed(model_name: str) -> bool:
 
 class ModelInfo(BaseModel):
     name: str
-    size: Optional[int] = None
-    modified_at: Optional[str] = None
+    size: int | None = None
+    modified_at: str | None = None
     supports_thinking: bool = False
     supports_vision: bool = False
     is_reranker: bool = False
@@ -557,7 +559,7 @@ async def root():
 async def list_models(
     settings: SettingsDep,
     http_request: Request,
-    x_tenant_id: Optional[str] = Header(None),
+    x_tenant_id: str | None = Header(None),
 ):
     """
     List all models available from the configured LLM engine, with capability
@@ -1084,7 +1086,7 @@ async def query_documents_stream(
 
 class CreateConversationRequest(BaseModel):
     tenant_id: str = Field(default="default")
-    user_id: Optional[str] = None
+    user_id: str | None = None
     title: str = Field(default="New Conversation")
 
 
@@ -1179,8 +1181,9 @@ async def delete_tenant_conversations(
     if not x_tenant_id:
         raise HTTPException(status_code=400, detail="X-Tenant-Id header required")
 
-    from ..db import SessionLocal
     from sqlalchemy import text
+
+    from ..db import SessionLocal
 
     def _delete_all():
         with SessionLocal() as db:

@@ -4,8 +4,7 @@ Uses SQLAlchemy with psycopg2 for PostgreSQL access.
 """
 
 import uuid
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     Column,
@@ -25,7 +24,7 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
 from .config import get_settings as _get_settings
-from .context import _tenant_ctx, _role_ctx
+from .context import _role_ctx, _tenant_ctx
 
 
 def psycopg2_url(url: str) -> URL:
@@ -117,7 +116,7 @@ def get_db() -> Session:
 
 def create_conversation(
     tenant_id: str,
-    user_id: Optional[str] = None,
+    user_id: str | None = None,
     title: str = "New Conversation",
 ) -> dict:
     """Create a new conversation."""
@@ -131,7 +130,7 @@ def create_conversation(
 
 def list_conversations(
     tenant_id: str,
-    user_id: Optional[str] = None,
+    user_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
@@ -144,7 +143,7 @@ def list_conversations(
         return [_conv_to_dict(c, include_messages=False) for c in convs]
 
 
-def get_conversation(conversation_id: str, tenant_id: str) -> Optional[dict]:
+def get_conversation(conversation_id: str, tenant_id: str) -> dict | None:
     """Get a conversation with all its messages."""
     with get_db() as db:
         conv = (
@@ -176,9 +175,9 @@ def add_message(
     conversation_id: str,
     role: str,
     content: str,
-    tenant_id: Optional[str] = None,
-    sources: Optional[list[dict]] = None,
-    metadata: Optional[dict] = None,
+    tenant_id: str | None = None,
+    sources: list[dict] | None = None,
+    metadata: dict | None = None,
 ) -> dict:
     """Add a message to a conversation. Also updates conversation title and updated_at."""
     with get_db() as db:
@@ -197,7 +196,7 @@ def add_message(
             query = query.filter(Conversation.tenant_id == tenant_id)
         conv = query.first()
         if conv:
-            conv.updated_at = datetime.now(timezone.utc)
+            conv.updated_at = datetime.now(UTC)
             # Auto-title from first user message
             if role == "user" and conv.title == "New Conversation":
                 conv.title = content[:100] + ("..." if len(content) > 100 else "")
@@ -312,7 +311,7 @@ def get_recent_messages(
         return [{"role": m.role, "content": m.content} for m in reversed(msgs)]
 
 
-def update_conversation_title(conversation_id: str, tenant_id: str, title: str) -> Optional[dict]:
+def update_conversation_title(conversation_id: str, tenant_id: str, title: str) -> dict | None:
     """Update a conversation's title."""
     with get_db() as db:
         conv = (

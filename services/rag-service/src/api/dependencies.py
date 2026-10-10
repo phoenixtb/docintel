@@ -7,12 +7,11 @@ via Depends() rather than reaching into global state directly.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Annotated, Optional
-
-from fastapi import Depends, Header, HTTPException, Request
+from typing import Annotated
 
 from docintel_common.internal_auth import verify_internal_token
 from docintel_common.security import UserContext
+from fastapi import Depends, Header, HTTPException, Request
 
 from ..config import Settings
 from ..pipelines.query import RAGService
@@ -84,7 +83,10 @@ def require_internal_token(
         )
         raise HTTPException(
             status_code=403,
-            detail="Missing or invalid internal service token. All requests must pass through the API Gateway.",
+            detail=(
+                "Missing or invalid internal service token. "
+                "All requests must pass through the API Gateway."
+            ),
         )
 
 

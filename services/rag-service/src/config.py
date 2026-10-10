@@ -13,13 +13,16 @@ Switch engines by updating LLM_CHAT_URL / LLM_EMBED_URL:
 
 Model tiers:
   LLM          → LLM_MODEL            (chat generation, streaming)
-  Embeddings   → LLM_EMBED_MODEL      (dense vectors via engine embed endpoint — LMForge/Ollama/vLLM)
+  Embeddings   → LLM_EMBED_MODEL      (dense vectors via the engine embed endpoint —
+                                       LMForge/Ollama/vLLM)
   Sparse (BM25)→ fastembed local       (no server, CPU, lightweight)
-  Reranker     → RERANKER_MODEL        (cross-encoder served by Infinity ONNX sidecar at RERANKER_URL)
+  Reranker     → RERANKER_MODEL        (cross-encoder served by the inference engine at
+                                       RERANKER_URL)
   Domain router→ RAG_DOMAIN_ROUTER_MODEL (optional, disabled by default)
 """
 
 from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 

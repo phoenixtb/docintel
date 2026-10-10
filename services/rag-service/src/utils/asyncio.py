@@ -4,7 +4,7 @@ Async utilities shared across RAGService and API handlers.
 
 import asyncio
 import contextvars
-from typing import Callable
+from collections.abc import Callable
 
 
 async def _run_db(fn: Callable):

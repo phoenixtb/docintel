@@ -23,8 +23,9 @@ Usage:
 """
 
 import logging
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator, Optional
+from typing import Any
 
 from .config import Settings, get_settings
 

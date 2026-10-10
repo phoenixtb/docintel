@@ -29,8 +29,10 @@ import json
 import logging
 import threading
 import time
-from typing import AsyncIterator, Optional
+from collections.abc import AsyncIterator
 
+from docintel_common.domain import DOMAIN_LABELS
+from docintel_common.security import UserContext
 from haystack.components.embedders.openai_text_embedder import OpenAITextEmbedder
 from haystack.components.routers import TransformersZeroShotTextRouter
 from haystack.utils import Secret
@@ -50,6 +52,8 @@ from ..components.prompt import PromptBuilder
 from ..components.query_transform import QueryExpander
 from ..components.reranker import LmforgeReranker
 from ..components.retrieval import SecureRetriever
+from ..components.routing import DomainFilterBuilder
+from ..config import Settings, get_settings
 from ..events import (
     ErrorEvent,
     MetadataEvent,
@@ -61,13 +65,8 @@ from ..events import (
     ThinkingTokenEvent,
     TokenEvent,
 )
-from ..utils.asyncio import _run_db
-from docintel_common.domain import DOMAIN_LABELS
-from docintel_common.security import Classification, UserContext
-
-from ..components.routing import DomainFilterBuilder
-from ..config import Settings, get_settings
 from ..tracing import LangfuseTracer
+from ..utils.asyncio import _run_db
 
 logger = logging.getLogger(__name__)
 
@@ -175,25 +174,25 @@ class RAGService:
         self._warm_up_lock = threading.Lock()
 
         # Embedders
-        self._dense_embedder: Optional[OpenAITextEmbedder] = None
-        self._sparse_embedder: Optional[BM25SparseTextEmbedder] = None
+        self._dense_embedder: OpenAITextEmbedder | None = None
+        self._sparse_embedder: BM25SparseTextEmbedder | None = None
 
         # Semantic cache
-        self._cache_checker: Optional[SemanticCacheChecker] = None
-        self._cache_writer: Optional[SemanticCacheWriter] = None
+        self._cache_checker: SemanticCacheChecker | None = None
+        self._cache_writer: SemanticCacheWriter | None = None
 
         # Domain routing
-        self._domain_router: Optional[TransformersZeroShotTextRouter] = None
-        self._domain_filter_builder: Optional[DomainFilterBuilder] = None
+        self._domain_router: TransformersZeroShotTextRouter | None = None
+        self._domain_filter_builder: DomainFilterBuilder | None = None
 
         # Core RAG components (direct references, replacing Haystack pipeline)
-        self._retriever: Optional[SecureRetriever] = None
-        self._opa_validator: Optional[OpaChunkValidator] = None
-        self._reranker: Optional[LmforgeReranker] = None
-        self._prompt_builder: Optional[PromptBuilder] = None
+        self._retriever: SecureRetriever | None = None
+        self._opa_validator: OpaChunkValidator | None = None
+        self._reranker: LmforgeReranker | None = None
+        self._prompt_builder: PromptBuilder | None = None
 
         # G2 — query expansion (optional, disabled by default)
-        self._query_expander: Optional[QueryExpander] = None
+        self._query_expander: QueryExpander | None = None
 
         # Cost/token accounting — per-tenant in-memory accumulator
         self._cost_tracker = CostTracker()
@@ -365,10 +364,10 @@ class RAGService:
 
         try:
             from ..db import (
+                add_message,
                 get_conversation_summary_state,
                 get_messages_slice,
                 update_conversation_summary,
-                add_message,
             )
 
             state = get_conversation_summary_state(conversation_id, tenant_id)
@@ -811,9 +810,9 @@ class RAGService:
             from ..prompts import NO_DOCUMENTS_RESPONSE, NO_RELEVANT_DOCUMENTS_RESPONSE
 
             try:
-                from qdrant_client import QdrantClient as _QC
+                from qdrant_client import QdrantClient
 
-                _qc = _QC(url=cfg.qdrant_url)
+                _qc = QdrantClient(url=cfg.qdrant_url)
                 _count = _qc.count(collection_name=f"documents_{tenant_id}", exact=False).count
                 no_docs_text = (
                     NO_RELEVANT_DOCUMENTS_RESPONSE.format(query=question)

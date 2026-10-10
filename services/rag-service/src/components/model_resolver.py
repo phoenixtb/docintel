@@ -21,7 +21,6 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import psycopg2
 import psycopg2.extras
@@ -87,7 +86,7 @@ class TenantModelResolver:
             return TenantResolved(model=platform_model, thinking_mode=resolved.thinking_mode)
         return resolved
 
-    def invalidate(self, tenant_id: Optional[str] = None, user_id: Optional[str] = None) -> None:
+    def invalidate(self, tenant_id: str | None = None, user_id: str | None = None) -> None:
         """
         Invalidate cached entries.
           - both None             → clear everything (platform model changed).
@@ -109,7 +108,7 @@ class TenantModelResolver:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _get_platform_model(self) -> Optional[str]:
+    async def _get_platform_model(self) -> str | None:
         """Fetch/cache the platform-level model override. None = Tenant Choice."""
         cached_val, expires_at = self.__class__._platform_cache
         if cached_val is not _SENTINEL and time.monotonic() < expires_at:
@@ -124,7 +123,7 @@ class TenantModelResolver:
         )
         return result
 
-    def _fetch_platform_model_sync(self) -> Optional[str]:
+    def _fetch_platform_model_sync(self) -> str | None:
         try:
             with psycopg2.connect(self._postgres_url) as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -146,7 +145,8 @@ class TenantModelResolver:
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                     cur.execute("SET LOCAL app.current_tenant = %s", (tenant_id,))
                     cur.execute(
-                        "SELECT settings->>'llm_model' AS llm_model FROM admin.tenants WHERE id = %s",
+                        "SELECT settings->>'llm_model' AS llm_model "
+                        "FROM admin.tenants WHERE id = %s",
                         (tenant_id,),
                     )
                     row = cur.fetchone()
@@ -183,7 +183,8 @@ class TenantModelResolver:
                     return False
         except Exception as exc:
             logger.warning(
-                "Failed to fetch user preferences for user=%s tenant=%s: %s — defaulting thinking_mode=False",
+                "Failed to fetch user preferences for user=%s tenant=%s: %s "
+                "— defaulting thinking_mode=False",
                 user_id,
                 tenant_id,
                 exc,

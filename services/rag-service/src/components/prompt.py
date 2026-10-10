@@ -13,8 +13,6 @@ Pipeline position:
   [InfinityReranker / OpaChunkValidator] → PromptBuilder → OllamaChatGenerator
 """
 
-from typing import Optional
-
 from haystack import Document, component
 from haystack.dataclasses import ChatMessage
 from jinja2 import Template
@@ -46,7 +44,7 @@ class PromptBuilder:
         self,
         documents: list[Document],
         query: str,
-        history: Optional[list[dict]] = None,
+        history: list[dict] | None = None,
     ) -> dict:
         system_prompt = self._system_template.render(org_name=self._org_name)
 

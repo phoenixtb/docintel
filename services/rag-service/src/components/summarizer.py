@@ -14,7 +14,6 @@ See: Factory.ai "Evaluating Context Compression for AI Agents" (2025)
 """
 
 import logging
-from typing import Optional
 
 import httpx
 
@@ -61,7 +60,7 @@ class AnchoredSummarizer:
         self._model = model
         self._api_key = api_key
 
-    def _compress_sync(self, existing_summary: Optional[str], new_span: list[dict]) -> str:
+    def _compress_sync(self, existing_summary: str | None, new_span: list[dict]) -> str:
         """Synchronous HTTP call to the chat completions endpoint — runs inside run_in_executor."""
         prompt = _COMPRESS_PROMPT.format(
             existing_summary=existing_summary or "No summary yet.",
@@ -99,7 +98,7 @@ class AnchoredSummarizer:
 
     async def compress(
         self,
-        existing_summary: Optional[str],
+        existing_summary: str | None,
         new_span: list[dict],
         loop=None,
     ) -> str:

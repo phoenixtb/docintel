@@ -10,10 +10,9 @@ QdrantHybridRetriever for idiomatic Haystack hybrid search.
 import logging
 
 from haystack import Document, component
+from haystack.dataclasses import SparseEmbedding
 
 logger = logging.getLogger(__name__)
-from haystack.dataclasses import SparseEmbedding
-from typing import Optional
 
 
 @component
@@ -76,7 +75,7 @@ class BM25SparseTextEmbedder:
 
         self._model = SparseTextEmbedding(model_name=self.model_name)
 
-    @component.output_types(sparse_embedding=Optional[SparseEmbedding])
+    @component.output_types(sparse_embedding=SparseEmbedding | None)
     def run(self, text: str) -> dict:
         """
         Compute BM25 sparse embedding for a query string.

@@ -19,13 +19,11 @@ Pipeline position:
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
-from haystack import Document, component
-
 from docintel_common.security import RetrievalAuditEvent, UserContext
+from haystack import Document, component
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +48,7 @@ class OpaChunkValidator:
         self,
         documents: list[Document],
         user_context: UserContext,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
     ) -> dict:
         """
         Evaluate chunk access for each document in the list.
@@ -128,7 +126,7 @@ class OpaChunkValidator:
             retrieved_chunk_ids=[d.id or "" for d in documents],
             denied_chunk_ids=denied_ids,
             document_ids=doc_ids,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             latency_ms=latency_ms,
         )
         logger.info("audit %s", audit.model_dump_json())
