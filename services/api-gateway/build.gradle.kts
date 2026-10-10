@@ -55,8 +55,11 @@ dependencies {
     testImplementation("io.mockk:mockk:1.13.13")
     testImplementation("com.ninja-squad:springmockk:4.0.2")
     
-    // WireMock for mocking downstream services
+    // WireMock for mocking downstream services, OPA and the IdP's JWKS endpoint
     testImplementation("org.wiremock:wiremock-standalone:3.5.4")
+
+    // Real Redis for the quota filter and /health (same version as the sibling services)
+    testImplementation("org.testcontainers:testcontainers:1.21.4")
 }
 
 dependencyManagement {

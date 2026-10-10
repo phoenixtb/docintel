@@ -2,6 +2,7 @@ package com.docintel.gateway.filter
 
 import com.docintel.gateway.error.writeErrorEnvelope
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.cloud.gateway.filter.GatewayFilterChain
 import org.springframework.cloud.gateway.filter.GlobalFilter
 import org.springframework.core.Ordered
@@ -22,12 +23,15 @@ import javax.crypto.spec.SecretKeySpec
  * Execution order:
  *   TenantFilter (-100) → InternalAuthFilter (-99) → OpaAuthorizationFilter (-98) → ...
  *
- * The secret is read once at construction time from the INTERNAL_GATEWAY_SECRET env var.
- * If the secret is absent the gateway returns 503 SERVICE_UNAVAILABLE on every request
- * (fail-secure) — run setup.sh to generate and populate the secret.
+ * The secret is resolved once at construction from INTERNAL_GATEWAY_SECRET (an env var in
+ * deployments; Spring resolves the placeholder from the environment, and tests set it as a
+ * property). If the secret is absent the gateway returns 503 SERVICE_UNAVAILABLE on every
+ * request (fail-secure) — run setup.sh to generate and populate the secret.
  */
 @Component
-class InternalAuthFilter : GlobalFilter, Ordered {
+class InternalAuthFilter(
+    @Value("\${INTERNAL_GATEWAY_SECRET:}") configuredSecret: String,
+) : GlobalFilter, Ordered {
 
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -36,12 +40,10 @@ class InternalAuthFilter : GlobalFilter, Ordered {
         private const val HMAC_ALGORITHM = "HmacSHA256"
     }
 
-    private val secret: String = System.getenv("INTERNAL_GATEWAY_SECRET")
-        ?.takeIf { it.isNotEmpty() }
-        ?: run {
-            log.error("INTERNAL_GATEWAY_SECRET is not set — gateway will reject all requests (fail-secure). Run setup.sh.")
-            ""
-        }
+    private val secret: String = configuredSecret.ifEmpty {
+        log.error("INTERNAL_GATEWAY_SECRET is not set — gateway will reject all requests (fail-secure). Run setup.sh.")
+        ""
+    }
 
     override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> {
         if (secret.isEmpty()) {
