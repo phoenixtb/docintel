@@ -570,20 +570,20 @@ class DocumentControllerTest : BaseIntegrationTest() {
 
     @Test
     fun `DELETE cleanup job cancels active job`() {
-        val result = mockMvc.perform(
-            post("/internal/documents/cleanup/jobs")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{}")
-                .header("X-Tenant-Id", testTenantId)
-        ).andExpect(status().isAccepted).andReturn()
-
-        val jobId = objectMapper.readTree(result.response.contentAsString)["jobId"].asText()
-
-        mockMvc.perform(
-            delete("/internal/documents/cleanup/jobs/$jobId")
-                .header("X-Tenant-Id", testTenantId)
-        )
-            .andExpect(status().isOk)
-            .andExpect(jsonPath("$.cancelled").value(true))
+        // Register the active job directly: a real job on an empty tenant can finish before
+        // the cancel request arrives, which made this assertion racy (seen on CI).
+        val active = CleanupJob(jobId = UUID.randomUUID(), tenantId = testTenantId, filters = CleanupFiltersRequest())
+        check(cleanupJobRegistry.tryRegister(active)) { "another cleanup job is already active" }
+        try {
+            mockMvc.perform(
+                delete("/internal/documents/cleanup/jobs/${active.jobId}")
+                    .header("X-Tenant-Id", testTenantId)
+            )
+                .andExpect(status().isOk)
+                .andExpect(jsonPath("$.cancelled").value(true))
+            assertTrue(active.cancelRequested.get())
+        } finally {
+            active.status.set(CleanupJobStatus.CANCELLED)
+        }
     }
 }
