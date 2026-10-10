@@ -378,6 +378,9 @@ Open decisions:
 - **Retries turned failures into a "hang".** 54 failing Playwright specs × 3 attempts × a 30 s
   timeout ran the Web UI job for 47 minutes. Playwright now runs with `retries: 0`, a 20 s test
   timeout, and the job with `timeout-minutes: 15`.
+- **A red first step hides the steps after it.** RAG CI stopped at lint for months, so its mypy
+  step (188 errors), its tests and `rag-service.yml`'s Docker build (wrong build context) were
+  broken without anyone seeing it. After fixing a gate, check that every later step really ran.
 - **A skipping fixture hid broken tests.** rag-service's old `qdrant_url` fixture skipped when
   Qdrant was unreachable, which was always the case in CI. The tests had been sending 768-dim
   vectors to 1024-dim collections. Integration fixtures now start their dependency or fail.
@@ -432,3 +435,4 @@ Runbook:
   - Every CI job has a timeout. `check-object-store-pin.sh` became `check-image-pins.sh`, which
     also pins Qdrant.
   - ingestion-service's three failing tests are fixed.
+  - `rag-service.yml` now builds its image with the repo root as the build context.
