@@ -492,3 +492,4 @@ Runbook:
     - tau applies to the top chunk, with a new `rag_min_context_score` (0.20) floor for
       supporting chunks.
   - Generation prompt: partial answers (what the context covers and lacks) instead of refusing.
+  - document-service's cleanup-job start and cancel tests hold the job active instead of racing it.
