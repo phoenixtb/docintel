@@ -129,6 +129,12 @@ ollama)
 
 # ── LMForge ──────────────────────────────────────────────────────────────────
 lmforge)
+    # install-lmforge.sh installs to ~/.local/bin, which only login shells put on
+    # PATH; SSH commands and cron would otherwise report it missing.
+    _lmforge_dir="${LMFORGE_INSTALL_DIR:-$HOME/.local/bin}"
+    if ! command -v lmforge &> /dev/null && [ -x "$_lmforge_dir/lmforge" ]; then
+        export PATH="$_lmforge_dir:$PATH"
+    fi
     if ! command -v lmforge &> /dev/null; then
         fail "lmforge binary not found. Run ./scripts/setup-lmforge.sh first."
     fi
@@ -154,10 +160,10 @@ lmforge)
         echo ""
         echo "  ════════════════════════════════════════════════════════════════"
         echo "  ⚠  LMForge engine '${_lf_engine}' does not support /v1/rerank"
-        echo "     (returns 501). The reranker degrades to fused-score ordering,"
-        echo "     and the tau=0.55 abstention gating (RAG_MIN_RELEVANCE_SCORE)"
-        echo "     is calibrated on reranker scores — abstention quality is"
-        echo "     degraded. Pin llamacpp via ~/.lmforge/engines.toml to restore."
+        echo "     (returns 501). The reranker degrades to fused-score ordering"
+        echo "     and the abstention gate (RAG_MIN_RELEVANCE_SCORE) is not"
+        echo "     applied, so off-topic questions may get weaker answers."
+        echo "     Pin llamacpp via ~/.lmforge/engines.toml to restore."
         echo "  ════════════════════════════════════════════════════════════════"
         echo ""
     fi

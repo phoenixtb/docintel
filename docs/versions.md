@@ -14,6 +14,7 @@ family. The web UI pins through `package-lock.json`. This table lists the anchor
 | Gradle wrapper | 8.11.1 | `services/*/gradle/wrapper/gradle-wrapper.properties` |
 | Python | ≥ 3.11 (images `python:3.11-slim`); ingestion-service < 3.13 | `pyproject.toml`, Dockerfiles |
 | Node (web UI build) | 22 (`node:22-alpine`) | `services/web-ui/Dockerfile` |
+| LMForge (host) | ≥ 0.3.0 with rerank `score_type: "probability"` | rag-service reranker ([contract](contracts/reranker.md)); older versions make every rerank call degraded |
 | uv | 0.12.22 | Python Dockerfiles (`ghcr.io/astral-sh/uv:0.12.22`), CI `python-locks` |
 | torch (images) | 2.11.0 (`TORCH_VERSION`, CPU by default) | Python Dockerfiles; locks pin 2.12.1, which is not used in images |
 

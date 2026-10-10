@@ -105,10 +105,24 @@ class Settings(BaseSettings):
     rag_retriever_top_k: int = 50
     rag_reranker_top_k: int = 10
     rag_default_top_k: int = 5
-    # Abstention gate — calibrated for qwen3-reranker sigmoid scores (0.5 = neutral):
-    # noise/off-topic chunks score ~0.50-0.51, relevant chunks >=0.62. Recalibrate
-    # via tests/integration/calibrate_threshold.py when the reranker model changes.
-    rag_min_relevance_score: float = 0.55
+    # Abstention gate on reranker relevance PROBABILITIES (LMForge score_type
+    # "probability"; docs/contracts/reranker.md). Applied only when the reranker
+    # actually scored the documents — never to fused scores.
+    # Calibrated 2026-10-09 (qwen3-reranker:0.6b:8bit, harness seeded corpus,
+    # --retrieval-only with the gate off, llama.cpp/Q8 and oMLX/mxfp8):
+    # answerable top scores >= 0.79 on both engines, true absences ~0.002-0.16,
+    # near-miss questions 0.50-0.97. 0.70 keeps 18/18 answerable on both engines
+    # (margin 0.09) and abstains on 9/11. Recalibrate with
+    # tests/integration/calibrate_threshold.py when the reranker model,
+    # quantisation or LMForge engine changes.
+    rag_min_relevance_score: float = 0.70
+    # Context floor: once the TOP chunk clears rag_min_relevance_score (the
+    # answerability decision, calibrated on top scores), supporting chunks are
+    # kept down to this probability. 0.20 is where the former per-chunk gate sat
+    # (0.55 on LMForge's old squeezed scale = 0.20 as a probability), so context
+    # selection for answerable queries is unchanged. Gating every chunk at the
+    # answerability bar stripped supporting clauses from the prompt.
+    rag_min_context_score: float = 0.20
     # When no doc passes rag_min_relevance_score, how many top docs to return anyway.
     # 0 = strict (return empty → NO_RELEVANT_DOCUMENTS_RESPONSE).
     # Set to 1 to always return at least one result regardless of score.
