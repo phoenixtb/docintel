@@ -979,3 +979,41 @@ async def test_query_abstains_when_the_top_chunk_is_below_tau_even_above_the_flo
 
     sources = [e for e in events if isinstance(e, SourcesEvent)]
     assert sources and sources[0].sources == []
+
+
+def _answer_stream_settings_and_service():
+    settings = _make_settings(rag_min_relevance_score=0.7, rag_min_context_score=0.2)
+    svc = _make_service(settings)
+    svc._reranker.run.return_value = {
+        "documents": [_make_doc("fee clause", score=0.94)],
+        "reranker_degraded": False, "degraded_reason": None,
+    }
+    return settings, svc
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_refusal_appended_to_a_streamed_answer_is_not_sent():
+    """qwen3.5:2b sometimes ends a cited answer with the prompt's refusal sentence."""
+    settings, svc = _answer_stream_settings_and_service()
+    tokens = ["The fee is 0.20% ", "[1].", "\n\n", "I don't have that ", "information in the ",
+              "available documents."]
+
+    with _patch_llm(svc, tokens):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    streamed = "".join(e.text for e in events if isinstance(e, TokenEvent))
+    assert streamed.strip() == "The fee is 0.20% [1]."
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_a_bare_refusal_from_the_model_is_still_sent():
+    settings, svc = _answer_stream_settings_and_service()
+    tokens = ["I don't have that ", "information in the ", "available documents."]
+
+    with _patch_llm(svc, tokens):
+        events = await _collect(svc.stream(**_make_stream_kwargs(svc, settings=settings)))
+
+    streamed = "".join(e.text for e in events if isinstance(e, TokenEvent))
+    assert streamed == "I don't have that information in the available documents."

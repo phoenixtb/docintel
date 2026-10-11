@@ -68,6 +68,7 @@ from ..events import (
 )
 from ..tracing import LangfuseTracer
 from ..utils.asyncio import _run_db
+from .answer_guard import TrailingRefusalGuard
 
 if TYPE_CHECKING:
     from ..components.summarizer import AnchoredSummarizer
@@ -1021,6 +1022,7 @@ class RAGService:
 
         full_thinking_parts: list[str] = []
         full_answer_parts: list[str] = []
+        refusal_guard = TrailingRefusalGuard()
         task = asyncio.create_task(run_llm())
 
         try:
@@ -1039,8 +1041,14 @@ class RAGService:
                         stage="generating_answer" if text == "call2_prefill" else text
                     )
                 else:
-                    full_answer_parts.append(text)
-                    yield TokenEvent(text=text)
+                    released = refusal_guard.feed(text)
+                    if released:
+                        full_answer_parts.append(released)
+                        yield TokenEvent(text=released)
+            tail = refusal_guard.finish()
+            if tail:
+                full_answer_parts.append(tail)
+                yield TokenEvent(text=tail)
         except GeneratorExit:
             task.cancel()
             logger.info("Client disconnected mid-stream, LLM task cancelled")
