@@ -21,7 +21,8 @@ services:
     deploy:
       resources:
         reservations:
-          memory: 4G
+          # Must stay below the 1536M limit in docker-compose.yml.
+          memory: 512M
           devices:
             - driver: nvidia
               count: 1

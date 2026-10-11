@@ -145,6 +145,9 @@ jobs:
       - name: Menu tests (pty)
         run: uv run --no-project --with pytest pytest -v tests/scripts/test_menus.py
 
+      - name: Compose memory limits
+        run: uv run --no-project --with pytest --with pyyaml pytest -v tests/scripts/test_compose_memory_limits.py
+
       - name: Start-helper tests (bats)
         run: npx --yes bats@1.12.0 tests/scripts/test_start_helpers_minio_state.bats
 

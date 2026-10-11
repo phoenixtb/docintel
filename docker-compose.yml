@@ -24,6 +24,8 @@ services:
       - ./config/zitadel/generated.env
     environment:
       - SPRING_PROFILES_ACTIVE=docker
+      # Heap from the container limit (the JVM default is 25% of it).
+      - JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=70
       - DOCUMENT_SERVICE_URL=http://document-service:8081
       - RAG_SERVICE_URL=http://rag-service:8000
       - INGESTION_SERVICE_URL=http://ingestion-service:8001
@@ -54,6 +56,13 @@ services:
         condition: service_started
       zitadel-proxy:
         condition: service_started
+    # Peak 0.4 GB.
+    # Memory: measured peaks 2026-10-11 (harness seeding 715 docs + a 40-page PDF with tables,
+    # Ubuntu llama.cpp and Mac oMLX). Limit ~1.5-2x peak; see docs/dev/MENTAL-MODEL.md §9.
+    deploy:
+      resources:
+        limits:
+          memory: 768M
     networks:
       - docintel-network
 
@@ -61,6 +70,8 @@ services:
     build: ./services/document-service
     environment:
       - SPRING_PROFILES_ACTIVE=docker
+      # Heap from the container limit (the JVM default is 25% of it).
+      - JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=70
       - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel?user=docintel_documents&password=${DOCINTEL_DOCUMENTS_DB_PASSWORD}
       - SPRING_DATASOURCE_USERNAME=docintel_documents
       - SPRING_DATASOURCE_PASSWORD=${DOCINTEL_DOCUMENTS_DB_PASSWORD}
@@ -86,6 +97,13 @@ services:
         condition: service_healthy
       ingestion-service:
         condition: service_started
+    # Peak 0.6 GB.
+    # Memory: measured peaks 2026-10-11 (harness seeding 715 docs + a 40-page PDF with tables,
+    # Ubuntu llama.cpp and Mac oMLX). Limit ~1.5-2x peak; see docs/dev/MENTAL-MODEL.md §9.
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     networks:
       - docintel-network
 
@@ -183,10 +201,15 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - huggingface-cache:/opt/hf-cache
+    # Peak 0.7 GB.
+    # Memory: measured peaks 2026-10-11 (harness seeding 715 docs + a 40-page PDF with tables,
+    # Ubuntu llama.cpp and Mac oMLX). Limit ~1.5-2x peak; see docs/dev/MENTAL-MODEL.md §9.
     deploy:
       resources:
+        limits:
+          memory: 1536M
         reservations:
-          memory: 4G
+          memory: 512M
 
   data-loader:
     build:
@@ -224,10 +247,15 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    # Peak 0.3 GB.
+    # Memory: measured peaks 2026-10-11 (harness seeding 715 docs + a 40-page PDF with tables,
+    # Ubuntu llama.cpp and Mac oMLX). Limit ~1.5-2x peak; see docs/dev/MENTAL-MODEL.md §9.
     deploy:
       resources:
+        limits:
+          memory: 1G
         reservations:
-          memory: 2G
+          memory: 256M
 
   ingestion-service:
     build:
@@ -295,10 +323,15 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    # Peak 1.9 GB (docling, 40-page PDF, OCR off); raise INGESTION_MEMORY_LIMIT for OCR/VLM.
+    # Memory: measured peaks 2026-10-11 (harness seeding 715 docs + a 40-page PDF with tables,
+    # Ubuntu llama.cpp and Mac oMLX). Limit ~1.5-2x peak; see docs/dev/MENTAL-MODEL.md §9.
     deploy:
       resources:
+        limits:
+          memory: ${INGESTION_MEMORY_LIMIT:-3G}
         reservations:
-          memory: 4G
+          memory: 1G
 
   analytics-service:
     build:
@@ -323,6 +356,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Peak 80 MB.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     networks:
       - docintel-network
     healthcheck:
@@ -339,6 +377,8 @@ services:
       - ./config/zitadel/generated.env
     environment:
       - SPRING_PROFILES_ACTIVE=docker
+      # Heap from the container limit (the JVM default is 25% of it).
+      - JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=70
       - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/docintel?user=docintel_admin&password=${DOCINTEL_ADMIN_DB_PASSWORD}
       - SPRING_DATASOURCE_USERNAME=docintel_admin
       - SPRING_DATASOURCE_PASSWORD=${DOCINTEL_ADMIN_DB_PASSWORD}
@@ -376,6 +416,13 @@ services:
         condition: service_healthy
       zitadel-proxy:
         condition: service_healthy
+    # Peak 0.35 GB.
+    # Memory: measured peaks 2026-10-11 (harness seeding 715 docs + a 40-page PDF with tables,
+    # Ubuntu llama.cpp and Mac oMLX). Limit ~1.5-2x peak; see docs/dev/MENTAL-MODEL.md §9.
+    deploy:
+      resources:
+        limits:
+          memory: 768M
     networks:
       - docintel-network
 
@@ -605,7 +652,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          # Peaked at 1.0 GB against the old 1G limit (2026-10-11).
+          memory: 1536M
 
   # Langfuse Worker - processes background jobs
   # Using :3 tag as recommended by Langfuse (rolling v3.x updates)

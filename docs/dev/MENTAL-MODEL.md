@@ -309,6 +309,7 @@ Examples: `tests/chat.spec.ts`, `tests/auth.spec.ts`.
 | Missing source object is terminal; outages are retried | `test_missing_source_object_fails_document_and_acks_without_retry`, `test_object_store_outage_fails_document_but_leaves_message_for_redelivery` |
 | `files.available` carries `objectPath` end to end | `test_publishes_object_path_of_the_uploaded_file`; `StreamConsumerTest` "FilesAvailableConsumer should carry the data-loader objectPath …" |
 | Retired MinIO entries are dropped from OpenTofu state, nothing else | `tests/scripts/test_start_helpers_minio_state.bats` |
+| Every long-running service has a memory limit, reservations stay below limits (with the GPU overlay), JVM heaps follow the limit | `tests/scripts/test_compose_memory_limits.py` |
 | The gateway verifies JWT signatures against the JWKS; no token or a forged one gets 401 | `GatewayIntegrationTest` "rejects a request without a bearer token with 401", "rejects a token whose signature does not match the published key with 401" |
 | A JWT without `tenant_id` never reaches a backend | `GatewayIntegrationTest` "rejects a token without a tenant_id claim with 403 before reaching any backend"; `TenantFilterTest` "rejects a JWT …" (two) |
 | Client-supplied identity headers never reach a backend | `TenantFilterTest` "overwrites a client-supplied X-Tenant-Id …", "drops client-supplied identity headers …", "replaces every client-supplied identity header …"; `GatewayIntegrationTest` "does not forward a client-supplied X-User-Email …" |
@@ -381,6 +382,31 @@ Open decisions:
     open with "the documents do not contain…". A prompt change needs a full-generation run on
     both engines, not only `--retrieval-only`, and the normal run's teardown deletes the
     `e2e` corpus, so compare runs with `--no-setup` on one seeding.
+- **Memory budget: everything shares one 16 GB host (Ubuntu) or a 10 GiB Docker VM (Mac).**
+  - Measured peaks (2026-10-11, harness seeding 715 documents, then a 40-page PDF with tables):
+    the stack totals about 6 GB.
+
+    | Service | Peak | Limit |
+    |---|---|---|
+    | ingestion-service (docling, OCR off) | 1.9 GB | `INGESTION_MEMORY_LIMIT`, default 3G |
+    | clickhouse | 1.0 GB | 1536M |
+    | langfuse-web | 1.0 GB | 2G |
+    | rag-service | 0.7 GB | 1536M |
+    | document-service | 0.6 GB | 1G |
+    | api-gateway | 0.4 GB | 768M |
+    | admin-service | 0.35 GB | 768M |
+    | data-loader | 0.3 GB | 1G |
+
+  - Limits sit at about 1.5–2 times the peak, so a runaway service is OOM-killed inside its own
+    container instead of taking the host's memory, where the kernel would pick LMForge's
+    `llama-server` (seen 2026-10-11).
+  - The Ubuntu host also runs LMForge: about 6 GB with qwen3.5:2b, of which 2 GiB is the chat
+    prompt cache (`LMFORGE_LLAMACPP_CACHE_RAM_MIB`).
+  - JVM services size their heap from the limit: `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=70`.
+    Without a limit the JVM takes 25% of host RAM, about 4 GB each on Ubuntu.
+  - Reservations must stay below limits, including `docker-compose.gpu.yml`'s; Docker refuses
+    otherwise. `tests/scripts/test_compose_memory_limits.py` checks both.
+  - Raise `INGESTION_MEMORY_LIMIT` before enabling OCR or VLM page routing, and re-measure.
 - **Images ignore `pyproject.toml` ranges.**
   - What a Python image contains is exactly `uv.lock`, so a dependency added without `uv lock`
     fails the build.
@@ -506,3 +532,7 @@ Runbook:
     stream.
   - Harness: abstention judged from the opening sentence.
   - document-service's cleanup-job start and cancel tests hold the job active instead of racing it.
+- **PR-04 — memory limits and LMForge 0.2.1 (2026-10-11):**
+  - Memory limits on every long-running service, sized from measured peaks; JVM heaps follow
+    their limit; the clickhouse limit raised from 1G (it peaked at 1.0 GB).
+  - LMForge minimum is 0.2.1 (the probability-score release).
