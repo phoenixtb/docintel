@@ -168,7 +168,8 @@ class TestPromptBuilderMessages:
 
         The all-or-nothing rule made small models refuse when the context held
         a related clause (Arca's blockchain-administrator fee for a question
-        about crypto payment provisions).
+        about crypto payment provisions). The refusal is framed as the whole
+        reply so models do not append it to an answer they just gave.
         """
         from src.components.prompt import PromptBuilder
         Document = get_document_class()
@@ -177,8 +178,8 @@ class TestPromptBuilderMessages:
             documents=[Document(content="Clause.", meta={})], query="q"
         )["messages"][0].text
 
-        assert "answers only part of the question" in system
-        assert "only when no retrieved chunk is relevant" in system
+        assert "answers only part of the question, answer that part" in system
+        assert "If no retrieved chunk is relevant to the question, the whole reply is" in system
 
 
 @pytest.mark.unit
