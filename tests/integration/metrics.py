@@ -45,6 +45,10 @@ ABSTENTION_PHRASES = [
     "unable to find",
     "don't have that information",
     "cannot provide",
+    "do not contain",
+    "does not contain",
+    "do not cover",
+    "does not cover",
 ]
 
 
@@ -108,9 +112,19 @@ def retrieval_metrics(
 # Abstention helpers (heuristic, no LLM needed)
 # ---------------------------------------------------------------------------
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
 def is_abstention(answer: str) -> bool:
-    """Heuristic: does the answer indicate no relevant information was found?"""
-    lower = answer.lower()
+    """Heuristic: does the answer open by saying the documents lack the information?
+
+    Only the opening sentence decides. The generation prompt asks for partial
+    answers (rag-service SYSTEM_PROMPT_SECURE): content first, then a sentence on
+    what the documents do not cover. Matching anywhere in the text scored those
+    as abstentions.
+    """
+    opening = next((s for s in _SENTENCE_SPLIT.split(answer.strip()) if s.strip()), "")
+    lower = opening.lower()
     return any(phrase in lower for phrase in ABSTENTION_PHRASES)
 
 
@@ -123,7 +137,6 @@ def abstention_correct(answer: str, expect_abstention: bool) -> bool:
 # Citation coverage (G6 — heuristic, no LLM needed)
 # ---------------------------------------------------------------------------
 
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 _CITATION_MARKER = re.compile(r"\[(\d+)\]")
 
 

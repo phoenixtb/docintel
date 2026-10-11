@@ -148,11 +148,15 @@ if [[ "$1" == "--all" ]]; then
     echo ""
     echo -e "${GREEN}All services built.${NC}"
     echo ""
-    read -rp "Restart services? (y/N): " restart
-    if [[ "$restart" =~ ^[Yy]$ ]]; then
-        # shellcheck disable=SC2086
-        docker compose $COMPOSE_FILES up -d
-        echo -e "${GREEN}Services restarted.${NC}"
+    # Only ask on a terminal: without one `read` hits EOF and `set -e` would turn
+    # a successful build into exit 1.
+    if [ -t 0 ]; then
+        read -rp "Restart services? (y/N): " restart || restart=""
+        if [[ "$restart" =~ ^[Yy]$ ]]; then
+            # shellcheck disable=SC2086
+            docker compose $COMPOSE_FILES up -d
+            echo -e "${GREEN}Services restarted.${NC}"
+        fi
     fi
     exit 0
 fi
@@ -160,117 +164,23 @@ fi
 # ==============================================================================
 # Interactive multi-select menu
 # ==============================================================================
-
-# State
-selected=()
+MENU_LABELS=()
 for i in "${!SERVICES[@]}"; do
-    selected+=("false")
+    MENU_LABELS+=("$(printf '%-20s %s' "${SERVICES[$i]}" "${DESCRIPTIONS[$i]}")")
 done
-cursor=0
 
-# Terminal control
-cursor_to()  { printf "\033[%s;0H" "$1"; }
-clear_line() { printf "\033[2K"; }
-bold()       { printf "\033[1m%s\033[0m" "$1"; }
+# shellcheck source=lib/menu.sh
+source "${SCRIPT_DIR}/lib/menu.sh"
 
-SAVED_TTY=$(stty -g 2>/dev/null)
-cleanup() {
-    stty "$SAVED_TTY" 2>/dev/null
-    printf "\033[?25h"
-    echo ""
-}
-trap cleanup EXIT INT TERM
-
-draw_menu() {
-    local start_row=$1
-
-    for i in "${!SERVICES[@]}"; do
-        cursor_to $((start_row + i))
-        clear_line
-
-        local prefix="  "
-        local check="[ ]"
-        local name_color="${NC}"
-        local desc_color="${DIM}"
-
-        if [[ "${selected[$i]}" == "true" ]]; then
-            check="${GREEN}[x]${NC}"
-        fi
-
-        if [[ $i -eq $cursor ]]; then
-            prefix="${CYAN}▸ ${NC}"
-            name_color="${BOLD}${CYAN}"
-        fi
-
-        printf "  %b %b ${name_color}%-20s${NC} ${desc_color}%s${NC}\n" \
-            "$prefix" "$check" "${SERVICES[$i]}" "${DESCRIPTIONS[$i]}"
-    done
-
-    # Footer
-    cursor_to $((start_row + ${#SERVICES[@]} + 1))
-    clear_line
-    
-    local count=0
-    for s in "${selected[@]}"; do [[ "$s" == "true" ]] && ((count++)); done
-
-    if [[ $count -gt 0 ]]; then
-        printf "  ${YELLOW}${count} selected${NC}  "
-    fi
-    printf "${DIM}↑↓ navigate • space select • a all • enter build • q quit${NC}"
-}
-
-# Draw header
 echo ""
 echo -e "${BOLD}DocIntel Build Tool${NC}"
-echo -e "${DIM}Select services to build:${NC}"
 echo ""
-
-start_row=5
-printf "\033[?25l"
-stty -echo -icanon min 1 time 0 2>/dev/null
-
-draw_menu $start_row
-
-while IFS= read -r -n1 -s key; do
-    if [[ "$key" == $'\x1b' ]]; then
-        IFS= read -r -n2 -s -t 1 seq
-        case "$seq" in
-            '[A') ((cursor > 0)) && ((cursor--)) ;;
-            '[B') ((cursor < ${#SERVICES[@]} - 1)) && ((cursor++)) ;;
-        esac
-    elif [[ "$key" == '' ]]; then
-        break
-    elif [[ "$key" == ' ' ]]; then
-        [[ "${selected[$cursor]}" == "true" ]] && selected[$cursor]="false" || selected[$cursor]="true"
-    elif [[ "$key" == 'a' || "$key" == 'A' ]]; then
-        any_unselected=false
-        for s in "${selected[@]}"; do [[ "$s" == "false" ]] && any_unselected=true; done
-        for i in "${!selected[@]}"; do
-            [[ "$any_unselected" == "true" ]] && selected[$i]="true" || selected[$i]="false"
-        done
-    elif [[ "$key" == 'q' || "$key" == 'Q' ]]; then
-        for i in $(seq 0 $((${#SERVICES[@]} + 2))); do cursor_to $((start_row + i)); clear_line; done
-        cursor_to $start_row
-        echo -e "${DIM}Cancelled.${NC}"
-        exit 0
-    fi
-    draw_menu $start_row
-done
-
-# Restore terminal before any further reads (e.g. "Restart?" prompt)
-stty "$SAVED_TTY" 2>/dev/null
-printf "\033[?25h"
-
-# Move cursor below menu
-cursor_to $((start_row + ${#SERVICES[@]} + 3))
-
-# Collect selected services
 to_build=()
-for i in "${!SERVICES[@]}"; do
-    if [[ "${selected[$i]}" == "true" ]]; then
-        to_build+=("${SERVICES[$i]}")
-    fi
-done
+if ! menu_multiselect to_build "Select services to build" SERVICES MENU_LABELS; then
+    echo -e "${DIM}Cancelled.${NC}"
+    exit 0
+fi
+echo ""
 
 if [[ ${#to_build[@]} -eq 0 ]]; then
     echo -e "${YELLOW}No services selected.${NC}"
@@ -303,7 +213,7 @@ fi
 
 echo -e "${GREEN}All builds successful.${NC}"
 echo ""
-read -rp "Restart built services? (y/N): " restart
+read -rp "Restart built services? (y/N): " restart || restart=""
 if [[ "$restart" =~ ^[Yy]$ ]]; then
     echo ""
     for svc in "${to_build[@]}"; do

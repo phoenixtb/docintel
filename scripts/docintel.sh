@@ -66,79 +66,9 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-# ==============================================================================
-# pick_from_list — reusable arrow-key selector (bash 3.2 compatible)
-# ==============================================================================
-# Arguments:
-#   $1  Title line shown above the list
-#   $2  Name of array containing option keys   (e.g. MY_OPTS)
-#   $3  Name of array containing display labels (e.g. MY_LABELS)
-#   $4  Index of the item to pre-select (0-based, default 0)
-#
-# Returns: sets global PICK_RESULT to the selected key
-# ==============================================================================
-pick_from_list() {
-    local title="$1"
-    local opts_name="$2"
-    local lbls_name="$3"
-    local preselect="${4:-0}"
-
-    local cur=$preselect
-    local n
-    eval "n=\${#${opts_name}[@]}"
-
-    local _pick_saved_tty
-    _pick_saved_tty=$(stty -g 2>/dev/null)
-
-    _draw_pick() {
-        local row=$1 i _lbl
-        printf "\033[%s;0H" "$row"
-        printf "\033[2K"
-        echo -e "  ${BOLD}${title}${NC}"
-        echo ""
-        for (( i = 0; i < n; i++ )); do
-            eval "_lbl=\${${lbls_name}[$i]}"
-            printf "\033[2K"
-            if [[ $i -eq $cur ]]; then
-                printf "  ${CYAN}▸ ${BOLD}%s${NC}\n" "$_lbl"
-            else
-                printf "    %s\n" "$_lbl"
-            fi
-        done
-        printf "\033[2K"
-        printf "\n  ${DIM}↑↓ navigate • enter select${NC}"
-    }
-
-    local start_row=10
-    printf "\033[?25l"
-    stty -echo -icanon min 1 time 0 2>/dev/null
-
-    _draw_pick "$start_row"
-
-    local key seq
-    while IFS= read -r -n1 -s key; do
-        if [[ "$key" == $'\x1b' ]]; then
-            # -t 1 is bash 3.2 compatible (macOS); fractional timeouts require bash 4+.
-            # Arrow keys send ESC + 2 bytes almost instantaneously — the 1s timeout
-            # is just a guard for a bare Escape keypress.
-            IFS= read -r -n2 -s -t 1 seq || true
-            case "$seq" in
-                '[A'|'OA') [[ $cur -gt 0 ]]       && (( cur-- )) || true ;;
-                '[B'|'OB') [[ $cur -lt $((n-1)) ]] && (( cur++ )) || true ;;
-            esac
-        elif [[ "$key" == '' ]]; then
-            break
-        fi
-        _draw_pick "$start_row"
-    done
-
-    stty "$_pick_saved_tty" 2>/dev/null
-    printf "\033[?25h"
-
-    printf "\033[%s;0H" $((start_row + n + 3))
-
-    eval "PICK_RESULT=\${${opts_name}[$cur]}"
-}
+# Arrow-key menus (menu_select / menu_multiselect), shared with the other scripts
+# shellcheck source=lib/menu.sh
+source "${SCRIPT_DIR}/lib/menu.sh"
 
 # ==============================================================================
 # resolve_llm_engine — reads defaults.env then .env, returns engine name
@@ -235,8 +165,7 @@ dispatch_action() {
             echo -e "  ${DIM}Current: ${_current_engine}${NC}"
             echo ""
 
-            pick_from_list "LLM Engine" ENGINE_OPTS ENGINE_LBLS "$_preselect"
-            _chosen_engine="$PICK_RESULT"
+            menu_select _chosen_engine "LLM Engine" ENGINE_OPTS ENGINE_LBLS "$_preselect" --cancel || return 0
 
             echo ""
             echo -e "  ${GREEN}✓${NC} Engine: ${BOLD}${_chosen_engine}${NC}"
@@ -311,15 +240,14 @@ dispatch_action() {
         read_profile
         print_profile_summary
 
-        PROFILE_OPTS=("auto" "cpu" "cu126" "cu128" "cu129" "cu130" "clear")
+        PROFILE_OPTS=("auto" "cpu" "cu126" "cu128" "cu129" "cu130")
         PROFILE_LBLS=(
-            "Auto-detect       Re-run hardware detection on next build"
+            "Auto-detect       Remove the override; re-detect hardware on next build"
             "cpu               CPU-only PyTorch (~3.4 GB lighter images)"
             "cu126             NVIDIA CUDA 12.6 (driver >= 545)"
             "cu128             NVIDIA CUDA 12.8 (driver >= 555)"
             "cu129             NVIDIA CUDA 12.9 (driver >= 565)"
             "cu130             NVIDIA CUDA 13.0 (driver >= 580)"
-            "Clear override    Remove .docintel-profile (restore auto-detect)"
         )
 
         # Pre-select current profile
@@ -331,15 +259,11 @@ dispatch_action() {
         done
 
         echo ""
-        pick_from_list "Select hardware profile" PROFILE_OPTS PROFILE_LBLS "$_pre"
-        _chosen="$PICK_RESULT"
+        menu_select _chosen "Select hardware profile" PROFILE_OPTS PROFILE_LBLS "$_pre" --cancel || return 0
 
         echo ""
         case "$_chosen" in
             auto)
-                clear_profile_override
-                ;;
-            clear)
                 clear_profile_override
                 ;;
             cpu|cu126|cu128|cu129|cu130)
@@ -381,8 +305,7 @@ dispatch_action() {
             [ "${DCTX_OPTS[$_i]}" = "$_current_pref" ] && _pre=$_i
         done
 
-        pick_from_list "Docker Engine" DCTX_OPTS DCTX_LBLS "$_pre"
-        _chosen_ctx="$PICK_RESULT"
+        menu_select _chosen_ctx "Docker Engine" DCTX_OPTS DCTX_LBLS "$_pre" --cancel || return 0
 
         echo ""
         upsert_env "DOCKER_CONTEXT_PREF" "$_chosen_ctx"
@@ -474,107 +397,55 @@ ACTIONS=(
     "quit"
 )
 
-LABELS=(
-    "Setup              First-time setup (engine + images + models)"
-    "Start              Start all services"
-    "Start (build)      Rebuild images then start all services"
-    "Stop               Stop all services (preserves containers)"
-    "Build              Rebuild services (interactive selector)"
-    "Status             Show running containers and health"
-    "Logs               Follow service logs"
-    "Test               Run tests (interactive selector)"
-    "Seed Data          Load sample data into running services"
-    "Backup             Back up volumes to archive"
-    "Hardware Profile   View/switch GPU build profile [$_BANNER_PROFILE]"
-    "Docker Engine      View/switch Docker context [$_BANNER_DCTX]"
-    "Cleanup            Stop and remove containers"
-    "Cleanup (data)     Wipe all data volumes (keeps images + models)"
-    "Cleanup (full)     Remove containers, volumes, and models"
-    "Quit"
-)
-
-# Terminal control — interactive path only
-cursor_to()  { printf "\033[%s;0H" "$1"; }
-clear_line() { printf "\033[2K"; }
-
-SAVED_TTY=$(stty -g 2>/dev/null)
-cleanup() {
-    if [ -n "${SAVED_TTY:-}" ]; then
-        stty "$SAVED_TTY" 2>/dev/null
-    fi
-    printf "\033[?25h"
-    echo ""
+build_labels() {
+    LABELS=(
+        "Setup              First-time setup (engine + images + models)"
+        "Start              Start all services"
+        "Start (build)      Rebuild images then start all services"
+        "Stop               Stop all services (preserves containers)"
+        "Build              Rebuild services (interactive selector)"
+        "Status             Show running containers and health"
+        "Logs               Follow service logs"
+        "Test               Run tests (interactive selector)"
+        "Seed Data          Load sample data into running services"
+        "Backup             Back up volumes to archive"
+        "Hardware Profile   View/switch GPU build profile [$_BANNER_PROFILE]"
+        "Docker Engine      View/switch Docker context [$_BANNER_DCTX]"
+        "Cleanup            Stop and remove containers"
+        "Cleanup (data)     Wipe all data volumes (keeps images + models)"
+        "Cleanup (full)     Remove containers, volumes, and models"
+        "Quit"
+    )
 }
-trap cleanup EXIT INT TERM
 
+# Actions that run in this process (status, hw-profile, docker-engine, vLLM
+# setup) come back to the menu; the others exec their script and replace it.
+trap 'printf "\033[?25h"' EXIT
 cursor=0
+while :; do
+    build_labels
+    clear
+    echo ""
+    echo -e "  ${BOLD}DocIntel CLI${NC}"
+    echo -e "  ${DIM}Manage your DocIntel environment${NC}"
+    echo -e "  ${DIM}Hardware profile: ${CYAN}${_BANNER_PROFILE}${NC}${DIM} (source: ${PROFILE_SOURCE})${NC}"
+    echo -e "  ${DIM}Docker engine: ${CYAN}${_BANNER_DCTX}${NC}${DIM} (pref: $(read_docker_pref))${NC}"
+    echo ""
 
-draw_menu() {
-    local start_row=$1
+    menu_select action "Actions" ACTIONS LABELS "$cursor" --cancel || exit 0
+    cursor=$MENU_INDEX
 
-    for i in "${!ACTIONS[@]}"; do
-        cursor_to $((start_row + i))
-        clear_line
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    dispatch_action "$action"
 
-        if [[ $i -eq $cursor ]]; then
-            printf "  ${CYAN}▸ ${BOLD}%s${NC}\n" "${LABELS[$i]}"
-        else
-            if [[ "${ACTIONS[$i]}" == "quit" ]]; then
-                printf "    ${DIM}%s${NC}\n" "${LABELS[$i]}"
-            else
-                printf "    %s\n" "${LABELS[$i]}"
-            fi
-        fi
-    done
+    # Refresh banner values an in-process action may have changed.
+    DOCINTEL_SKIP_GPU_TEST=1 read_profile ${_GLOBAL_PROFILE_FLAG:+--flag-profile="${_GLOBAL_PROFILE_FLAG#--profile=}"}
+    _BANNER_PROFILE="${PROFILE:-cpu}"
+    _BANNER_DCTX="$(docker_context_label)"
 
-    cursor_to $((start_row + ${#ACTIONS[@]} + 1))
-    clear_line
-    printf "  ${DIM}↑↓ navigate • enter select • q quit${NC}"
-}
-
-# Header
-clear
-echo ""
-echo -e "  ${BOLD}DocIntel CLI${NC}"
-echo -e "  ${DIM}Manage your DocIntel environment${NC}"
-echo -e "  ${DIM}Hardware profile: ${CYAN}${_BANNER_PROFILE}${NC}${DIM} (source: ${PROFILE_SOURCE})${NC}"
-echo -e "  ${DIM}Docker engine: ${CYAN}${_BANNER_DCTX}${NC}${DIM} (pref: $(read_docker_pref))${NC}"
-echo ""
-
-start_row=5
-printf "\033[?25l"
-stty -echo -icanon min 1 time 0 2>/dev/null
-
-draw_menu $start_row
-
-while IFS= read -r -n1 -s key; do
-    if [[ "$key" == $'\x1b' ]]; then
-        _seq=''
-        IFS= read -r -n2 -s -t 1 _seq || true
-        case "$_seq" in
-            '[A'|'OA') [[ $cursor -gt 0 ]]                    && (( cursor-- )) || true ;;
-            '[B'|'OB') [[ $cursor -lt $((${#ACTIONS[@]}-1)) ]] && (( cursor++ )) || true ;;
-        esac
-    elif [[ "$key" == '' ]]; then
-        break
-    elif [[ "$key" == 'q' || "$key" == 'Q' ]]; then
-        cursor_to $((start_row + ${#ACTIONS[@]} + 3))
-        exit 0
-    fi
-    draw_menu $start_row
+    echo ""
+    printf "  ${DIM}Press any key to return to the menu…${NC}"
+    IFS= read -r -s -n1 _ || exit 0
 done
-
-# Move below menu
-cursor_to $((start_row + ${#ACTIONS[@]} + 3))
-
-action="${ACTIONS[$cursor]}"
-
-echo ""
-echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-
-# Restore terminal before exec / sub-menus
-stty "$SAVED_TTY" 2>/dev/null
-printf "\033[?25h"
-
-dispatch_action "$action"

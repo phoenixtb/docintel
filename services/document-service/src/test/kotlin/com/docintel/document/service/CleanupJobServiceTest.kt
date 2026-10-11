@@ -59,16 +59,24 @@ class CleanupJobServiceTest {
 
     @Test
     fun `startJob throws when another job is already active`() {
+        // Hold the first job inside its snapshot step; with nothing to delete it could
+        // otherwise finish before the second start on a slow machine (seen on CI).
+        val release = CountDownLatch(1)
         every { documentService.previewCleanup(tenant, noopFilters) } returns 1
-        every { documentService.snapshotMatchingIds(tenant, noopFilters) } returns emptyList()
+        every { documentService.snapshotMatchingIds(tenant, noopFilters) } answers {
+            release.await(5, TimeUnit.SECONDS)
+            emptyList()
+        }
 
         service.startJob(tenant, noopFilters)
-
-        // Second start should fail — first job is still registered as active initially
-        val ex = assertThrows<IllegalStateException> {
-            service.startJob(tenant, noopFilters)
+        try {
+            val ex = assertThrows<IllegalStateException> {
+                service.startJob(tenant, noopFilters)
+            }
+            assertTrue(ex.message!!.contains("already active"))
+        } finally {
+            release.countDown()
         }
-        assertTrue(ex.message!!.contains("already active"))
     }
 
     @Test
