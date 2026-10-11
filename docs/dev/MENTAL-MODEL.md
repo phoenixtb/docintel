@@ -325,6 +325,8 @@ Examples: `tests/chat.spec.ts`, `tests/auth.spec.ts`.
 | A reranker outage, error code, unknown score scale or `use_reranking: false` never turns answers into abstentions; tau applies only to reranker probabilities | `tests/test_reranker.py`; `test_degraded_reranker_answers_from_retrieval_order_without_tau`, `test_reranker_exception_also_answers_from_retrieval_order`, `test_reranking_disabled_does_not_apply_tau_to_fused_scores` |
 | An answerable query keeps its supporting chunks down to the context floor; a weak top chunk abstains even when others clear the floor | `test_answerable_query_keeps_supporting_chunks_down_to_the_context_floor`, `test_query_abstains_when_the_top_chunk_is_below_tau_even_above_the_floor` |
 | The generation prompt asks for a partial answer before refusing | `test_system_prompt_asks_for_partial_answers_before_abstaining` |
+| A refusal appended to a streamed answer is not sent; a bare refusal is | `tests/test_answer_guard.py`; `test_refusal_appended_to_a_streamed_answer_is_not_sent`, `test_a_bare_refusal_from_the_model_is_still_sent` |
+| The harness scores partial answers as answers and opening statements of absence as abstentions | `tests/integration/test_harness.py` `test_partial_answer_with_a_closing_not_covered_note_is_not_an_abstention`, `test_opening_statement_of_absence_is_an_abstention` |
 
 ## 8. Decisions index
 
@@ -367,10 +369,18 @@ Open decisions:
   - With "say *I don't have that information* if not found", `qwen3.5:2b` refused when the
     context held a related but not literal answer (a blockchain-administrator fee for "crypto
     payment provisions").
-  - `SYSTEM_PROMPT_SECURE` therefore asks for what the context covers and what it does not, and
-    keeps the refusal for contexts with nothing relevant.
-  - The integration harness detects abstention by phrase (`tests/integration/metrics.py`), so
-    a prompt change needs a full-generation run, not only `--retrieval-only`.
+  - `SYSTEM_PROMPT_SECURE` therefore asks for the part the context answers plus one sentence on
+    what it does not cover. The refusal (`REFUSAL_SENTENCE` in `src/prompts.py`) is framed as
+    "the whole reply"; phrased as a rule ("say X only when…", "never after an answer") the
+    model appended it to answers more often.
+  - It still sometimes ends a cited answer with the refusal. `src/pipelines/answer_guard.py`
+    holds back stream text that could start that sentence and drops it only when the stream
+    ends on it after real content.
+  - The harness judges abstention from the **opening** sentence (`tests/integration/metrics.py`
+    `is_abstention`): partial answers close with a "not covered" note, and near-miss answers
+    open with "the documents do not contain…". A prompt change needs a full-generation run on
+    both engines, not only `--retrieval-only`, and the normal run's teardown deletes the
+    `e2e` corpus, so compare runs with `--no-setup` on one seeding.
 - **Images ignore `pyproject.toml` ranges.**
   - What a Python image contains is exactly `uv.lock`, so a dependency added without `uv lock`
     fails the build.
@@ -491,5 +501,8 @@ Runbook:
       (`docs/contracts/reranker.md`);
     - tau applies to the top chunk, with a new `rag_min_context_score` (0.20) floor for
       supporting chunks.
-  - Generation prompt: partial answers (what the context covers and lacks) instead of refusing.
+  - Generation prompt: partial answers (what the context covers and lacks) instead of refusing;
+    the refusal is the whole reply, and a refusal appended to an answer is dropped from the
+    stream.
+  - Harness: abstention judged from the opening sentence.
   - document-service's cleanup-job start and cancel tests hold the job active instead of racing it.
