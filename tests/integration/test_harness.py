@@ -125,6 +125,41 @@ def test_answerable_query_with_sources_and_keywords_passes():
 
 
 # ---------------------------------------------------------------------------
+# is_abstention() — partial answers vs abstentions
+# ---------------------------------------------------------------------------
+
+def test_partial_answer_with_a_closing_not_covered_note_is_not_an_abstention():
+    """The prompt asks for content first, then what the documents do not cover."""
+    answer = (
+        "The fund pays the Blockchain Administrator 0.20% of average net assets [1]. "
+        "The documents do not cover payment in cryptocurrency."
+    )
+    assert metrics.is_abstention(answer) is False
+
+
+def test_answer_with_a_not_covered_section_is_not_an_abstention():
+    answer = (
+        "Liability is capped at fees paid in the prior year [1].\n"
+        "**Information Not Covered:** caps for indirect damages."
+    )
+    assert metrics.is_abstention(answer) is False
+
+
+def test_opening_statement_of_absence_is_an_abstention():
+    """A near-miss answer that leads with what is missing, then says what the
+    documents do discuss, is a correct abstention."""
+    answer = (
+        "The retrieved documents do not contain information on deploying a model with "
+        "TensorRT-LLM; they only discuss the Optimum library on AMD GPUs [1]."
+    )
+    assert metrics.is_abstention(answer) is True
+
+
+def test_canned_refusal_is_an_abstention():
+    assert metrics.is_abstention("I don't have that information in the available documents.") is True
+
+
+# ---------------------------------------------------------------------------
 # evaluate() — retrieval_only mode (G3)
 # ---------------------------------------------------------------------------
 
